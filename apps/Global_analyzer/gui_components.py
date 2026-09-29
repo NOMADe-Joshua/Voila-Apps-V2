@@ -293,11 +293,31 @@ class GUIManager:
         # ====================================================================
         self.analysis_data_upload = widgets.FileUpload(
             description="Upload CSV",
+            button_style="primary",
             accept=".csv",
             multiple=False,
             layout={"width": "220px"},
         )
         self.analysis_data_upload_output = widgets.Output()
+        # Which uploaded columns are results (targets); every other numeric
+        # column becomes a process parameter. Hidden until a CSV is uploaded.
+        self.analysis_data_upload_results_selector = widgets.SelectMultiple(
+            description="Result columns:",
+            style={"description_width": "110px"},
+            layout={"width": "450px", "height": "140px"},
+        )
+        self.analysis_data_upload_roles_box = widgets.VBox(
+            [
+                widgets.HTML(
+                    "<p style='color:#666;'>Pick which uploaded columns are "
+                    "<b>results</b> (what you measured and want to optimize, e.g. "
+                    "efficiency). Every other numeric column is treated as a process "
+                    "parameter. Ctrl/Shift-click to select several.</p>"
+                ),
+                self.analysis_data_upload_results_selector,
+            ],
+            layout={"display": "none"},
+        )
 
         # ====================================================================
         # ANALYSIS DATA - ROW FILTERS (e.g. "Fill Factor (JV) >= 0.3")
@@ -469,6 +489,15 @@ class GUIManager:
             description="Goal:",
             style={"description_width": "100px"},
             layout={"width": "200px"},
+        )
+
+        self.bo_n_suggestions = widgets.BoundedIntText(
+            value=5,
+            min=1,
+            max=20,
+            description="Suggestions:",
+            style={"description_width": "90px"},
+            layout={"width": "170px"},
         )
 
         self.suggest_experiments_button = widgets.Button(
@@ -740,6 +769,10 @@ class GUIManager:
             self.recalculate_button.on_click(callbacks["recalculate_analysis_data"])
         if "upload_analysis_csv" in callbacks:
             self.analysis_data_upload.observe(callbacks["upload_analysis_csv"], names="value")
+        if "upload_results_columns_changed" in callbacks:
+            self.analysis_data_upload_results_selector.observe(
+                callbacks["upload_results_columns_changed"], names="value"
+            )
         if "add_row_filter" in callbacks:
             self.add_filter_button.on_click(callbacks["add_row_filter"])
         if "download_analysis_data_preview" in callbacks:
@@ -1036,8 +1069,32 @@ class GUIManager:
             [self.param_summary_output], layout={"padding": "20px"}
         )
 
+        upload_box = widgets.VBox(
+            [
+                widgets.HTML(
+                    "<h4 style='margin:0 0 4px 0;'>\U0001f4e4 Use your own data (optional)</h4>"
+                    "<p style='color:#666; margin:0;'>Upload a CSV to run Correlations, "
+                    "Random Forest, Bayesian Optimization and Experimental on data that "
+                    "never came from a NOMAD batch load. One row per sample, one column per "
+                    "parameter/result (this tab's own 'Download CSV' export works as-is). "
+                    "It replaces the loaded dataset for every \U0001f517 tab until you load "
+                    "NOMAD batches again. A missing sample_id column is generated (row_1, "
+                    "row_2, ...); text columns (e.g. a material name) become ANOVA grouping "
+                    "options; a column named 'datetime' enables Process Drift.</p>"
+                ),
+                widgets.HBox([self.analysis_data_upload, self.analysis_data_upload_output]),
+                self.analysis_data_upload_roles_box,
+            ],
+            layout={
+                "border": "1px solid #cfd8dc",
+                "padding": "10px",
+                "margin": "0 0 12px 0",
+            },
+        )
+
         analysis_data_tab = widgets.VBox(
             [
+                upload_box,
                 widgets.HTML(
                     "<p style='color:#666;'>This is the full dataset loaded on the Parameter "
                     "Summary/Plotting tabs (independent of what's currently selected there). "
@@ -1050,18 +1107,6 @@ class GUIManager:
                     "variables are always process metadata.</b> Uncheck any column you want "
                     "excluded from all five, then click Recalculate.</p>"
                 ),
-                widgets.HTML(
-                    "<h4 style='color:#666;'>Or upload your own data</h4>"
-                    "<p style='color:#666;'>Upload a CSV in this tab's own export format "
-                    "(see 'Download CSV' below) to run Correlations/Random Forest/Bayesian "
-                    "Optimization on data that never came from a NOMAD batch load - e.g. a "
-                    "quick offline experiment. This replaces the currently loaded dataset; "
-                    "a missing sample_id column is generated automatically (row_1, row_2, "
-                    "...). Since a flat exported CSV doesn't preserve which columns were "
-                    "originally results vs. process metadata, every numeric column becomes "
-                    "available as both a target and a supporting variable.</p>"
-                ),
-                widgets.HBox([self.analysis_data_upload, self.analysis_data_upload_output]),
                 widgets.HTML(
                     "<h4 style='color:#666;'>Layer selection</h4>"
                     "<p style='color:#666;'>A process step logged once per fabrication layer "
@@ -1191,6 +1236,46 @@ class GUIManager:
             layout={"padding": "20px"},
         )
 
+        bo_explanation = widgets.Accordion(
+            children=[
+                widgets.HTML(
+                    "<div style='color:#444; line-height:1.5;'>"
+                    "<p><b>1. Fit a surrogate model.</b> A Gaussian Process (GP) is fit to "
+                    "your measured samples: the checked Process Metadata columns as inputs, "
+                    "the target as output. For any parameter combination, the GP returns a "
+                    "predicted target value (mean) and how unsure it is (std). Uncertainty "
+                    "is small near measured samples and grows away from them.</p>"
+                    "<p><b>2. Score candidates.</b> 3000 random parameter combinations are "
+                    "drawn inside the range you have already measured (no extrapolation). "
+                    "Each gets an <i>Expected Improvement</i> (EI) score: how much it is "
+                    "expected to beat your best result so far, averaged over the GP's "
+                    "uncertainty. EI is high where the prediction is good (exploitation) "
+                    "or where the model knows little (exploration).</p>"
+                    "<p><b>3. Pick a batch.</b> Textbook BO picks only the single best-EI "
+                    "point, measures it, refits and repeats, so one run gives one "
+                    "suggestion. Since a lab usually runs several samples at once, this "
+                    "tool uses the <i>Kriging Believer</i> batch method: after picking a "
+                    "point it pretends that point was measured and came out exactly as "
+                    "predicted, updates the GP with that fake result, and picks again. "
+                    "The fake result removes the uncertainty around the first pick, so "
+                    "the next pick goes somewhere else instead of right next to it. "
+                    "This repeats until the requested number of suggestions is reached. "
+                    "With Suggestions = 1 you get exactly one classic BO step.</p>"
+                    "<p><b>Reading the table:</b> suggestions are listed in the order they "
+                    "were picked (#1 is the classic single-step BO choice). "
+                    "<i>predicted</i> and <i>&plusmn; std</i> come from the GP fit on real "
+                    "data only. <i>Expected improvement</i> is the score at the moment the "
+                    "point was picked, i.e. given the earlier picks, so it usually drops "
+                    "down the list. Asking for many suggestions from few samples gives "
+                    "increasingly exploratory (less certain) points; after measuring them, "
+                    "add the new data and run again.</p>"
+                    "</div>"
+                )
+            ],
+            selected_index=None,
+        )
+        bo_explanation.set_title(0, "How are the suggestions calculated?")
+
         bayesian_optimization_tab = widgets.VBox(
             [
                 widgets.HTML(
@@ -1212,10 +1297,12 @@ class GUIManager:
                     '<a href="https://en.wikipedia.org/wiki/Bayesian_optimization" target="_blank">'
                     "Bayesian optimization (Wikipedia)</a></p>"
                 ),
+                bo_explanation,
                 widgets.HBox(
                     [
                         self.bo_target_selector,
                         self.bo_direction_selector,
+                        self.bo_n_suggestions,
                         self.suggest_experiments_button,
                         self.bo_download_button,
                     ]

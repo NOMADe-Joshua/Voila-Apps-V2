@@ -1,4 +1,5 @@
 import ipywidgets as widgets
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import pytest
@@ -13,6 +14,7 @@ from data_manager import (
     get_layer_type_options,
     parse_uploaded_analysis_csv,
     select_layer_row_per_sample,
+    uploaded_numeric_columns,
     variation_warning,
 )
 from experimental_analysis import (
@@ -23,7 +25,7 @@ from experimental_analysis import (
     run_pca,
 )
 from gui_components import GUIManager
-from ml_analysis import estimate_max_bo_steps
+from ml_analysis import estimate_max_bo_steps, suggest_next_experiments
 from plot_manager import PlotManager, bin_numeric_column
 from pydantic import ValidationError
 from utils import (
@@ -592,6 +594,67 @@ def test_parse_uploaded_analysis_csv_generates_sample_id_when_missing():
 
     assert list(df["sample_id"]) == ["row_1", "row_2"]
     assert list(df.columns) == ["sample_id", "rise_pct", "hydration_pct"]
+
+
+def test_uploaded_numeric_columns_skips_sample_id_text_and_constant_columns():
+    df = pd.DataFrame(
+        {
+            "sample_id": [1, 2, 3],
+            "temp": [100, 120, 140],
+            "constant": [5, 5, 5],
+            "material": ["a", "b", "a"],
+            "pce": [15.0, 17.5, 16.0],
+        }
+    )
+
+    assert uploaded_numeric_columns(df) == ["temp", "pce"]
+
+
+def _bo_dataset():
+    rng = np.random.default_rng(0)
+    x1 = rng.uniform(0, 10, 20)
+    x2 = rng.uniform(100, 200, 20)
+    return pd.DataFrame({"x1": x1, "x2": x2, "y": -((x1 - 6) ** 2) - ((x2 - 150) / 10) ** 2})
+
+
+@pytest.mark.parametrize("n_suggestions", [1, 3, 8])
+def test_suggest_next_experiments_returns_requested_number_of_distinct_points(n_suggestions):
+    result = suggest_next_experiments(
+        _bo_dataset(), "y", feature_cols=["x1", "x2"], n_suggestions=n_suggestions
+    )
+
+    suggestions = result["suggestions"]
+    assert len(suggestions) == n_suggestions
+    assert len(suggestions[["x1", "x2"]].drop_duplicates()) == n_suggestions
+
+
+def test_suggest_next_experiments_first_pick_is_the_single_step_bo_choice():
+    df = _bo_dataset()
+    single = suggest_next_experiments(df, "y", feature_cols=["x1", "x2"], n_suggestions=1)
+    batch = suggest_next_experiments(df, "y", feature_cols=["x1", "x2"], n_suggestions=5)
+
+    pd.testing.assert_series_equal(
+        single["suggestions"].iloc[0], batch["suggestions"].iloc[0], check_names=False
+    )
+
+
+def test_suggest_next_experiments_batch_spreads_out_instead_of_clustering():
+    # Kriging Believer should push later picks away from the first one; plain
+    # top-N-by-EI returns near-duplicates of the single best candidate.
+    result = suggest_next_experiments(
+        _bo_dataset(), "y", feature_cols=["x1", "x2"], n_suggestions=5
+    )
+    points = result["suggestions"][["x1", "x2"]].to_numpy()
+    scaled = (points - points.min(axis=0)) / (np.ptp(points, axis=0) + 1e-12)
+    distances = np.linalg.norm(scaled[:, None, :] - scaled[None, :, :], axis=-1)
+    assert distances[np.triu_indices(5, k=1)].min() > 0.05
+
+
+def test_suggest_next_experiments_rejects_out_of_range_suggestion_count():
+    with pytest.raises(ValueError):
+        suggest_next_experiments(_bo_dataset(), "y", feature_cols=["x1", "x2"], n_suggestions=0)
+    with pytest.raises(ValueError):
+        suggest_next_experiments(_bo_dataset(), "y", feature_cols=["x1", "x2"], n_suggestions=21)
 
 
 def test_variation_warning_flags_low_variation_columns():

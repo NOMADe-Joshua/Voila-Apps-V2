@@ -114,6 +114,9 @@ def run_random_forest(
     }
 
 
+MAX_BO_SUGGESTIONS = 20
+
+
 def suggest_next_experiments(
     df: pd.DataFrame,
     target_col: str,
@@ -125,16 +128,28 @@ def suggest_next_experiments(
 ) -> dict:
     """
     Fit a Gaussian Process surrogate model on already-measured samples and suggest
-    the next parameter combinations most likely to improve target_col, ranked by
-    Expected Improvement over randomly sampled candidates within the observed
+    a batch of n_suggestions parameter combinations to measure next, chosen by
+    Expected Improvement (EI) over randomly sampled candidates within the observed
     parameter ranges.
+
+    Classic Bayesian Optimization proposes one point per iteration: fit, pick the
+    EI maximum, measure it, refit. To propose a whole batch without the
+    measurements, this uses the "Kriging Believer" heuristic: after each pick,
+    pretend it was measured and came out exactly at the model's predicted mean,
+    add that fake observation to the training set, re-condition the GP (kernel
+    hyperparameters kept fixed from the real fit) and pick the next EI maximum.
+    The fake point collapses the uncertainty around itself, so later picks move
+    to other promising regions instead of returning near-duplicates of the first.
+    n_suggestions=1 is exactly one ordinary BO step.
 
     This is a single-shot "propose next experiments" step, not a full closed-loop
     optimizer - re-run it after each new batch of measurements comes in.
 
     Returns a dict: target, direction, n_samples, n_features, best_observed,
     suggestions (DataFrame with feature_cols + predicted_<target>, predicted_std,
-    expected_improvement columns, sorted by expected_improvement descending).
+    expected_improvement columns, in the order they were picked). predicted_* come
+    from the GP fit on real data only; expected_improvement is the EI at the
+    moment each point was picked, i.e. given the previous picks in the batch.
     """
     from scipy.stats import norm
     from sklearn.exceptions import ConvergenceWarning
@@ -144,6 +159,8 @@ def suggest_next_experiments(
 
     if direction not in ("maximize", "minimize"):
         raise ValueError("direction must be 'maximize' or 'minimize'")
+    if not 1 <= n_suggestions <= MAX_BO_SUGGESTIONS:
+        raise ValueError(f"n_suggestions must be between 1 and {MAX_BO_SUGGESTIONS}.")
 
     numeric_df = df.select_dtypes(include="number")
     if target_col not in numeric_df.columns:
@@ -191,23 +208,52 @@ def suggest_next_experiments(
     sigma = np.maximum(sigma, 1e-9)
 
     best_observed = y.max() if direction == "maximize" else y.min()
-    improvement = (mu - best_observed) if direction == "maximize" else (best_observed - mu)
-    z = improvement / sigma
-    ei = improvement * norm.cdf(z) + sigma * norm.pdf(z)
-    ei[sigma < 1e-8] = 0.0
 
-    top_idx = np.argsort(ei)[::-1][:n_suggestions]
+    # Kriging Believer batch selection (see docstring). The "believer" GP reuses
+    # the real fit's kernel hyperparameters (optimizer=None), so fake points only
+    # shrink uncertainty around themselves rather than reshaping the model.
+    believer = GaussianProcessRegressor(kernel=gp.kernel_, normalize_y=True, optimizer=None)
+    X_train, y_train = X_scaled, y
+    mu_step, sigma_step = mu, sigma
+    incumbent = best_observed
+    available = np.ones(n_candidates, dtype=bool)
+    picked_idx, picked_ei = [], []
+    for _ in range(min(n_suggestions, n_candidates)):
+        if direction == "maximize":
+            improvement = mu_step - incumbent
+        else:
+            improvement = incumbent - mu_step
+        z = improvement / sigma_step
+        ei = improvement * norm.cdf(z) + sigma_step * norm.pdf(z)
+        ei[sigma_step < 1e-8] = 0.0
+        ei[~available] = -np.inf
 
-    suggestions = pd.DataFrame(candidates[top_idx], columns=feature_cols)
-    suggestions[f"predicted_{target_col}"] = mu[top_idx]
-    suggestions["predicted_std"] = sigma[top_idx]
-    suggestions["expected_improvement"] = ei[top_idx]
+        idx = int(np.argmax(ei))
+        picked_idx.append(idx)
+        picked_ei.append(max(float(ei[idx]), 0.0))
+        available[idx] = False
+
+        fake_y = mu_step[idx]
+        X_train = np.vstack([X_train, candidates_scaled[idx]])
+        y_train = np.append(y_train, fake_y)
+        incumbent = max(incumbent, fake_y) if direction == "maximize" else min(incumbent, fake_y)
+        if len(picked_idx) < n_suggestions:
+            believer.fit(X_train, y_train)
+            mu_step, sigma_step = believer.predict(candidates_scaled, return_std=True)
+            sigma_step = np.maximum(sigma_step, 1e-9)
+
+    suggestions = pd.DataFrame(candidates[picked_idx], columns=feature_cols)
+    suggestions[f"predicted_{target_col}"] = mu[picked_idx]
+    suggestions["predicted_std"] = sigma[picked_idx]
+    suggestions["expected_improvement"] = picked_ei
     suggestions = suggestions.reset_index(drop=True)
     logger.debug(
-        "suggest_next_experiments: target=%s, direction=%s, n_samples=%d, best_observed=%.4g",
+        "suggest_next_experiments: target=%s, direction=%s, n_samples=%d, "
+        "n_suggestions=%d, best_observed=%.4g",
         target_col,
         direction,
         len(model_df),
+        len(suggestions),
         best_observed,
     )
 

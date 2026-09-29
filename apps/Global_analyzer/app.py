@@ -41,6 +41,7 @@ from data_manager import (
     get_layer_type_options,
     parse_uploaded_analysis_csv,
     select_layer_row_per_sample,
+    uploaded_numeric_columns,
     variation_warning,
 )
 from gui_components import GUIManager
@@ -121,6 +122,11 @@ class SampleDataExplorer:
         self._last_correlation_result = None
         self._last_rf_result = None
         self._last_bo_result = None
+        # A user-uploaded CSV (issue #40) replaces the NOMAD-built dataset until
+        # the next batch load; kept separately so Recalculate re-applies it
+        # instead of rebuilding from (possibly empty) NOMAD data.
+        self._uploaded_df = None
+        self._updating_upload_roles = False
 
         # Connect callbacks
         self._connect_callbacks()
@@ -143,6 +149,7 @@ class SampleDataExplorer:
                 "suggest_experiments": self._on_suggest_experiments,
                 "recalculate_analysis_data": self._on_recalculate_analysis_data,
                 "upload_analysis_csv": self._on_upload_analysis_csv,
+                "upload_results_columns_changed": self._on_upload_results_columns_changed,
                 "add_row_filter": self._on_add_row_filter,
                 "download_analysis_data_preview": self._on_download_analysis_data_preview,
                 "download_correlations": self._on_download_correlations,
@@ -300,7 +307,12 @@ class SampleDataExplorer:
         measurement result, on sample_id. Populates self.analysis_df and the
         checked-by-default Results/Process Metadata column lists shown in the
         Analysis Data tab's checkboxes, and refreshes the variation-count warning.
+        An uploaded CSV, while active, is re-applied instead.
         """
+        if self._uploaded_df is not None:
+            self._apply_uploaded_dataset()
+            return
+
         self.gui.set_layer_selectors(get_layer_type_options(self.data_manager.current_metadata))
 
         process_df = self._build_process_dataframe()
@@ -490,12 +502,13 @@ class SampleDataExplorer:
         self._rerun_active_analyses()
 
     def _on_upload_analysis_csv(self, change):
-        """Replace the shared analysis dataset with a user-uploaded CSV (in the
-        Analysis Data tab's own export format), bypassing the NOMAD batch-load
-        pipeline entirely (issue #40) - e.g. for a quick offline experiment
-        that has nothing to do with a NOMAD-tracked batch. Since a flat
-        exported CSV doesn't preserve which columns were originally results
-        vs. process metadata, every numeric column is offered as both.
+        """Replace the shared analysis dataset with a user-uploaded CSV,
+        bypassing the NOMAD batch-load pipeline entirely (issue #40) - e.g. for
+        a quick offline experiment that has nothing to do with a NOMAD-tracked
+        batch. A flat CSV doesn't say which columns are results and which are
+        process parameters, so the user picks the results in a selector that
+        appears after upload (default: the last numeric column, which is where
+        this tab's own "Download CSV" export puts results).
         """
         uploaded = change["new"]
         if not uploaded:
@@ -511,30 +524,63 @@ class SampleDataExplorer:
                 print(f"❌ Could not read CSV: {e}")
                 return
 
-            numeric_cols = [
-                col
-                for col in df.select_dtypes(include="number").columns
-                if df[col].dropna().nunique() > 1
-            ]
-            if not numeric_cols:
-                print("❌ No usable numeric columns found (need at least 2 distinct values each).")
+            numeric_cols = uploaded_numeric_columns(df)
+            if len(numeric_cols) < 2:
+                print(
+                    "❌ Need at least 2 numeric columns with 2+ distinct values each "
+                    "(one result and one parameter)."
+                )
                 return
 
-            self.full_analysis_df = df
-            self.analysis_metadata_cols = numeric_cols
-            self.analysis_results_cols = numeric_cols
-            self.gui.set_layer_selectors({})
-            self.gui.set_analysis_columns(self.analysis_results_cols, self.analysis_metadata_cols)
-            sample_ids = sorted(df["sample_id"].unique())
-            self.gui.set_sample_exclusion_checklist(sample_ids, self._on_sample_exclusion_toggled)
-            self._apply_filters()
-            self._refresh_variation_warning()
+            self._uploaded_df = df
+            self._updating_upload_roles = True
+            try:
+                selector = self.gui.analysis_data_upload_results_selector
+                selector.options = numeric_cols
+                selector.value = (numeric_cols[-1],)
+            finally:
+                self._updating_upload_roles = False
+            self.gui.analysis_data_upload_roles_box.layout.display = None
+
+            self._apply_uploaded_dataset()
             self._refresh_ml_target_options()
             self._refresh_experimental_options()
             print(
                 f"✓ Loaded {len(df)} row(s), {len(numeric_cols)} usable numeric column(s) "
-                "from the uploaded CSV."
+                "from the uploaded CSV. Pick the result column(s) below."
             )
+        # Reset so picking the same (edited) file again still fires a change.
+        self.gui.analysis_data_upload.value = ()
+        self._rerun_active_analyses()
+
+    def _on_upload_results_columns_changed(self, change):
+        """The user changed which uploaded columns count as results - re-split
+        and refresh every tab reading the shared dataset."""
+        if self._updating_upload_roles or self._uploaded_df is None:
+            return
+        self._apply_uploaded_dataset()
+        self._refresh_ml_target_options()
+        self._refresh_experimental_options()
+        self._rerun_active_analyses()
+
+    def _apply_uploaded_dataset(self):
+        """Make the uploaded CSV the shared analysis dataset: the columns picked
+        in the Result columns selector become Results, every other usable
+        numeric column becomes Process Metadata (never both, so a column can't
+        end up predicting itself or appear twice in the scatter matrix)."""
+        df = self._uploaded_df
+        numeric_cols = uploaded_numeric_columns(df)
+        results = set(self.gui.analysis_data_upload_results_selector.value)
+
+        self.full_analysis_df = df
+        self.analysis_results_cols = [c for c in numeric_cols if c in results]
+        self.analysis_metadata_cols = [c for c in numeric_cols if c not in results]
+        self.gui.set_layer_selectors({})
+        self.gui.set_analysis_columns(self.analysis_results_cols, self.analysis_metadata_cols)
+        sample_ids = sorted(df["sample_id"].unique())
+        self.gui.set_sample_exclusion_checklist(sample_ids, self._on_sample_exclusion_toggled)
+        self._apply_filters()
+        self._refresh_variation_warning()
 
     def _rerun_active_analyses(self):
         """Re-run whichever of Correlations/RF/BO already produced a result, so
@@ -575,9 +621,13 @@ class SampleDataExplorer:
             self._update_status("⚠️ Please select at least one batch.")
             return
 
-        # Clear old data
+        # Clear old data (including an uploaded CSV, which a batch load replaces)
         self.data_manager.current_results = {}
         self.data_manager.current_metadata = {}
+        self._uploaded_df = None
+        self.gui.analysis_data_upload_roles_box.layout.display = "none"
+        with self.gui.analysis_data_upload_output:
+            clear_output()
 
         self.gui.plot_widget.data = []
         self.gui.plot_widget.update_layout(title='Select data and click "Create Plot"')
@@ -1610,6 +1660,7 @@ class SampleDataExplorer:
                     target,
                     feature_cols=feature_cols,
                     direction=direction,
+                    n_suggestions=self.gui.bo_n_suggestions.value,
                 )
             except ValueError as e:
                 print(f"⚠️ {e}")
@@ -1651,10 +1702,13 @@ class SampleDataExplorer:
             steps_estimate = ml.estimate_max_bo_steps(result["n_features"])
 
             summary = (
-                f"### Suggested next experiments to {result['direction']} `{target}`\n\n"
+                f"### {len(suggestions)} suggested next experiment(s) to "
+                f"{result['direction']} `{target}`\n\n"
                 f"- Samples used: **{result['n_samples']}**\n"
                 f"- Best observed so far: **{result['best_observed']:.4g}**\n"
-                f"- {steps_estimate['rationale']}\n\n" + "\n".join(table_lines)
+                f"- {steps_estimate['rationale']}\n"
+                "- Listed in the order they were picked as one batch (see 'How are the "
+                "suggestions calculated?' above).\n\n" + "\n".join(table_lines)
             )
             ipy_display(Markdown(summary))
             self.plot_manager.create_bo_suggestions_plot(suggestions, target)
