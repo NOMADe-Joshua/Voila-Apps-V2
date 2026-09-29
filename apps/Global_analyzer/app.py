@@ -209,6 +209,37 @@ class SampleDataExplorer:
                 default = next((c for c in numeric_cols if "efficiency" in c.lower()), None)
                 selector.value = default if default else numeric_cols[0]
 
+        self._refresh_bo_search_space()
+
+    def _refresh_bo_search_space(self):
+        """Rebuild the BO tab's search-space rows for the checked Process
+        Metadata columns, defaulting each to its observed range and to integer
+        when every measured value is a whole number."""
+        if self.analysis_df is None or self.analysis_df.empty:
+            self.gui.set_bo_search_space([])
+            return
+        checked_metadata = set(self.gui.get_checked_metadata_columns())
+        cols = [
+            c
+            for c in self.analysis_metadata_cols
+            if c in checked_metadata and c in self.analysis_df.columns
+        ]
+        integer_cols = set(ml.detect_integer_columns(self.analysis_df, cols))
+        defaults = []
+        for col in cols:
+            values = pd.to_numeric(self.analysis_df[col], errors="coerce").dropna()
+            if values.empty:
+                continue
+            defaults.append(
+                {
+                    "col": col,
+                    "min": float(values.min()),
+                    "max": float(values.max()),
+                    "integer": col in integer_cols,
+                }
+            )
+        self.gui.set_bo_search_space(defaults)
+
     def _build_process_dataframe(self) -> Optional[pd.DataFrame]:
         """Outer-merge every process/preparation metadata type currently loaded
         (data_manager.current_metadata) into one row-per-sample_id dataframe.
@@ -1654,6 +1685,15 @@ class SampleDataExplorer:
                 self._last_bo_result = None
                 return
 
+            space = self.gui.get_bo_search_space()
+            bounds = {c: (space[c]["min"], space[c]["max"]) for c in feature_cols if c in space}
+            integer_cols = [c for c in feature_cols if c in space and space[c]["integer"]]
+            fixed = {
+                c: space[c]["fixed"]
+                for c in feature_cols
+                if c in space and space[c]["fixed"] is not None
+            }
+
             try:
                 result = ml.suggest_next_experiments(
                     self.analysis_df,
@@ -1661,6 +1701,9 @@ class SampleDataExplorer:
                     feature_cols=feature_cols,
                     direction=direction,
                     n_suggestions=self.gui.bo_n_suggestions.value,
+                    bounds=bounds,
+                    integer_cols=integer_cols,
+                    fixed=fixed,
                 )
             except ValueError as e:
                 print(f"⚠️ {e}")
@@ -1690,8 +1733,12 @@ class SampleDataExplorer:
                 "| " + " | ".join(header_cols) + " |",
                 "|" + "---|" * len(header_cols),
             ]
+            integer_set = set(result["integer_cols"])
             for _, row in suggestions.iterrows():
-                values = [f"{row[c]:.3g}" for c in display_feature_cols]
+                values = [
+                    f"{int(row[c])}" if c in integer_set else f"{row[c]:.3g}"
+                    for c in display_feature_cols
+                ]
                 table_lines.append(
                     "| "
                     + " | ".join(values)
@@ -1701,13 +1748,41 @@ class SampleDataExplorer:
 
             steps_estimate = ml.estimate_max_bo_steps(result["n_features"])
 
+            upper = result["length_scale_upper"]
+            length_scale_lines = "\n".join(
+                f"  - `{col}`: {ls:.2g}"
+                + (" (at the upper limit: no detectable effect)" if ls >= upper * 0.99 else "")
+                for col, ls in sorted(result["length_scales"].items(), key=lambda kv: kv[1])
+            )
+
+            # Once the batch has covered the promising regions, EI for the rest
+            # is ~0 and later picks are close to arbitrary - say so.
+            ei = suggestions["expected_improvement"].to_numpy()
+            low_ei = [i + 1 for i, v in enumerate(ei) if ei[0] > 0 and v < 1e-3 * ei[0]]
+            low_ei_note = (
+                f"- ⚠️ Suggestion(s) #{low_ei[0]} onward have near-zero expected "
+                "improvement: given the earlier picks, the model sees little left to "
+                "gain, so these are weakly motivated. Fewer suggestions, or measuring "
+                "the first ones before asking again, is usually better.\n"
+                if low_ei
+                else ""
+            )
+
             summary = (
                 f"### {len(suggestions)} suggested next experiment(s) to "
                 f"{result['direction']} `{target}`\n\n"
                 f"- Samples used: **{result['n_samples']}**\n"
-                f"- Best observed so far: **{result['best_observed']:.4g}**\n"
+                f"- Best observed so far: **{result['best_observed']:.4g}**; best "
+                f"predicted at a measured sample (what EI tries to beat): "
+                f"**{result['incumbent']:.4g}**\n"
+                f"- Fitted measurement noise: **± {result['noise_sd']:.2g}** (1 SD, "
+                f"in `{target}` units)\n"
+                f"- Length scales (0-1 scaled; smaller = stronger effect; estimated "
+                f"from the data, so uncertain with few or noisy samples):\n"
+                f"{length_scale_lines}\n"
                 f"- {steps_estimate['rationale']}\n"
-                "- Listed in the order they were picked as one batch (see 'How are the "
+                + low_ei_note
+                + "- Listed in the order they were picked as one batch (see 'How are the "
                 "suggestions calculated?' above).\n\n" + "\n".join(table_lines)
             )
             ipy_display(Markdown(summary))

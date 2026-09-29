@@ -516,6 +516,30 @@ class GUIManager:
 
         self.bo_output = widgets.Output()
 
+        # Per-parameter search space (min / max / integer / fixed value), rebuilt
+        # by set_bo_search_space() whenever the checked metadata columns change.
+        self.bo_search_space_box = widgets.VBox()
+        self.bo_search_space_accordion = widgets.Accordion(
+            children=[
+                widgets.VBox(
+                    [
+                        widgets.HTML(
+                            "<p style='color:#666;'>Where suggestions may be placed. "
+                            "Defaults to the range already measured. Narrow or widen a "
+                            "range, mark a parameter as <b>integer</b> (only whole numbers "
+                            "are suggested; detected automatically when all measured values "
+                            "are whole numbers), or <b>fix</b> it to one value for every "
+                            "suggestion. Measured samples outside the range still train "
+                            "the model.</p>"
+                        ),
+                        self.bo_search_space_box,
+                    ]
+                )
+            ],
+            selected_index=None,
+        )
+        self.bo_search_space_accordion.set_title(0, "Search space (optional)")
+
         self.bo_widget = go.FigureWidget()
         self.bo_widget.update_layout(
             height=450,
@@ -920,6 +944,65 @@ class GUIManager:
             checkboxes.append(checkbox)
         self.sample_exclusion_checklist_box.children = checkboxes
 
+    def set_bo_search_space(self, defaults: list) -> None:
+        """(Re)build the BO tab's search-space rows, one per parameter.
+
+        Args:
+            defaults: list of {"col", "min", "max", "integer"} dicts (observed
+                range and detected integer-ness). A column already shown keeps
+                whatever the user entered, matching set_analysis_columns'
+                preserve-or-default pattern.
+        """
+        previous = {row._bo_col: row for row in self.bo_search_space_box.children}
+        rows = []
+        for d in defaults:
+            if d["col"] in previous:
+                rows.append(previous[d["col"]])
+                continue
+            label = widgets.Label(d["col"], layout={"width": "220px"})
+            min_box = widgets.FloatText(
+                value=d["min"],
+                description="min",
+                layout={"width": "150px"},
+                style={"description_width": "30px"},
+            )
+            max_box = widgets.FloatText(
+                value=d["max"],
+                description="max",
+                layout={"width": "150px"},
+                style={"description_width": "30px"},
+            )
+            integer_box = widgets.Checkbox(
+                value=d["integer"], description="integer", indent=False, layout={"width": "80px"}
+            )
+            fix_box = widgets.Checkbox(
+                value=False, description="fix at", indent=False, layout={"width": "65px"}
+            )
+            fix_value = widgets.FloatText(value=d["min"], layout={"width": "90px"}, disabled=True)
+            fix_box.observe(
+                lambda change, fv=fix_value: setattr(fv, "disabled", not change["new"]),
+                names="value",
+            )
+            row = widgets.HBox([label, min_box, max_box, integer_box, fix_box, fix_value])
+            row._bo_col = d["col"]
+            row._bo_widgets = (min_box, max_box, integer_box, fix_box, fix_value)
+            rows.append(row)
+        self.bo_search_space_box.children = rows
+
+    def get_bo_search_space(self) -> dict:
+        """{col: {"min", "max", "integer", "fixed" (None or a value)}} from the
+        BO tab's search-space rows."""
+        space = {}
+        for row in self.bo_search_space_box.children:
+            min_box, max_box, integer_box, fix_box, fix_value = row._bo_widgets
+            space[row._bo_col] = {
+                "min": min_box.value,
+                "max": max_box.value,
+                "integer": integer_box.value,
+                "fixed": fix_value.value if fix_box.value else None,
+            }
+        return space
+
     def get_excluded_sample_ids(self) -> set:
         """sample_ids currently unchecked in the "Exclude specific samples" list."""
         return {
@@ -1244,18 +1327,27 @@ class GUIManager:
                     "your measured samples: the checked Process Metadata columns as inputs, "
                     "the target as output. For any parameter combination, the GP returns a "
                     "predicted target value (mean) and how unsure it is (std). Uncertainty "
-                    "is small near measured samples and grows away from them.</p>"
-                    "<p><b>2. Score candidates.</b> 3000 random parameter combinations are "
-                    "drawn inside the range you have already measured (no extrapolation). "
-                    "Each gets an <i>Expected Improvement</i> (EI) score: how much it is "
-                    "expected to beat your best result so far, averaged over the GP's "
-                    "uncertainty. EI is high where the prediction is good (exploitation) "
+                    "is small near measured samples and grows away from them. Each "
+                    "parameter gets its own <i>length scale</i>: how far you must move it "
+                    "before the target changes. A length scale at the upper limit means "
+                    "the data shows no detectable effect of that parameter. The model also "
+                    "learns a <i>noise</i> level from the scatter between similar samples "
+                    "(e.g. replicates), so it doesn't chase a single lucky result.</p>"
+                    "<p><b>2. Score candidates.</b> 10000 random parameter combinations are "
+                    "drawn inside the search space (default: the range you have already "
+                    "measured; set it under 'Search space'). Integer parameters only take "
+                    "whole numbers; fixed ones keep their value. Each candidate gets an "
+                    "<i>Expected Improvement</i> (EI) score: how much it is expected to "
+                    "beat the current best, averaged over the GP's uncertainty. The current "
+                    "best is the best <i>predicted</i> value among your measured samples, "
+                    "not the best raw measurement, since with noisy data the top measurement "
+                    "is partly luck. EI is high where the prediction is good (exploitation) "
                     "or where the model knows little (exploration).</p>"
                     "<p><b>3. Pick a batch.</b> Textbook BO picks only the single best-EI "
                     "point, measures it, refits and repeats, so one run gives one "
                     "suggestion. Since a lab usually runs several samples at once, this "
                     "tool uses the <i>Kriging Believer</i> batch method: after picking a "
-                    "point it pretends that point was measured and came out exactly as "
+                    "point it pretends that point was measured, without noise, exactly as "
                     "predicted, updates the GP with that fake result, and picks again. "
                     "The fake result removes the uncertainty around the first pick, so "
                     "the next pick goes somewhere else instead of right next to it. "
@@ -1264,11 +1356,12 @@ class GUIManager:
                     "<p><b>Reading the table:</b> suggestions are listed in the order they "
                     "were picked (#1 is the classic single-step BO choice). "
                     "<i>predicted</i> and <i>&plusmn; std</i> come from the GP fit on real "
-                    "data only. <i>Expected improvement</i> is the score at the moment the "
-                    "point was picked, i.e. given the earlier picks, so it usually drops "
-                    "down the list. Asking for many suggestions from few samples gives "
-                    "increasingly exploratory (less certain) points; after measuring them, "
-                    "add the new data and run again.</p>"
+                    "data only; std is the uncertainty of the prediction itself, and a "
+                    "single new measurement will additionally scatter by about the "
+                    "reported noise. <i>Expected improvement</i> is the score at the "
+                    "moment the point was picked, i.e. given the earlier picks, so it "
+                    "usually drops down the list. After measuring, add the new data and "
+                    "run again.</p>"
                     "</div>"
                 )
             ],
@@ -1307,6 +1400,7 @@ class GUIManager:
                         self.bo_download_button,
                     ]
                 ),
+                self.bo_search_space_accordion,
                 self.bo_output,
                 self.bo_widget,
                 self.bo_download_output,
