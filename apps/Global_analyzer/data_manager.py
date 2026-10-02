@@ -65,7 +65,20 @@ def parse_uploaded_analysis_csv(csv_bytes: bytes) -> pd.DataFrame:
     df = pd.read_csv(io.BytesIO(csv_bytes))
     if "sample_id" not in df.columns:
         df.insert(0, "sample_id", [f"row_{i + 1}" for i in range(len(df))])
+    # Always text: sample exclusion matches on checkbox descriptions (strings),
+    # and a numeric id must never be picked up as a numeric feature.
+    df["sample_id"] = df["sample_id"].astype(str)
     return df
+
+
+def uploaded_numeric_columns(df: pd.DataFrame) -> List[str]:
+    """Numeric columns of an uploaded CSV that can feed the analysis tabs: at
+    least two distinct values, and not sample_id (which may itself be numeric)."""
+    return [
+        col
+        for col in df.select_dtypes(include="number").columns
+        if col != "sample_id" and df[col].dropna().nunique() > 1
+    ]
 
 
 def apply_row_filters(df: pd.DataFrame, row_filters: List[dict]) -> pd.DataFrame:
