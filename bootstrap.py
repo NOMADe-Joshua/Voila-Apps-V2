@@ -31,6 +31,7 @@ import builtins
 import contextlib
 import hashlib
 import importlib
+import importlib.util
 import io
 import logging
 import os
@@ -102,6 +103,22 @@ def _apply_proxy_env(config: dict[str, str]) -> None:
     logger.info("Applied local proxy configuration: %s", os.environ["HTTPS_PROXY"])
 
 
+def _build_isolation_args() -> list[str]:
+    """Skip pip's build isolation whenever hatchling is already installed.
+
+    With isolation on, pip downloads the build backend from PyPI into a
+    throwaway environment on every install, even when the kernel already has
+    it. A container with no route to PyPI then fails to build shared/ at all
+    ("Network is unreachable ... No matching distribution found for
+    hatchling"), which is how an Oasis update that cut outbound access took
+    every app down. Building against the local hatchling needs no network as
+    long as the runtime dependencies are already present.
+    """
+    if importlib.util.find_spec("hatchling") is not None:
+        return ["--no-build-isolation"]
+    return []
+
+
 def _pip_install(target: Path) -> tuple[int, str]:
     """Install target, returning pip's exit code and its combined output.
 
@@ -118,6 +135,7 @@ def _pip_install(target: Path) -> tuple[int, str]:
             "install",
             "-q",
             "--disable-pip-version-check",
+            *_build_isolation_args(),
             str(target),
         ],
         capture_output=True,
@@ -128,20 +146,15 @@ def _pip_install(target: Path) -> tuple[int, str]:
     return result.returncode, output
 
 
+# hysprint-utils' own runtime dependencies (shared/pyproject.toml). If pip
+# could not install shared/, these must already be in the image for the
+# sys.path fallback below to be usable.
+SHARED_RUNTIME_MODULES = ("hysprint_utils", "requests", "pandas", "plotly")
+
+
 def _install_shared() -> None:
     shared = REPO_ROOT / "shared"
     returncode, output = _pip_install(shared)
-    if returncode != 0:
-        # The pip output goes in the exception, not the log line: a traceback
-        # always renders in the notebook, whereas a log record only shows if
-        # something configured logging. Putting it in both duplicates a very
-        # long diagnostic in the one place it is hardest to read.
-        logger.error("pip install of %s failed with exit code %d", shared, returncode)
-        raise RuntimeError(
-            f"bootstrap: pip install of {shared} failed with exit code {returncode}.\n{output}"
-        )
-    if output:
-        logger.info("pip install of %s reported:\n%s", shared, output)
 
     # A fresh kernel already ran site.py before this install happened, so it
     # won't pick up the newly installed package on its own until restarted.
@@ -152,6 +165,34 @@ def _install_shared() -> None:
     shared_str = str(shared)
     if shared_str not in sys.path:
         sys.path.insert(0, shared_str)
+
+    if returncode == 0:
+        if output:
+            logger.info("pip install of %s reported:\n%s", shared, output)
+        return
+
+    # The sys.path entry above is what this kernel actually imports from, so a
+    # failed install (typically no route to PyPI) only matters if something
+    # hysprint_utils needs is genuinely missing. Fatal only in that case.
+    missing = [name for name in SHARED_RUNTIME_MODULES if importlib.util.find_spec(name) is None]
+    if not missing:
+        logger.warning(
+            "pip install of %s failed with exit code %d; continuing with it on sys.path:\n%s",
+            shared,
+            returncode,
+            output,
+        )
+        return
+
+    # The pip output goes in the exception, not the log line: a traceback
+    # always renders in the notebook, whereas a log record only shows if
+    # something configured logging. Putting it in both duplicates a very
+    # long diagnostic in the one place it is hardest to read.
+    logger.error("pip install of %s failed with exit code %d", shared, returncode)
+    raise RuntimeError(
+        f"bootstrap: pip install of {shared} failed with exit code {returncode}, "
+        f"and {', '.join(missing)} cannot be imported without it.\n{output}"
+    )
 
 
 def _silence_import_banners() -> None:
