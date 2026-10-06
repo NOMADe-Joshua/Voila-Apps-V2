@@ -6,24 +6,21 @@ Reusable UI components, widgets, forms, and buttons using ipywidgets.
 import base64
 import io
 import json
-import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import ipywidgets as widgets
 import numpy as np
 import pandas as pd
-from data_manager import Variable, VariableType
-from IPython.display import display
-from utils import ValidationUtils
+from data_manager import DataManager, Variable, VariableType
+from IPython.display import HTML, clear_output, display
+from utils import Constants, ValidationUtils
 
 try:
-    import openpyxl  # noqa: F401
+    import openpyxl
 
     HAS_OPENPYXL = True
 except ImportError:
     HAS_OPENPYXL = False
-
-logger = logging.getLogger(__name__)
 
 
 class GUIComponents:
@@ -61,36 +58,12 @@ class GUIComponents:
         """Create algorithm selection interface."""
         # Algorithm dropdown with lab-focused descriptions
         algorithms = {
-            "Latin Hypercube Sampling": (
-                "Ensures each experimental parameter is tested across its full range with "
-                "minimal overlap. Ideal for screening studies and response surface "
-                "methodology in materials research."
-            ),
-            "Sobol Sequences": (
-                "Generates highly uniform experimental designs that efficiently explore "
-                "parameter space. Particularly useful for computational experiments and "
-                "sensitivity analysis of process variables."
-            ),
-            "Halton Sequences": (
-                "Creates systematic experimental designs that avoid clustering of test "
-                "conditions. Well-suited for optimization studies where you need "
-                "consistent coverage of factor combinations."
-            ),
-            "Random Sampling": (
-                "Simple random selection of experimental conditions. Best for baseline "
-                "comparisons or when you need unbiased sampling without assumptions "
-                "about parameter relationships."
-            ),
-            "Uniform Grid Sampling": (
-                "Tests all combinations at regular intervals across parameter ranges. "
-                "Perfect for fundamental studies mapping complete response surfaces "
-                "with systematic precision."
-            ),
-            "Maximin Distance Design": (
-                "Optimizes spacing between experimental points to maximize information "
-                "gain. Excellent for expensive experiments where each test must provide "
-                "maximum insight."
-            ),
+            "Latin Hypercube Sampling": "Ensures each experimental parameter is tested across its full range with minimal overlap. Ideal for screening studies and response surface methodology in materials research.",
+            "Sobol Sequences": "Generates highly uniform experimental designs that efficiently explore parameter space. Particularly useful for computational experiments and sensitivity analysis of process variables.",
+            "Halton Sequences": "Creates systematic experimental designs that avoid clustering of test conditions. Well-suited for optimization studies where you need consistent coverage of factor combinations.",
+            "Random Sampling": "Simple random selection of experimental conditions. Best for baseline comparisons or when you need unbiased sampling without assumptions about parameter relationships.",
+            "Uniform Grid Sampling": "Tests all combinations at regular intervals across parameter ranges. Perfect for fundamental studies mapping complete response surfaces with systematic precision.",
+            "Maximin Distance Design": "Optimizes spacing between experimental points to maximize information gain. Excellent for expensive experiments where each test must provide maximum insight.",
         }
 
         self.algorithm_dropdown = widgets.Dropdown(
@@ -103,19 +76,13 @@ class GUIComponents:
 
         # Algorithm description
         self.algorithm_description = widgets.HTML(
-            value=(
-                f"<span style='color: #555; font-size: 13px;'>"
-                f"<b>Description:</b> {algorithms['Latin Hypercube Sampling']}</span>"
-            ),
+            value=f"<i>{algorithms['Latin Hypercube Sampling']}</i>",
             layout=widgets.Layout(margin="5px 0"),
         )
 
         # Update description when algorithm changes
         def update_description(change):
-            self.algorithm_description.value = (
-                f"<span style='color: #555; font-size: 13px;'>"
-                f"<b>Description:</b> {algorithms[change['new']]}</span>"
-            )
+            self.algorithm_description.value = f"<i>{algorithms[change['new']]}</i>"
 
         self.algorithm_dropdown.observe(update_description, names="value")
 
@@ -244,10 +211,7 @@ class GUIComponents:
             elif format_type == "excel":
                 # Check if openpyxl is available
                 if not HAS_OPENPYXL:
-                    self.export_download_area.value = (
-                        "<p style='color: red;'>Excel export requires openpyxl. "
-                        "Install with: pip install openpyxl</p>"
-                    )
+                    self.export_download_area.value = "<p style='color: red;'>Excel export requires openpyxl. Install with: pip install openpyxl</p>"
                     return
 
                 # Export as Excel with multiple sheets
@@ -285,9 +249,8 @@ class GUIComponents:
                 excel_content = base64.b64encode(buffer.getvalue()).decode()
                 download_link = f"""
                 <p>Complete data package exported as Excel</p>
-                <a download="doe_complete.xlsx"
-                   href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{excel_content}"
-                   style="background-color: #28a745; color: white; padding: 10px 15px;
+                <a download="doe_complete.xlsx" href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{excel_content}" 
+                   style="background-color: #28a745; color: white; padding: 10px 15px; 
                           text-decoration: none; border-radius: 4px; display: inline-block;">
                     📥 Download doe_complete.xlsx
                 </a>
@@ -357,8 +320,7 @@ class GUIComponents:
             <div style='margin: 10px 0; font-weight: bold; color: #555;'>
                 <span style='display: inline-block; width: 150px;'>Variable Name</span>
                 <span style='display: inline-block; width: 120px;'>Type</span>
-                <span style='display: inline-block; width: 200px;'>
-                    Parameters (Min, Max, Step/Categories)</span>
+                <span style='display: inline-block; width: 200px;'>Parameters (Min, Max, Step/Categories)</span>
                 <span style='display: inline-block; width: 150px;'>Description</span>
                 <span style='display: inline-block; width: 40px;'></span>
             </div>
@@ -367,20 +329,13 @@ class GUIComponents:
         # Initialize display
         self._update_variable_display()
 
-        variable_scroll = widgets.Box(
-            children=[self.variable_list],
-            layout=widgets.Layout(
-                max_height="320px", overflow_y="auto", border="1px solid #eeeeee", padding="4px"
-            ),
-        )
-
         return widgets.VBox(
-            [controls, headers, widgets.HTML("<hr style='margin: 5px 0;'>"), variable_scroll]
+            [controls, headers, widgets.HTML("<hr style='margin: 5px 0;'>"), self.variable_list]
         )
 
     def create_sample_size_configurator(self) -> widgets.Widget:
         """Create sample size configuration interface."""
-        # Sample size slider - bar spans from the recommended minimum to 100.
+        # Sample size slider
         self.sample_size_slider = widgets.IntSlider(
             value=25,
             min=4,
@@ -391,42 +346,12 @@ class GUIComponents:
             layout=widgets.Layout(width="400px"),
         )
 
-        # Free-typing number box kept in sync with the slider. Unlike the
-        # slider it has no min/max, so a user can type a value above 100 or
-        # below the recommended minimum and it is used as-is.
-        self.sample_size_input = widgets.IntText(value=25, layout=widgets.Layout(width="80px"))
-
-        self._syncing_sample_size = False
-
-        def _on_slider_change(change: Dict[str, Any]) -> None:
-            if self._syncing_sample_size:
-                return
-            self._syncing_sample_size = True
-            self.sample_size_input.value = change["new"]
-            self._syncing_sample_size = False
-
-        def _on_input_change(change: Dict[str, Any]) -> None:
-            if self._syncing_sample_size:
-                return
-            self._syncing_sample_size = True
-            # Only move the bar; the bar can't visually go below its
-            # recommended-minimum floor or above 100, but the typed value
-            # itself is left untouched either way.
-            slider = self.sample_size_slider
-            self.sample_size_slider.value = max(slider.min, min(change["new"], slider.max))
-            self._syncing_sample_size = False
-
-        self.sample_size_slider.observe(_on_slider_change, names="value")
-        self.sample_size_input.observe(_on_input_change, names="value")
-
         # Minimum size label
         self.min_size_label = widgets.HTML(
             value="<i>Minimum recommended: 4 samples</i>", layout=widgets.Layout(margin="5px 0")
         )
 
-        return widgets.VBox(
-            [widgets.HBox([self.sample_size_slider, self.sample_size_input]), self.min_size_label]
-        )
+        return widgets.VBox([self.sample_size_slider, self.min_size_label])
 
     def create_seed_configurator(self) -> widgets.Widget:
         """Create random seed configuration interface."""
@@ -447,15 +372,12 @@ class GUIComponents:
 
         # Add explanation text
         seed_explanation = widgets.HTML(
-            value=(
-                "<i style='color: #666; font-size: 11px;'>Seed controls randomization - "
-                "same seed produces identical results</i>"
-            ),
+            value="<i style='color: #666; font-size: 11px;'>Seed controls randomization - same seed produces identical results</i>",
             layout=widgets.Layout(margin="5px 0px 0px 10px"),
         )
 
         def generate_new_seed(button):
-            self.random_seed.value = int(np.random.randint(1, 2**31))
+            self.random_seed.value = np.random.randint(1, 10000)
 
         new_seed_button.on_click(generate_new_seed)
 
@@ -518,22 +440,12 @@ class GUIComponents:
     def create_metrics_section(self) -> widgets.Widget:
         """Create quality metrics display section."""
         self.metrics_display = widgets.HTML()
-        return widgets.Box(
-            children=[self.metrics_display],
-            layout=widgets.Layout(
-                height="180px", overflow_y="scroll", border="1px solid #ddd", padding="8px"
-            ),
-        )
+        return self.metrics_display
 
     def create_summary_section(self) -> widgets.Widget:
         """Create summary statistics section."""
         self.summary_display = widgets.HTML()
-        return widgets.Box(
-            children=[self.summary_display],
-            layout=widgets.Layout(
-                height="200px", overflow_y="scroll", border="1px solid #ddd", padding="8px"
-            ),
-        )
+        return self.summary_display
 
     def create_protocol_section(self) -> widgets.Widget:
         """Create experimental protocol section."""
@@ -616,7 +528,7 @@ class GUIComponents:
 
         # Export button
         export_button = widgets.Button(
-            description="Export Table",
+            description="Export Data",
             button_style="success",
             icon="download",
             layout=widgets.Layout(width="150px"),
@@ -676,7 +588,7 @@ class GUIComponents:
                     # Parse using your existing method that handles commas
                     parsed_val = self._parse_float(widget.value)
                     widget.value = str(parsed_val)
-                except Exception:
+                except:
                     widget.value = str(default_val)
 
             return on_submit
@@ -731,22 +643,6 @@ class GUIComponents:
             layout=widgets.Layout(margin="2px 0"),
         )
 
-        # Inline validation: red border when min >= max
-        def _validate_range(change=None):
-            try:
-                if type_selector.value == "categorical":
-                    widget_row.layout.border = ""
-                    return
-                min_val = float(str(min_input.value).replace(",", "."))
-                max_val = float(str(max_input.value).replace(",", "."))
-                widget_row.layout.border = "2px solid #d32f2f" if min_val >= max_val else ""
-            except (ValueError, TypeError):
-                pass
-
-        min_input.observe(lambda c: _validate_range(), names="value")
-        max_input.observe(lambda c: _validate_range(), names="value")
-        type_selector.observe(lambda c: _validate_range(), names="value")
-
         # Store references for data extraction
         widget_row.name_input = name_input
         widget_row.type_selector = type_selector
@@ -795,22 +691,11 @@ class GUIComponents:
         min_samples = max(count**2, 4)
         self.variable_count_label.value = f"<b>Variables: {count}</b> (Min samples: {min_samples})"
 
-        # Update minimum sample size if slider exists. This only moves the
-        # bar's floor/position - it never overwrites a value the user has
-        # typed into sample_size_input, so a deliberately-smaller typed
-        # value keeps working.
+        # Update minimum sample size if slider exists
         if hasattr(self, "sample_size_slider") and count > 0:
-            self._syncing_sample_size = True
-            try:
-                # If the recommended minimum exceeds the bar's cap, raise the
-                # cap so the recommended value stays reachable on the bar.
-                if min_samples > self.sample_size_slider.max:
-                    self.sample_size_slider.max = min_samples
-                self.sample_size_slider.min = min_samples
-                if self.sample_size_slider.value < min_samples:
-                    self.sample_size_slider.value = min_samples
-            finally:
-                self._syncing_sample_size = False
+            self.sample_size_slider.min = min_samples
+            if self.sample_size_slider.value < min_samples:
+                self.sample_size_slider.value = min_samples
             # Update the label too
             if hasattr(self, "min_size_label"):
                 self.min_size_label.value = f"<i>Minimum recommended: {min_samples} samples</i>"
@@ -862,17 +747,19 @@ class GUIComponents:
                 if is_valid:
                     variables.append(variable)
                 else:
-                    logger.warning("Invalid variable %r: %s", name, error_msg)
+                    print(f"Warning: Invalid variable '{name}': {error_msg}")
 
             except Exception as e:
-                logger.warning("Error processing variable: %s", e)
+                print(f"Warning: Error processing variable: {str(e)}")
 
         return variables
 
     def get_sampling_parameters(self) -> Dict[str, Any]:
         """Get sampling parameters from UI."""
         params = {
-            "n_samples": self.sample_size_input.value if hasattr(self, "sample_size_input") else 25,
+            "n_samples": self.sample_size_slider.value
+            if hasattr(self, "sample_size_slider")
+            else 25,
             "random_state": self.random_seed.value if hasattr(self, "random_seed") else 42,
         }
 
@@ -906,44 +793,31 @@ class GUIComponents:
 
     def update_data_table(self, container: widgets.Widget, data: pd.DataFrame):
         """Update data table display."""
+        # Find the Output widget in the container
         output_widget = None
         if hasattr(container, "children") and len(container.children) > 1:
-            output_widget = container.children[1]
+            output_widget = container.children[1]  # Second child should be the Output widget
 
         if output_widget and hasattr(output_widget, "clear_output"):
             with output_widget:
                 output_widget.clear_output(wait=True)
 
                 if len(data) > 0:
-                    display_data = data.head(50)
-
-                    # Smart decimal formatting per column:
-                    # - all integer-valued → no decimals
-                    # - any fractional value → 2 decimal places
-                    fmt = {}
-                    for col in display_data.columns:
-                        if pd.api.types.is_numeric_dtype(display_data[col]):
-                            numeric = pd.to_numeric(display_data[col], errors="coerce").dropna()
-                            if len(numeric) > 0:
-                                fmt[col] = "{:.0f}" if (numeric % 1 == 0).all() else "{:.2f}"
-
-                    # Display with 1-based index
-                    display_copy = display_data.copy()
-                    display_copy.index = range(1, len(display_copy) + 1)
+                    # Show more rows and make it scrollable
+                    display_data = data.head(50)  # Show first 50 rows
 
                     display(
-                        display_copy.style.set_table_attributes(
+                        display_data.style.set_table_attributes(
                             'style="font-size: 12px; width: 100%;"'
-                        ).format(fmt)
+                        ).format(precision=3)
                     )
 
                     if len(data) > 50:
-                        logger.info(
-                            "Showing first 50 of %d samples; full data available for export.",
-                            len(data),
+                        print(
+                            f"\nShowing first 50 of {len(data)} samples. Full data available for export."
                         )
                 else:
-                    logger.info("No samples generated yet.")
+                    print("No samples generated yet")
 
     def update_summary_statistics(
         self, container: widgets.Widget, data: pd.DataFrame, variables: List[Variable]
@@ -966,12 +840,7 @@ class GUIComponents:
         html_parts.append("<h4>Variable Statistics:</h4>")
         html_parts.append("<table style='border-collapse: collapse; margin: 10px 0;'>")
         html_parts.append(
-            "<tr style='border-bottom: 1px solid #ddd;'>"
-            "<th style='padding: 5px; text-align: left;'>Variable</th>"
-            "<th style='padding: 5px;'>Type</th>"
-            "<th style='padding: 5px;'>Min</th>"
-            "<th style='padding: 5px;'>Max</th>"
-            "<th style='padding: 5px;'>Unique</th></tr>"
+            "<tr style='border-bottom: 1px solid #ddd;'><th style='padding: 5px; text-align: left;'>Variable</th><th style='padding: 5px;'>Type</th><th style='padding: 5px;'>Min</th><th style='padding: 5px;'>Max</th><th style='padding: 5px;'>Unique</th></tr>"
         )
 
         for var in variables:

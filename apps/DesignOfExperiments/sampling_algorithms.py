@@ -5,17 +5,17 @@ Implementation of all DoE sampling algorithms with quality metrics.
 
 import warnings
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-from data_manager import Variable, VariableType
-from scipy.spatial.distance import pdist
-from scipy.stats import qmc
-from sklearn.preprocessing import MinMaxScaler
-from utils import ValidationUtils
 
 warnings.filterwarnings("ignore")
+
+# Scientific computing imports
+from scipy.spatial.distance import pdist, squareform
+from scipy.stats import qmc, randint, uniform
+from sklearn.preprocessing import MinMaxScaler
 
 # Optional imports for advanced algorithms
 try:
@@ -25,6 +25,18 @@ try:
 except ImportError:
     HAS_PYDOE2 = False
     warnings.warn("pyDOE2 not available. Some algorithms will be unavailable.")
+
+try:
+    from skopt.sampler import Halton, Lhs, Sobol
+    from skopt.space import Categorical, Integer, Real
+
+    HAS_SCIKIT_OPTIMIZE = True
+except ImportError:
+    HAS_SCIKIT_OPTIMIZE = False
+    warnings.warn("scikit-optimize not available. Some advanced algorithms will be unavailable.")
+
+from data_manager import Variable, VariableType
+from utils import ValidationUtils
 
 
 class SamplingAlgorithm(ABC):
@@ -132,9 +144,7 @@ class SobolSampling(SamplingAlgorithm):
     def __init__(self):
         super().__init__(
             name="Sobol Sequences",
-            description=(
-                "Low-discrepancy quasi-random sequences with excellent space-filling properties"
-            ),
+            description="Low-discrepancy quasi-random sequences with excellent space-filling properties",
         )
 
     def generate(
@@ -419,9 +429,7 @@ class MaximinDistanceSampling(SamplingAlgorithm):
         numeric_candidates = self._convert_to_numeric(candidates, variables)
 
         # Select samples to maximize minimum distance
-        selected_indices = self._maximin_selection(
-            numeric_candidates, n_samples, max_iterations, random_state
-        )
+        selected_indices = self._maximin_selection(numeric_candidates, n_samples, max_iterations)
 
         return candidates.iloc[selected_indices].reset_index(drop=True)
 
@@ -443,11 +451,7 @@ class MaximinDistanceSampling(SamplingAlgorithm):
         return scaler.fit_transform(numeric_data)
 
     def _maximin_selection(
-        self,
-        candidates: np.ndarray,
-        n_samples: int,
-        max_iterations: int,
-        random_state: Optional[int] = None,
+        self, candidates: np.ndarray, n_samples: int, max_iterations: int
     ) -> List[int]:
         """Select samples to maximize minimum pairwise distance."""
         n_candidates = len(candidates)
@@ -455,8 +459,8 @@ class MaximinDistanceSampling(SamplingAlgorithm):
         if n_samples >= n_candidates:
             return list(range(n_candidates))
 
-        # Start with random selection — use caller's random_state so results are reproducible
-        rng = np.random.RandomState(random_state)
+        # Start with random selection
+        rng = np.random.RandomState(42)
         selected = list(rng.choice(n_candidates, n_samples, replace=False))
 
         best_min_dist = self._calculate_min_distance(candidates[selected])
@@ -579,6 +583,9 @@ class SamplingEngine:
         # Generate samples
         sampler = self.available_algorithms[algorithm]
         samples = sampler.generate(variables, n_samples, random_state, **algorithm_params)
+
+        # Add experiment index
+        samples.insert(0, "Experiment_ID", range(1, len(samples) + 1))
 
         return samples
 

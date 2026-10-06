@@ -6,6 +6,8 @@ import gui_components as gui
 import ipywidgets as widgets
 from IPython.display import Javascript, display
 
+from perotf_utils.config import URL_BASE
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,18 +43,18 @@ def setup_app():
         if entry.external_url:
             full_url = entry.external_url
         else:
-            if not entry.upload_id and not dm.notebook_exists(entry):
+            if not dm.notebook_exists(entry):
                 logger.warning(
                     "Notebook not found for %s: %s/%s", entry.name, entry.folder, entry.notebook
                 )
-            full_url = f"{dm.URL_BASE}{dm.build_voila_url(entry, user, uploads_path)}"
+            full_url = f"{URL_BASE}{dm.build_voila_url(entry, user, uploads_path)}"
         return gui.create_app_card_overlay(
             entry, full_url, lambda _b, name=entry.name, url=full_url: open_app(name, url)
         )
 
     def render_learning_card():
         entry = dm.LEARNING_FOLDER
-        full_url = f"{dm.URL_BASE}{dm.build_jupyter_url(entry, user, dm.get_upload_id())}"
+        full_url = f"{URL_BASE}{dm.build_jupyter_url(entry, user, dm.get_upload_id())}"
         return gui.create_app_card_overlay(
             entry, full_url, lambda _b, name=entry.name, url=full_url: open_app(name, url)
         )
@@ -60,44 +62,17 @@ def setup_app():
     def open_whats_new(_button=None):
         open_app("whats_new", gui.WHATS_NEW_URL)
 
-    def show_main(_button=None):
-        project_cards = [
-            gui.create_project_card(project, lambda _b, p=project: show_project(p))
-            for project in dm.PROJECTS
-        ]
+    sections = []
+    for category, entries in dm.CATEGORIES.items():
+        cards = [render_app_card(e) for e in entries]
+        if category == "Build Your Own":
+            cards.insert(0, render_learning_card())
+        sections.append(gui.create_category_section(category, cards))
 
-        sections = []
-        for category, entries in dm.CATEGORIES.items():
-            cards = [render_app_card(e) for e in entries]
-            if category == "Build Your Own":
-                # Omit the section entirely on a deployment with no configured
-                # projects, rather than showing an empty "Projects" header.
-                if project_cards:
-                    sections.append(gui.create_category_section("Projects", project_cards))
-                cards.insert(0, render_learning_card())
-            sections.append(gui.create_category_section(category, cards))
-
-        root.children = [
-            gui.create_style(),
-            gui.create_header(user, open_whats_new),
-            *sections,
-            gui.create_footer(),
-        ]
-
-    def show_project(project):
-        dm.log_navigation(f"open_project:{project.name}")
-        cards = [render_app_card(e) for e in project.apps]
-        root.children = [
-            gui.create_style(),
-            gui.create_header(user, open_whats_new),
-            gui.create_back_button(go_back),
-            gui.create_category_section(project.name, cards),
-            gui.create_footer(),
-        ]
-
-    def go_back(_button=None):
-        dm.log_navigation("back_to_dashboard")
-        show_main()
-
-    show_main()
+    root.children = [
+        gui.create_style(),
+        gui.create_header(user, open_whats_new),
+        *sections,
+        gui.create_footer(),
+    ]
     return widgets.VBox([root, js_output])

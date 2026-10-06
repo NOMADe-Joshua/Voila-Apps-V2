@@ -1,10 +1,10 @@
 [project]
 name = "app-dashboard"
-version = "0.5.2"
-description = "HySPRINT App dashboard app"
+version = "1.0.0"
+description = "App Dashboard: launch page for all peroTF analysis apps"
 requires-python = ">=3.10"
 dependencies = [
-    "hysprint-utils",
+    "perotf-utils",
     "ipython>=8.12",
     "ipywidgets>=8.1",
 ]

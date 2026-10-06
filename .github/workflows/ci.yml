@@ -20,50 +20,37 @@ jobs:
       - name: Install ruff
         run: pip install ruff
 
-      # Only check apps that have been brought up to ruff-clean standard.
-      # Untouched apps (0Global_analyzer, bitmap_maker, etc.) are excluded
-      # until they are individually cleaned up.
+      # The whole repo, notebooks included; legacy exceptions live in the root pyproject.toml.
       - name: Ruff check
+        run: ruff check .
+
+      - name: Ruff format
+        run: ruff format --check .
+
+  discover:
+    name: Find test suites
+    runs-on: ubuntu-latest
+    outputs:
+      suites: ${{ steps.list.outputs.suites }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # One job per tests/<folder>, so a failing app shows up by name. (The whole suite
+      # also runs in one go: `pytest tests -m "not live"`.) tests/live needs a real server.
+      - id: list
         run: |
-          ruff check \
-            apps/TRPL_Analysis/ \
-            apps/XRD_peak_finder/ \
-            apps/NMR_Analysis/ \
-            apps/EQE_Analysis/ \
-            apps/AbsPL_Analysis/ \
-            apps/JV-Analysis/ \
-            apps/MPPT_Analysis/ \
-            apps/DesignOfExperiments/ \
-            shared/ \
-            tests/ \
-            scripts/
+          suites=$(find tests -mindepth 1 -maxdepth 1 -type d ! -name live ! -name __pycache__ \
+            -printf '%f\n' | sort | jq -R . | jq -cs .)
+          echo "suites=$suites" >> "$GITHUB_OUTPUT"
 
   test:
     name: "Tests: ${{ matrix.suite }}"
     runs-on: ubuntu-latest
-    needs: lint
+    needs: [lint, discover]
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - suite: TRPL_Analysis
-            pythonpath: apps/TRPL_Analysis
-          - suite: XRD_peak_finder
-            pythonpath: apps/XRD_peak_finder
-          - suite: NMR_Analysis
-            pythonpath: apps/NMR_Analysis
-          - suite: EQE_Analysis
-            pythonpath: apps/EQE_Analysis
-          - suite: AbsPL_Analysis
-            pythonpath: apps/AbsPL_Analysis
-          - suite: JV-Analysis
-            pythonpath: apps/JV-Analysis
-          - suite: MPPT_Analysis
-            pythonpath: apps/MPPT_Analysis
-          - suite: DesignOfExperiments
-            pythonpath: apps/DesignOfExperiments
-          - suite: shared
-            pythonpath: shared
+        suite: ${{ fromJson(needs.discover.outputs.suites) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -72,26 +59,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install shared package
-        run: pip install -e shared/
-
-      - name: Install test dependencies
+      - name: Install shared package and app dependencies
         run: |
-          pip install \
-            numpy \
-            pydantic \
-            scipy \
-            plotly \
-            natsort \
-            ipywidgets \
-            ipython \
-            pytest \
-            pytest-mock \
-            lmfit \
-            uncertainties \
-            scikit-learn
+          pip install -e shared/
+          pip install -r requirements.txt pytest pytest-mock
 
       - name: Run tests (no live)
-        env:
-          PYTHONPATH: ${{ matrix.pythonpath }}
         run: python -m pytest tests/${{ matrix.suite }}/ -v -m "not live"

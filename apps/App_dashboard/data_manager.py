@@ -2,32 +2,18 @@ import logging
 import os
 from dataclasses import dataclass
 
+from perotf_utils.access_token import log_button_usage
+from perotf_utils.config import NORTH_ENDPOINT
+
 logger = logging.getLogger(__name__)
 
-try:
-    from hysprint_utils.config import URL_BASE
-except ImportError:
-    URL_BASE = "https://nomad-hzb-se.helmholtz-berlin.de"
-    logging.getLogger(__name__).warning(
-        "hysprint_utils.config not found; using hardcoded URL fallback"
-    )
 
-try:
-    from hysprint_utils.access_token import log_button_usage
-except ImportError:
-    logger.warning("hysprint_utils.access_token not found; button usage will not be logged")
-
-    def log_button_usage(action: str, user: str | None = None) -> None:
-        return None
-
-
-VOILA_PATH_TEMPLATE = "/nomad-oasis/north/user/{user}/voila/voila/render"
-JUPYTER_PATH_TEMPLATE = "/nomad-oasis/north/user/{user}/voila/lab/tree"
-"""Deliberately the "voila" NORTH tool, not a separate "jupyter2" tool -- the
-latter isn't provisioned on this Oasis (confirmed via a Jupyter-Server-level
-404 on a real upload where the target file genuinely existed); the voila
-tool's container also serves a full JupyterLab tree view at /voila/lab/tree,
-in addition to /voila/voila/render for rendered Voila apps."""
+VOILA_PATH_TEMPLATE = f"{NORTH_ENDPOINT}/user/{{user}}/voila/voila/render"
+JUPYTER_PATH_TEMPLATE = f"{NORTH_ENDPOINT}/user/{{user}}/voila/lab/tree"
+"""Deliberately the "voila" NORTH tool, not a separate "jupyter2" tool: the latter is not
+provisioned on every Oasis, while the voila tool's container also serves a full JupyterLab
+tree view at /voila/lab/tree, in addition to /voila/voila/render for rendered Voila apps.
+Both are built from NORTH_ENDPOINT so a deployment that moves NORTH only changes config."""
 
 
 @dataclass(frozen=True)
@@ -40,20 +26,6 @@ class AppEntry:
     experimental: bool = False
     external_url: str | None = None
     """When set, the card links straight here instead of rendering folder/notebook via Voila."""
-    upload_id: str | None = None
-    """When set, build the Voila link against this NOMAD upload instead of the dashboard's
-    own upload (for apps that live in a separate upload, e.g. Projects apps). Must be the
-    full '<slug>-<id>' upload folder name (e.g. 'ml-img-cropper-11-DuFOohIVQ5aauygNxEOXyg'),
-    same as what get_uploads_path() derives for the dashboard's own upload -- the raw
-    alphanumeric ID shown in NOMAD GUI file-browser URLs is NOT enough on its own."""
-
-
-@dataclass(frozen=True)
-class Project:
-    name: str
-    description: str
-    icon: str
-    apps: list[AppEntry]
 
 
 @dataclass(frozen=True)
@@ -63,151 +35,135 @@ class LearningEntry:
     icon: str
     path: str
     """Path to the notebook within this dashboard's own upload, e.g.
-    'Learning/01_Python_logic_intro.ipynb'. Always resolved against get_upload_id() --
-    unlike AppEntry, there's no override for a separate upload."""
+    'Learning/01_Python_logic_intro.ipynb'. Always resolved against get_upload_id()."""
     experimental: bool = False
 
 
 CATEGORIES: dict[str, list[AppEntry]] = {
-    "Data Management": [
-        AppEntry(
-            "File_Uploader",
-            "file_uploader.ipynb",
-            "File Uploader",
-            "Upload measurement files to NOMAD and link them to samples.",
-            "fa-upload",
-        ),
-        AppEntry(
-            "Excel_creator",
-            "excel_creator.ipynb",
-            "Excel Creator",
-            "Generate formatted Excel reports from measurement data.",
-            "fa-file-excel",
-        ),
-        AppEntry(
-            "smart_databaser",
-            "smart_databaser.ipynb",
-            "Smart Databaser",
-            "The evolution of Excel Creator: build and curate sample/batch entries "
-            "straight into the NOMAD database, no spreadsheet required.",
-            "fa-database",
-        ),
-        AppEntry(
-            "Entry_Auditor",
-            "entry_auditor.ipynb",
-            "Entry Auditor",
-            "Hunt down inconsistencies across your NOMAD database and fix the "
-            "values right where they live.",
-            "fa-clipboard-check",
-        ),
-        AppEntry(
-            "PeroDatabase_downloader",
-            "nomad_extractor.ipynb",
-            "Database Downloader",
-            "Extract and export data from NOMAD into files.",
-            "fa-download",
-        ),
-    ],
     "Device Characterization": [
         AppEntry(
             "JV-Analysis",
             "jv-analysis.ipynb",
             "JV Analysis",
-            "Examine current-voltage characteristics of solar cell devices.",
+            "Load the JV measurements of your batches from NOMAD, filter them, compare "
+            "device parameters and JV curves, and export plots and data.",
             "fa-chart-bar",
         ),
         AppEntry(
-            "EQE_Analysis",
-            "EQE_Analysis.ipynb",
-            "EQE Analyzer",
-            "Visualize and analyze external quantum efficiency measurements.",
-            "fa-chart-area",
+            "Process_JV_Overview",
+            "process_jv_overview.ipynb",
+            "Process & JV Overview",
+            "The processing steps of each batch next to its JV boxplots by variation, "
+            "to correlate processes and efficiencies batch by batch.",
+            "fa-project-diagram",
         ),
         AppEntry(
             "MPPT_Analysis",
-            "MPPT_analyzer.ipynb",
-            "MPPT Analyzer",
-            "Analyze maximum power point tracking data for solar cells.",
+            "mppt_plotting.ipynb",
+            "MPPT Analysis",
+            "Plot maximum power point tracking data from NOMAD, fit decay models to the "
+            "curves and download the results.",
             "fa-chart-line",
         ),
+        AppEntry(
+            "EQE_Analysis",
+            "eqe-analysis_voila.ipynb",
+            "EQE Analysis",
+            "Plot external quantum efficiency spectra from NOMAD and derive the integrated "
+            "Jsc and the bandgap.",
+            "fa-chart-area",
+        ),
+        AppEntry(
+            "Diode_Analyzer",
+            "diode-gui.ipynb",
+            "Diode Analyzer",
+            "Fit LED current-voltage curves from a CSV file with a single-diode model to "
+            "extract shunt and series resistance.",
+            "fa-lightbulb",
+        ),
+    ],
+    "Optical & Structural Analysis": [
         AppEntry(
             "AbsPL_Analysis",
             "abspl_plotter.ipynb",
             "AbsPL Analysis",
-            "Plot and analyze absolute photoluminescence measurements.",
-            "fa-lightbulb",
-        ),
-        AppEntry(
-            "TRPL_Analysis",
-            "trpl_dashboard.ipynb",
-            "TRPL Analysis",
-            "Analyze time-resolved photoluminescence decay data.",
-            "fa-clock",
-        ),
-        AppEntry(
-            "XRD_peak_finder",
-            "xy_visualizer.ipynb",
-            "XRD Peak Finder",
-            "Visualize XRD patterns and identify diffraction peaks.",
-            "fa-mountain",
-        ),
-        AppEntry(
-            "NMR_Analysis",
-            "nmr_plotter.ipynb",
-            "NMR Analysis",
-            "Plot and analyze nuclear magnetic resonance spectra.",
-            "fa-wave-square",
-        ),
-        AppEntry(
-            "Peak_Explorer",
-            "peak_analyzer.ipynb",
-            "Peak Explorer",
-            "General-purpose peak detection and analysis tool.",
-            "fa-search",
-        ),
-    ],
-    # In-situ apps read the HDF5 files insitu_analyser writes to NOMAD. The previewer is the
-    # usual way in and hands its selection to the others, but each of them also works on its
-    # own: opened from here they start on their own upload/sample/run selectors, and each one
-    # links back to the previewer's heatmaps.
-    "In-situ and GIWAXS Data Analysis": [
-        AppEntry(
-            "ISA_Previewer",
-            "isa_previewer.ipynb",
-            "ISA Previewer",
-            "Pick a NOMAD upload, sample and measurement, then step through its heatmaps, "
-            "diffractograms and logging.",
-            "fa-map",
-        ),
-        AppEntry(
-            "ISA_Previewer",
-            "giwaxs_analysis.ipynb",
-            "GIWAXS Analysis",
-            "Cuts and run-to-run comparison for the GIWAXS detector images.",
+            "Plot absolute photoluminescence measurements from NOMAD: spectra, PLQY, QFLS "
+            "and intensity sweeps.",
             "fa-sun",
         ),
         AppEntry(
-            "ISA_Previewer",
-            "optical_analysis.ipynb",
-            "Optical Analysis",
-            "Reflectance, transmission and PL spectra of an in-situ run.",
+            "UVVis_Analyzer",
+            "UVVis_analyzer.ipynb",
+            "UV-Vis Analyzer",
+            "Plot UV-Vis spectra from NOMAD and estimate bandgaps from derivative and Tauc plots.",
             "fa-rainbow",
         ),
         AppEntry(
-            "ISA_Previewer",
-            "timely_teller.ipynb",
-            "Timely Teller",
-            "Plot any logged signal of a whole upload's in-situ runs against time, and "
-            "correlate them.",
-            "fa-chart-line",
+            "XRD_PF",
+            "peak_analyzer.ipynb",
+            "XRD Peak Analyzer",
+            "Load XRD diffractograms from NOMAD, overlay patterns, detect peaks and fit "
+            "Gaussian profiles.",
+            "fa-mountain",
         ),
         AppEntry(
-            "Thickness_tracer",
-            "thickness_tracer.ipynb",
-            "Thickness Tracer",
-            "Film thickness from reflectance modelling. Not implemented yet!",
-            "fa-ruler-vertical",
+            "Peak_Explorer",
+            "main_notebook.ipynb",
+            "Peak Explorer",
+            "Fit peaks in time-resolved photoluminescence spectra and follow their "
+            "position, height and width over time.",
+            "fa-search",
+        ),
+        AppEntry(
+            "SEM_crystal_counter",
+            "SEM_Analyzer.ipynb",
+            "SEM Crystal Counter",
+            "Detect and count crystals in SEM images with configurable thresholding and "
+            "segmentation, then export their size distribution.",
+            "fa-microscope",
+        ),
+        AppEntry(
+            "SEM_crystal_counter",
+            "image_analysis.ipynb",
+            "SEM Grain Size Analysis",
+            "Estimate the grain size distribution of perovskite films in SEM images via "
+            "edge detection and region analysis.",
+            "fa-image",
+        ),
+        AppEntry(
+            "XPS-Automated",
+            "xps_automated.ipynb",
+            "XPS Automated",
+            "Align, normalize and Gaussian-fit XPS core-level spectra. A raw working "
+            "notebook, not yet a finished app.",
+            "fa-atom",
             experimental=True,
+        ),
+    ],
+    "Data Management": [
+        AppEntry(
+            "Data_Overview_Machines",
+            "get_data_from_last_week.ipynb",
+            "Data Overview",
+            "Best JV efficiency of every sample in a date range, plotted over time per "
+            "person and filterable by the deposition machines used.",
+            "fa-calendar-alt",
+        ),
+        AppEntry(
+            "Data_Tools",
+            "data_tools.ipynb",
+            "Data Tools",
+            "Split, rename and merge raw JV, EQE and UV-Vis files into the naming scheme "
+            "the ELN expects, plus a ratio calculator.",
+            "fa-tools",
+        ),
+        AppEntry(
+            "Excel_creator",
+            "excel_creator.ipynb",
+            "Excel Creator",
+            "Configure the process sequence of an experiment and generate the Excel file "
+            "that documents it for upload to NOMAD.",
+            "fa-file-excel",
         ),
     ],
     "Utilities & Calculators": [
@@ -215,36 +171,82 @@ CATEGORIES: dict[str, list[AppEntry]] = {
             "DesignOfExperiments",
             "DoE.ipynb",
             "Design of Experiments",
-            "Plan and generate experimental design matrices.",
+            "Define process variables and generate experiment plans with space-filling "
+            "sampling (Latin hypercube, Sobol, Halton, grids, ...).",
             "fa-flask",
         ),
         AppEntry(
-            "Global_analyzer",
-            "global_analyzer.ipynb",
-            "Global Analyzer",
-            "Explore and compare measurements across samples.",
-            "fa-globe",
-        ),
-        AppEntry(
             "Hansen_green_calculator",
-            "hansen_app.ipynb",
-            "Hansen Calculator",
-            "Calculate Hansen solubility parameters for solvent blends.",
+            "Hansen_UNIFAC_calculator.ipynb",
+            "Hansen Blend Calculator",
+            "Find the solvent blend that best matches target Hansen solubility parameters, "
+            "with UNIFAC activity coefficients at a chosen temperature.",
             "fa-tint",
         ),
         AppEntry(
-            "Wetting_envelope",
-            "wetting_envelope.ipynb",
-            "Wetting Envelope",
-            "Compute wetting envelopes for solvent selection.",
-            "fa-water",
+            "Hansen_green_calculator",
+            "Mixture_calculator.ipynb",
+            "Hansen Mixture Calculator",
+            "Weighted average Hansen parameters and properties of a solvent mixture from "
+            "the percentages you enter.",
+            "fa-blender",
         ),
         AppEntry(
-            "bitmap_maker",
-            "bitmap_generator.ipynb",
-            "Bitmap Maker",
-            "Generate bitmap patterns for combinatorial inkjet printing.",
+            "Hansen_green_calculator",
+            "3D_visualizer.ipynb",
+            "Hansen 3D Visualizer",
+            "Search the solvent database and highlight compounds in 3D Hansen space, "
+            "colored by any property.",
+            "fa-cube",
+        ),
+        AppEntry(
+            "Hansen_green_calculator",
+            "data_visualizer.ipynb",
+            "Solvent Data Visualizer",
+            "Scatter any two properties of the solvent database against each other, "
+            "colored by a third, or show all pairwise plots.",
             "fa-th",
+        ),
+        AppEntry(
+            "Hansen_green_calculator",
+            "perovskite_viz.ipynb",
+            "Perovskite Ink Visualizer",
+            "Plot perovskite inks in 3D Hansen space, filtered by solute and colored by "
+            "any column of the ink table.",
+            "fa-gem",
+        ),
+        AppEntry(
+            "Hansen_green_calculator",
+            "Hansen_Group_Plotting_Device.ipynb",
+            "Hansen Ink Plotter",
+            "Plot inks by solvent system in 3D Hansen space, with the volume spanned by "
+            "each solute shown as a sphere.",
+            "fa-cubes",
+            experimental=True,
+        ),
+        AppEntry(
+            "Perovskite_calculator",
+            "perovskite_calculator.ipynb",
+            "Perovskite Solution Calculator",
+            "Calculate precursor masses and volumes for a perovskite solution from its "
+            "target composition.",
+            "fa-calculator",
+        ),
+        AppEntry(
+            "UVVis_Simulator",
+            "UVVis_Simulation.ipynb",
+            "UV-Vis Layer Stack Simulator",
+            "Simulate reflectance, transmittance and absorptance of a thin-film layer "
+            "stack with the transfer matrix method.",
+            "fa-layer-group",
+        ),
+        AppEntry(
+            "Wetting_envelope",
+            "wetting_envelope_app.ipynb",
+            "Wetting Envelope",
+            "Plot wetting envelopes of materials from their surface energy components "
+            "(Owens-Wendt) and see which solvents wet them.",
+            "fa-water",
         ),
     ],
     "Build Your Own": [
@@ -256,145 +258,12 @@ CATEGORIES: dict[str, list[AppEntry]] = {
             "data directly and write a custom analysis script, no new app required.",
             "fa-robot",
             external_url=(
-                "https://raw.githubusercontent.com/nomad-hzb/nomad-pv-analysis-apps/main/"
+                "https://raw.githubusercontent.com/NOMADe-Joshua/Voila-Apps-V2/main/"
                 "NOMAD_DATA_ACCESS_PROMPT.md"
             ),
         ),
     ],
-    "Experimental / In Progress": [
-        AppEntry(
-            "Electrochemical_analysis",
-            "Echem_analysis_voila_v1.ipynb",
-            "Electrochemical Analysis",
-            "Analyze EIS and other electrochemical measurements.",
-            "fa-bolt",
-            experimental=True,
-        ),
-        AppEntry(
-            "SEM_crystal_counter",
-            "SEM_Analyzer.ipynb",
-            "SEM Crystal Counter",
-            "Count and analyze crystal grains in SEM images.",
-            "fa-microscope",
-            experimental=True,
-        ),
-        AppEntry(
-            "XPS-Automated",
-            "Max_Huebner_try_11(1).ipynb",
-            "XPS Automated",
-            "Automated XPS peak fitting.",
-            "fa-atom",
-            experimental=True,
-        ),
-        AppEntry(
-            "LCC_Calculator",
-            "lcc_calculator.ipynb",
-            "LCC Calculator",
-            "Estimate life cycle cost (processes, materials, labor, overhead) "
-            "for selected batches, exported to an editable Excel workbook.",
-            "fa-money-bill-alt",
-            experimental=True,
-        ),
-    ],
 }
-
-
-def _project_upload_id(env_var: str, hzb_default: str) -> str | None:
-    """Resolve one Projects-section upload_id from env, HZB's value as default.
-
-    A fork with no matching upload sets the env var to an empty string to drop
-    that card entirely, rather than keeping a link that can only ever 404.
-    """
-    return os.environ.get(env_var, hzb_default) or None
-
-
-def _build_projects() -> list[Project]:
-    slot_die_apps = [
-        entry
-        for entry in (
-            AppEntry(
-                "",
-                "image_cropper.ipynb",
-                "1. Image Cropper",
-                "Crop raw PL images down to the region used by the rest of the pipeline.",
-                "fa-crop",
-                upload_id=_project_upload_id(
-                    "HYSPRINT_PROJECT_IMAGE_CROPPER_UPLOAD_ID",
-                    "ml-img-cropper-11-DuFOohIVQ5aauygNxEOXyg",
-                ),
-            ),
-            AppEntry(
-                "",
-                "feature_extraction_app.ipynb",
-                "2. Feature Extraction",
-                "Extract quantitative features from the cropped PL images.",
-                "fa-vector-square",
-                # FIXME: needs real '<slug>-<id>' upload folder (see AppEntry.upload_id)
-                upload_id=_project_upload_id(
-                    "HYSPRINT_PROJECT_FEATURE_EXTRACTION_UPLOAD_ID", "XnIHIdrkTT6VFyxFD8a6Hg"
-                ),
-            ),
-            AppEntry(
-                "",
-                "pl_defect_voila_app.ipynb",
-                "3. PL Defect Analysis",
-                "Detect and visualize defects in photoluminescence images.",
-                "fa-eye",
-                # FIXME: needs real '<slug>-<id>' upload folder (see AppEntry.upload_id)
-                upload_id=_project_upload_id(
-                    "HYSPRINT_PROJECT_PL_DEFECT_UPLOAD_ID", "XnIHIdrkTT6VFyxFD8a6Hg"
-                ),
-            ),
-            AppEntry(
-                "",
-                "nomad_ml_app.ipynb",
-                "4. ML Model",
-                "Train/apply the ML model on the extracted PL features.",
-                "fa-brain",
-                # FIXME: needs real '<slug>-<id>' upload folder (see AppEntry.upload_id)
-                upload_id=_project_upload_id(
-                    "HYSPRINT_PROJECT_ML_MODEL_UPLOAD_ID", "sSP9nxKDRhax0cuBzsrvEA"
-                ),
-            ),
-            AppEntry(
-                "",
-                "correlation_analysis_app.ipynb",
-                "5. Correlation Analysis",
-                "Correlate PL/ML features with device performance.",
-                "fa-project-diagram",
-                # FIXME: needs real '<slug>-<id>' upload folder (see AppEntry.upload_id)
-                upload_id=_project_upload_id(
-                    "HYSPRINT_PROJECT_CORRELATION_UPLOAD_ID", "Jeb8HXjnSNy9T0-Z5VVbhA"
-                ),
-            ),
-            AppEntry(
-                "",
-                "ROI_JV_NOMAD_app.ipynb",
-                "6. PL ROI → JV Assignment",
-                "Map PL-imaged ROIs to per-device JV curves and export the joined "
-                "dataset back to NOMAD.",
-                "fa-object-group",
-                # FIXME: needs real '<slug>-<id>' upload folder (see AppEntry.upload_id)
-                upload_id=_project_upload_id(
-                    "HYSPRINT_PROJECT_ROI_JV_UPLOAD_ID", "YRS7abDQS26o2NplzjBwKg"
-                ),
-            ),
-        )
-        if entry.upload_id
-    ]
-    if not slot_die_apps:
-        return []
-    return [
-        Project(
-            "Slot-die coater ML",
-            "PL-imaging to JV-performance pipeline for slot-die coated devices.",
-            "fa-industry",
-            slot_die_apps,
-        )
-    ]
-
-
-PROJECTS: list[Project] = _build_projects()
 
 
 LEARNING_FOLDER = LearningEntry(
@@ -413,11 +282,10 @@ def get_current_user() -> str:
 
 
 def log_navigation(action: str) -> None:
-    """Log an in-dashboard navigation click (project drill-in, back button, ...).
+    """Log a dashboard click (an app launch card, the What's New link, ...).
 
-    Only covers events that actually run in this app's Python kernel -- the
-    outbound app-launch cards are plain <a target="_blank"> links and never
-    reach the kernel, so they can't be logged this way.
+    The cards are Buttons rather than plain links precisely so that the click runs in
+    this app's Python kernel and can be written to perotf_utils' button usage log.
     """
     log_button_usage(action, user=get_current_user())
 
@@ -455,9 +323,9 @@ def get_upload_id() -> str:
     because how deep the repo sits inside the upload varies with how it was deployed:
     unpacking the repo at the top of an upload gives <upload_id>/apps/<AppFolder>, while
     `git clone` inside the upload adds the repo directory, giving
-    <upload_id>/nomad-pv-analysis-apps/apps/<AppFolder>. Fixed-depth walking silently
-    returned the repo folder as the upload ID in the latter case, producing links with
-    the upload name missing entirely.
+    <upload_id>/Voila-Apps-V2/apps/<AppFolder>. Fixed-depth walking silently returned
+    the repo folder as the upload ID in the latter case, producing links with the upload
+    name missing entirely.
     """
     parts = _cwd_parts()
     index = _uploads_index(parts)
@@ -485,25 +353,19 @@ def get_uploads_path() -> str:
 
 
 def build_voila_url(entry: AppEntry, user: str, uploads_path: str) -> str:
-    """Build the absolute Voila render path for an app entry.
-
-    Uses entry.upload_id instead of uploads_path when set, for apps that live in a
-    separate NOMAD upload from this dashboard (e.g. Projects apps).
-    """
+    """Build the absolute Voila render path (without URL_BASE) for an app entry."""
     base_path = VOILA_PATH_TEMPLATE.format(user=user)
-    path = f"uploads/{entry.upload_id}" if entry.upload_id else uploads_path
     folder = f"{entry.folder}/" if entry.folder else ""
-    return f"{base_path}/{path}/{folder}{entry.notebook}"
+    return f"{base_path}/{uploads_path}/{folder}{entry.notebook}"
 
 
 def build_jupyter_url(entry: LearningEntry, user: str, upload_id: str) -> str:
     """Build the absolute JupyterLab 'tree' path that opens a learning notebook directly.
 
-    Unlike build_voila_url, this points at the jupyter2 NORTH tool so the notebook opens
-    already-loaded in a JupyterLab tab instead of being rendered as a Voila app. Takes
-    upload_id explicitly (from get_upload_id()) rather than reading it off entry, since
-    LearningEntry always lives in this dashboard's own upload -- there's no per-entry
-    override the way AppEntry.upload_id provides for apps living in a separate upload.
+    Unlike build_voila_url, this points at the JupyterLab tree view of the voila NORTH
+    tool, so the notebook opens already loaded in a JupyterLab tab instead of being
+    rendered as a Voila app. Takes upload_id explicitly (from get_upload_id()), since a
+    LearningEntry always lives in this dashboard's own upload.
     """
     base_path = JUPYTER_PATH_TEMPLATE.format(user=user)
     return f"{base_path}/uploads/{upload_id}/{entry.path}"

@@ -49,7 +49,7 @@ def test_token_authentication():
 def test_get_ids_in_batch_returns_list():
     """get_ids_in_batch with a dummy batch returns a list (possibly empty)."""
     _skip_if_no_credentials()
-    from hysprint_utils.api_calls import get_ids_in_batch
+    from perotf_utils.api_calls import get_ids_in_batch
 
     result = get_ids_in_batch(NOMAD_URL, NOMAD_TOKEN, ["nonexistent_batch_xyz"])
     assert isinstance(result, (list, set)), "Expected list or set, got %s" % type(result)
@@ -59,7 +59,7 @@ def test_get_ids_in_batch_returns_list():
 def test_get_sample_description_returns_dict():
     """get_sample_description with empty list returns a dict."""
     _skip_if_no_credentials()
-    from hysprint_utils.api_calls import get_sample_description
+    from perotf_utils.api_calls import get_sample_description
 
     result = get_sample_description(NOMAD_URL, NOMAD_TOKEN, [])
     assert isinstance(result, dict), "Expected dict, got %s" % type(result)

@@ -1,376 +1,275 @@
-# nomad_voila — HySPRINT Analysis Apps monorepo
+# Voila-Apps-V2: peroTF NOMAD Analysis Apps monorepo
 
 A suite of Voila/Jupyter apps for perovskite solar cell characterization,
-built around NOMAD Oasis (HZB). Each app lives in `apps/<AppName>/` and can
-run standalone; shared logic lives in `shared/hysprint_utils/`. Full
-per-app checklist and rationale: `HYSPRINT_UNIFICATION_PROMPT.md` (base
-checklist) and `FINALIZE_UNIFICATION_PROMPT.md` (scoping for the last
-unification batches) — read those in full before doing another
-repo-wide unification pass. This file is the condensed, everyday version.
+built around the peroTF NOMAD Oasis at KIT. Each app lives in `apps/<AppName>/`
+and can run standalone; shared logic lives in `shared/perotf_utils/`. The
+structure mirrors HZB's `nomad-hzb/nomad-pv-analysis-apps` (this repo is a
+GitHub fork of it, remote `upstream`) so apps can be exchanged; see
+`CONTRIBUTING.md` section 5. The per-app checklist for deeper unification
+passes is `UNIFICATION_PROMPT.md`; read it in full before doing one. This file
+is the condensed, everyday version.
 
 ## Layout
 
 ```
 apps/<AppName>/
     pyproject.toml
-    app.py                 # entry point, imports the rest as plain names
-    data_manager.py         # zero widget imports; Pydantic model + validation
-    plot_manager.py         # zero widget imports; Plotly figures only
-    gui_components.py       # all ipywidgets code lives here, nowhere else
-    <app>.ipynb              # exactly 2 cells
-shared/hysprint_utils/       # DO NOT DUPLICATE ANYTHING FROM HERE
-    config.py               # URL_BASE / API_ENDPOINT — the ONLY place these are defined
-    process_specs.py        # Excel_creator + smart_databaser process-type catalog — see below
-    api_calls.py, access_token.py, auth_manager.py, batch_selection.py,
-    error_handler.py, plotting_utils.py, process_handling.py, schemas.py
-tests/<app_name>/            # ONE folder per app, at repo root — never inside apps/
+    app.py                  # entry point of modular apps, imports the rest as plain names
+    data_manager.py         # modular apps; ideally zero widget imports
+    plot_manager.py         # modular apps; ideally zero widget imports
+    gui_components.py       # modular apps; ipywidgets code
+    <app>.ipynb             # cell 0 is always the bootstrap cell
+shared/perotf_utils/        # DO NOT DUPLICATE ANYTHING FROM HERE
+    config.py               # URL_BASE, API_ENDPOINT, GUI_ENDPOINT, NORTH_ENDPOINT, ENTRY_TYPES: the ONLY place
+    api_calls.py, access_token.py, auth_manager.py, auth_ui.py,
+    batch_selection.py, error_handler.py, plotting_utils.py, process_handling.py
+shared/utils.ipynb, shared/log_view.ipynb   # admin notebooks (usage log), not apps
+tests/<AppName>/            # ONE folder per app, at repo root, never inside apps/
     conftest.py
-    test_<app_name>.py       # exactly one test file per app
-pyproject.toml               # root: pytest config + the ONLY ruff config in the repo
-tests/conftest.py            # strips repo root from sys.path — see gotcha below, do not remove
-secrets.py                    # repo root, NOMAD_CLIENT_ACCESS_TOKEN fallback — never import directly
+    test_<app_name>.py      # exactly one test file per app
+tests/structure/            # repo-wide rules (literals, bootstrap cell, pyproject)
+tests/shared/               # perotf_utils
+tests/conftest.py           # load-bearing, see gotcha below
+pyproject.toml              # root: pytest config + the ONLY ruff config in the repo
 ```
 
-## Hard rules — apply to every edit in `apps/`
+Two app shapes exist after the migration from the old flat repo
+(`nomad-perotf-jupyter-voila-scripts`):
 
-1. **Never duplicate `hysprint_utils` code.** If logic already exists there
-   (auth, API calls, plotting helpers, error handling, schemas), import it —
-   don't reimplement it in an app. If something is genuinely missing from
-   `hysprint_utils` and should be shared, propose adding it there; don't
-   silently create a new shared module.
-2. **Don't touch `shared/hysprint_utils/` unless explicitly asked.** It's
-   shared across every app; a "fix" there is a cross-cutting change that
-   needs to be flagged and approved first, not applied inline while working
-   on one app.
-3. **Import convention:** `hysprint_utils.*` modules always get the
-   `hysprint_utils.` prefix (`from hysprint_utils.config import URL_BASE`).
-   App-local modules (`data_manager`, `plot_manager`, `gui_components`,
-   `utils`, `config`) are imported as plain names, never prefixed.
-4. **`URL_BASE`/`API_ENDPOINT` are never string literals** in an app or
-   notebook. Import from `hysprint_utils.config`, wrapped in
-   `try/except ImportError` with a hardcoded fallback:
-   ```python
-   try:
-       from hysprint_utils.config import API_ENDPOINT, URL_BASE
-   except ImportError:
-       URL_BASE = "https://nomad-hzb-se.helmholtz-berlin.de"
-       API_ENDPOINT = "/nomad-oasis/api/v1"
-       logging.getLogger(__name__).warning("hysprint_utils.config not found; using hardcoded URL fallback")
-   ```
-   Apps that don't talk to the API at all don't need either — mark n/a, don't
-   force it in.
-5. **No bare `print()`** for status/debug/errors — use
-   `logging.getLogger(__name__)` at module level, appropriate levels
-   (DEBUG trace, INFO progress, WARNING/ERROR problems), and always
+- **Modular apps** (JV-Analysis, Process_JV_Overview, EQE_Analysis,
+  AbsPL_Analysis, UVVis_Analyzer, XRD_PF, DesignOfExperiments, Excel_creator):
+  `app.py` plus modules, and a notebook with exactly 3 code cells (bootstrap,
+  `log_notebook_usage()`, start the app).
+- **Notebook apps** (all others): the analysis code still lives in the
+  notebook cells, with only the bootstrap cell and config imports added. Moving
+  that code into `app.py` + modules is the next unification step per app.
+
+## Hard rules: apply to every edit in `apps/`
+
+1. **Never duplicate `perotf_utils` code.** If logic already exists there
+   (auth, API calls, plotting helpers, error handling), import it; don't
+   reimplement it in an app. If something is genuinely missing and should be
+   shared, propose adding it there; don't silently create a new shared module.
+2. **Don't touch `shared/perotf_utils/` unless explicitly asked.** It's shared
+   across every app; a change there is cross-cutting and needs to be flagged
+   and approved first, not applied inline while working on one app.
+3. **Import convention:** shared modules always get the `perotf_utils.` prefix
+   (`from perotf_utils.config import URL_BASE`, `from perotf_utils import
+   access_token`). App-local modules (`data_manager`, `plot_manager`,
+   `gui_components`, `utils`, `config`) are imported as plain names, never
+   prefixed.
+4. **The server address, its paths and NOMAD entry type names are never
+   literals** in an app, a notebook or another shared module. Import them from
+   `perotf_utils.config` (`URL_BASE`, `API_ENDPOINT`, `GUI_ENDPOINT`,
+   `NORTH_ENDPOINT`, `ENTRY_TYPES["jv"]`, ...) **directly, without a
+   `try/except` fallback literal**: `bootstrap.py` guarantees the package, and a
+   fallback would scatter the address across the repo again (HZB uses a
+   fallback; we deliberately don't). A new entry type gets a key in
+   `ENTRY_TYPES` first. `tests/structure/test_repo_structure.py` fails on
+   `elnserver`, `/nomad-oasis`, `peroTF_`, `HySprint_` or `baseclasses.` outside
+   `config.py`, comments and display strings included (the HZB pattern is the host
+   `nomad-hzb-se.`, so a GitHub link to an HZB repo is fine).
+5. **No bare `print()`** for status/debug/errors in new code: use
+   `logging.getLogger(__name__)` at module level, appropriate levels, and always
    `%s`/`%d` placeholders (never an f-string as the log message itself).
-   **Exception:** `print()` used inside `with some_ipywidgets_output:` to
-   render content into an `Output()` widget passed in from the caller is a
-   legitimate display mechanism in this codebase (used because
-   `data_manager.py`/`plot_manager.py` are forbidden from importing
-   `ipywidgets`/`IPython.display`) — check for that pattern before
-   "cleaning up" a print() call, don't convert it to logging blindly.
-6. **Run `ruff check --fix` and `ruff format`** on every file you touch;
-   leave `ruff check` clean before moving on. The ruff config lives ONLY at
-   the root `pyproject.toml` — never add a per-app ruff config. Current
-   ruleset is `E, F, I, G` (not `T20` yet — see Known gaps below).
-7. **`pyproject.toml` per app** declares `"hysprint-utils"` as a bare
-   requirement — no `file://` path. Keep the `dependencies` list accurate:
-   `bootstrap.py` installs the app's own directory from cell 0, so this list
-   is what actually installs an app's third-party requirements on the Oasis
-   (see the bootstrap gotcha below). It resolves because every notebook's
-   cell 0 runs `bootstrap.py` first (see gotcha below), which installs
-   `shared/` before any app code imports it. Never pin an absolute
-   `file:///home/jovyan/uploads/<session-hash>/shared` path — that session
-   hash is specific to one upload and one Oasis, so an absolute pin breaks
-   the moment either changes. Also needs
+   **Exception:** `print()` inside `with some_ipywidgets_output:` to render into
+   an `Output()` widget is a legitimate display mechanism; don't convert it
+   blindly. Legacy apps still have many prints (see Known gaps).
+6. **Run `ruff check --fix --unfixable F401` and `ruff format`** on every file
+   you touch; leave `ruff check` clean. `F401` is excluded from autofix because
+   several modules re-export names on purpose (e.g. JV's `gui_components`
+   re-exports `AuthenticationUI`); mark real re-exports `# noqa: F401`. The ruff
+   config lives ONLY in the root `pyproject.toml`.
+7. **`pyproject.toml` per app** declares `"perotf-utils"` as a bare
+   requirement plus every third-party package the app imports (`bootstrap.py`
+   installs the app's own directory from cell 0, so this list is what actually
+   installs an app's requirements on the Oasis). Never pin a
+   `file:///home/jovyan/uploads/<hash>/shared` path. Also needs
    `[tool.hatch.metadata] allow-direct-references = true` and
    `[tool.hatch.build.targets.wheel] packages = ["."]`. `pytest`/`pytest-mock`
-   belong only in the root `pyproject.toml`, never per-app.
-8. **Notebooks: exactly 2 cells.** No `sys.path.append`/`insert` anywhere,
-   in any app file or notebook — except inside `bootstrap.py` itself (see
-   gotcha below), which every notebook's cell 0 invokes via
-   `_ = runpy.run_path("../../bootstrap.py")`.
-9. **Tests live at `tests/<app_name>/test_<app_name>.py`**, never inside
-   `apps/`. Each app's `conftest.py` must load its own `data_manager`/
-   `plot_manager`/etc. under a **unique** name via
-   `importlib.util.spec_from_file_location` (not just the bare module name)
-   so a full `pytest tests/` run doesn't collide with another app's
-   same-named module. See any of `Wetting_envelope`, `Excel_creator`,
-   `bitmap_maker`, `PeroDatabase_downloader`, `Global_analyzer`'s
-   `tests/<app>/conftest.py` for the current reference pattern.
+   belong only in CI and the root, never per-app.
+8. **Notebooks start with the bootstrap cell** (see gotcha below). Modular
+   apps' notebooks have exactly 3 code cells. No `sys.path.append`/`insert`
+   anywhere in an app file or notebook; `bootstrap.py` is the one exception.
+9. **Tests live at `tests/<AppName>/test_<app_name>.py`**, never inside
+   `apps/`. A per-app `conftest.py` gets the app's modules through the root
+   `app_loader` fixture (`app_loader("JV-Analysis", ["app", "data_manager"])`),
+   and test files use those module objects instead of importing
+   `data_manager` & co. by bare name, so two apps' same-named modules never
+   collide. Tests must not reach the network (an autouse fixture makes every
+   `requests` call fail unless the test is marked `live`).
 10. **No em-dashes in any output you produce.**
-11. **No regressions.** If making a checklist item pass would break an
-    app's currently-working behavior or an already-passing test, stop and
-    flag it — don't force the fix through.
-
-## Adding or changing a process type (Excel_creator / smart_databaser)
-
-Both apps model the same set of "process types" (Spin Coating, ALD, Cleaning
-O2-Plasma, ...) and used to hand-duplicate that catalog across two different
-files in two different shapes — `apps/Excel_creator/sheet_experiment.py`
-(which Excel columns a process generates, with what test values) and
-`apps/smart_databaser/config/field_mappings.json` (which NOMAD archive path
-each of those columns autofills from) — plus up to *eight* separate
-hand-maintained lists across `apps/smart_databaser/data_manager.py` and
-`apps/Excel_creator/voila_experiment_app.py` for which process types exist,
-which have config controls, and what those controls are. A process type
-missing from just one of those eight spots was a real, live bug (Screen
-Printing's config controls silently not rendering in Excel_creator's own
-GUI — nomad-hzb/nomad-pv-analysis-apps#36/#37/#38).
-
-`shared/hysprint_utils/process_specs.py` is now the single source of truth
-for all of that: per process type, its Excel columns (label + test value +
-archive path + `unit_verified`/`multiply`), its indexed/repeated column
-groups (solvents, solutes, ...), its optional blocks (Gas Quenching, ...),
-and its config metadata (numeric/boolean controls, defaults, whether it's
-material-gated). Both apps read from it — `sheet_experiment.py` still owns
-the per-process *assembly order* (which fields appear when, plus the
-handful of genuinely special-cased branches like Spin Coating's
-single-vs-multi spin step naming), but looks up each field's data from
-`process_specs.py` instead of hardcoding it inline; `data_manager.py` and
-`voila_experiment_app.py` derive their process-type/config-control lists
-from it instead of maintaining their own copies. **To add or change a
-process type, edit `process_specs.py` first** (per its own module
-docstring for the exact schema and the discipline around `unit_verified` —
-only confirm a path against the real `map_<type>` function in
-nomad-baseclasses, never guess); only touch `sheet_experiment.py` if the
-new process needs genuinely new assembly logic (not just new fields).
-`config/field_mappings.json` and `config/schema_coverage.md` no longer
-exist — don't recreate either.
+11. **No regressions.** If making a checklist item pass would break an app's
+    currently-working behavior or an already-passing test, stop and flag it;
+    don't force the fix through.
 
 ## Change management: issues, PRs, versions
 
 Every user-visible change to an app starts as a GitHub issue on
-`nomad-hzb/nomad-pv-analysis-apps` and lands via a PR that references it
-(`Fixes #123`). Full process for humans: `CONTRIBUTING.md`. What this means
-for you specifically:
+`NOMADe-Joshua/Voila-Apps-V2` and lands via a PR that references it
+(`Fixes #123`). Full process for humans: `CONTRIBUTING.md`. For you:
 
 - When asked to fix or add something in an app, check whether an issue
-  already exists before assuming scope; if the user hasn't mentioned one and
-  it's a non-trivial change, ask whether one should be filed.
+  already exists; if the user hasn't mentioned one and it's a non-trivial
+  change, ask whether one should be filed.
 - **Bump that app's `pyproject.toml` `version`** (SemVer: patch for a fix,
   minor for a non-breaking feature, major for a breaking change) in the same
-  change, for that app only. Don't bump unrelated apps, and don't bump for
-  internal refactors, test-only changes, or `shared/hysprint_utils/` edits
-  (rule 2 already gates those separately).
-- There is no hand-maintained CHANGELOG file. "What's new" is the GitHub
-  Releases page, linked from the top-right of the App Dashboard
-  (`apps/App_dashboard/gui_components.py::WHATS_NEW_URL`) — releases are cut
-  with `gh release create <tag> --generate-notes`, which builds notes from
-  merged PR titles, so keep PR titles descriptive.
+  change, for that app only. Not for internal refactors, test-only changes, or
+  `shared/perotf_utils/` edits.
+- This repo is a fork: `gh pr create` targets HZB's upstream repo unless
+  `gh repo set-default NOMADe-Joshua/Voila-Apps-V2` was run. Never open a PR
+  against `nomad-hzb/nomad-pv-analysis-apps` unless the user asks for it.
+- "What's new" is the GitHub Releases page, linked from the App Dashboard
+  (`apps/App_dashboard/gui_components.py::WHATS_NEW_URL`); releases are cut
+  with `gh release create <tag> --generate-notes`, so keep PR titles
+  descriptive.
 
-## Known environment gotcha — do not "fix" by deleting `tests/conftest.py`
+## Known environment gotcha: `tests/conftest.py` is load-bearing
 
-The repo's own root `secrets.py` shadows the *stdlib* `secrets` module
-whenever the repo root ends up on `sys.path[0]` (default for any
-`python -m pytest` run from repo root). Modern numpy
-(`numpy.random.bit_generator`) and plotly's `narwhals` dependency both need
-`secrets.randbits`/`secrets.token_hex` from the real stdlib module, so
-without a fix almost every pandas/numpy/plotly-touching test fails with
-`ImportError: cannot import name 'randbits'/'token_hex' from 'secrets'`.
-`tests/conftest.py` strips the repo root from `sys.path` before any test
-module imports, specifically to prevent this — it's load-bearing, not
-boilerplate. If numpy/pandas import errors resurface, first check this file
-still exists before debugging anything else.
+1. A gitignored root `secrets.py` would shadow the *stdlib* `secrets` module
+   whenever the repo root is on `sys.path[0]` (default for `python -m pytest`
+   from the root). numpy and plotly's `narwhals` need `secrets.randbits` /
+   `secrets.token_hex`, so without the fix almost every test fails with
+   `ImportError: cannot import name 'randbits'/'token_hex' from 'secrets'`.
+   `tests/conftest.py` strips the repo root from `sys.path` first.
+2. It puts `shared/` on `sys.path`, provides `app_loader` (imports an app's
+   modules with the app dir on `sys.path` only while importing, then restores
+   `sys.modules` so the next app's `data_manager` is not shadowed) and the
+   autouse no-network guard.
 
-## Known environment gotcha — `display()` inside a widget callback needs an `Output()` under Voila
+Because of (2) and the unique `test_<app_name>.py` basenames, the whole suite
+runs in one go (`python -m pytest tests -m "not live"`), unlike in HZB's repo.
+If numpy/pandas import errors or cross-app module mix-ups appear in tests,
+check this file first.
 
-A plain `display(...)` call (e.g. `display(Javascript(...))`) made from
-inside an ipywidgets event callback (`Button.on_click`, `observe`, etc.) is
-**silently dropped under Voila** — no error, nothing rendered, nothing
-executed. The callback fires from a comm message, not a cell execution, so
-there's no "current output area" for a bare `display()` to land in; classic
-Jupyter notebook has fallback routing for this case, Voila does not.
+## Known environment gotcha: `display()` inside a widget callback needs an `Output()` under Voila
 
-**How to apply:** route any such call through a real `ipywidgets.Output()`
-that stays part of the widget tree actually being displayed (not created and
-immediately discarded):
+A plain `display(...)` call (e.g. `display(Javascript(...))`) made from inside
+an ipywidgets event callback (`Button.on_click`, `observe`, ...) is **silently
+dropped under Voila**. The callback fires from a comm message, not a cell
+execution, so there's no current output area; classic Jupyter has fallback
+routing for this, Voila does not.
+
+**How to apply:** route such calls through a real `ipywidgets.Output()` that
+stays part of the displayed widget tree:
 ```python
 js_output = widgets.Output(layout=widgets.Layout(width="0px", height="0px"))
 # js_output must remain in the tree passed to display(app) / returned by setup_app
+
 
 def on_click(_button):
     with js_output:
         js_output.clear_output(wait=True)
         display(Javascript("..."))
 ```
-See `apps/App_dashboard/app.py::setup_app` (the `js_output` widget) for a
-working example — hit and fixed while building app-launch click tracking
-(issue #7), confirmed empirically against a real local Voila instance: the
-callback's other side effects (writing a log entry) ran fine, but the
-injected script never executed until routed through `Output()`.
+See `apps/App_dashboard/app.py::setup_app` (the `js_output` widget).
 
-## Known environment gotcha — always tear down local test processes (Voila, kernels, Playwright) when done
+## Known environment gotcha: always tear down local test processes (Voila, kernels, Playwright)
 
-`python -m voila` spawns a server process plus one Jupyter kernel per browser
-connection; a Playwright script launches its own Chromium process per run.
-None of these self-terminate reliably when a test script errors out or times
-out — an interrupted `page.goto()`/`page.click()` can leave the kernel and/or
-browser running indefinitely. Across a long session these accumulate
-silently until the machine runs out of memory/handles badly enough that even
-basic OS tooling (`tasklist`, PowerShell's CLR startup) stops responding —
-observed for real: 10+ stray `python.exe` processes from repeated
-Voila-and-Playwright test rounds during the MPPT_Analysis fitting-UI work
-(issue #15), degrading to a point where `tasklist`/PowerShell themselves
-timed out.
+`python -m voila` spawns a server plus one kernel per browser connection; a
+Playwright script launches its own Chromium. None of these self-terminate
+reliably when a script errors out or times out, and across a long session they
+pile up until even `tasklist`/PowerShell stop responding. Every time you launch
+`voila`, a notebook executor or Playwright for manual verification, track the
+PID/port and kill it once you're done. On Windows, if `tasklist`/PowerShell
+hang, use Git Bash's `ps aux` / `kill -9 <pid>`.
 
-**How to apply:** every time you launch `voila`, `pytest`, or a Playwright
-script for manual verification, explicitly kill it (and its port) once
-you're done with it — don't just let it "finish on its own" or move on to
-the next test while it's still running. Track the PID/port you started
-explicitly so cleanup is one targeted kill, not a fishing expedition. On
-Windows, if `tasklist`/PowerShell start hanging, prefer Git Bash's own
-`ps aux` / `kill -9 <pid>` — `ps` runs in the POSIX layer and stays
-responsive even when WMI-backed tooling is struggling under load.
+## Known environment gotcha: every notebook bootstraps via `bootstrap.py`, never its own install cell
 
-## Known environment gotcha — every notebook bootstraps via `bootstrap.py`, never its own install cell
-
-`hysprint_utils` becomes importable in the *current* kernel only if
-something puts `shared/` on `sys.path` directly. A plain
-`pip install <shared dir>` is not enough by itself: a fresh kernel's
-`site.py` already ran before that install happens, so the kernel would need
-a restart before the newly installed package becomes importable. This is
-the literal mechanism behind "Voila apps need to be run twice" — diagnosed
-against `App_dashboard`, see `memory/project_voila_hysprint_utils_install.md`.
-
-**How to apply:** every notebook's cell 0 is exactly:
+`perotf_utils` becomes importable in the *current* kernel only if something
+puts `shared/` on `sys.path` directly; a plain `pip install` needs a kernel
+restart first (the "Voila apps need to be run twice" problem). Every
+notebook's cell 0 is exactly:
 ```python
 import runpy
+
 _ = runpy.run_path("../../bootstrap.py")
 ```
-The `_ =` is load-bearing, not a style tic: `runpy.run_path()` **returns the
-executed module's globals dict**, and a notebook auto-displays the value of
-its last expression — so without the binding, cell 0 dumps `__builtins__`,
-every imported module and every bootstrap function into the app's UI under
-Voila. Hit for real on CE-AME. Don't "simplify" it away.
+The `_ =` is load-bearing: `runpy.run_path()` returns the executed module's
+globals, and a notebook auto-displays the last expression, so without the
+binding cell 0 dumps every bootstrap global into the app's UI under Voila.
 
-The HZB SE Oasis needs the HZB outbound proxy, so `bootstrap.py` applies it
-by default (`HZB_SE_PROXY`) while `HYSPRINT_URL_BASE` is unset or the HZB SE
-URL and no proxy is configured; any other Oasis gets none. Opt out with
-`HTTP_PROXY = ""`/`HTTPS_PROXY = ""` in `oasis_local_config.py`.
+`bootstrap.py` (repo root):
+- applies `oasis_local_config.py` (repo root, gitignored, opt-in): every
+  uppercase string it defines becomes an environment variable, so
+  `PEROTF_URL_BASE` reaches `perotf_utils.config` before any app imports it and
+  `HTTP_PROXY`/`HTTPS_PROXY` are set before pip runs. Container-level variables
+  win. No proxy is applied by default (HZB's version defaults to the HZB proxy;
+  ours deliberately does not).
+- installs `shared/` and inserts it into `sys.path` (a sanctioned exception to
+  rule 8; fatal if it fails and the package cannot be imported).
+- installs **the app's own directory** when the cwd has a `pyproject.toml`
+  (once per container, keyed on path + `pyproject.toml` contents; a failure
+  only warns).
+- silences import-time stdout banners for the rest of the kernel's life
+  (stderr untouched; `PEROTF_KEEP_IMPORT_OUTPUT=1` disables it).
 
-`bootstrap.py` (repo root) installs `shared/` and then inserts it directly
-into `sys.path` — a deliberate, sanctioned exception to rule 8, not
-something to "clean up" if seen again. Before that install runs it also
-applies this deployment's environment from `oasis_local_config.py` (repo
-root, gitignored, same pattern as `secrets.py`; opt-in, absent by default):
-every uppercase string it defines becomes an environment variable of the
-same name, so `HYSPRINT_URL_BASE` reaches `hysprint_utils.config` before
-any app imports it, and `HTTP_PROXY`/`HTTPS_PROXY` are in place before pip
-reaches PyPI for `hatchling`. Container-level variables always win. Adding
-a new override needs no change to `bootstrap.py` — see `DEPLOYMENT.md`.
-After `shared/`, it installs **the app's own directory** when the cwd has a
-`pyproject.toml` — the cwd is the notebook's folder, so that is the app being
-launched. This is the only thing that installs an app's third-party
-dependencies on the Oasis; before it existed those lists were inert at
-runtime, which is how `ISA_Previewer` hit `ModuleNotFoundError:
-insitu_analyser` on a fresh CE-AME container with the pin sitting in its
-`pyproject.toml` all along. It runs once per container, guarded by a marker
-in the temp dir keyed on the app path plus the `pyproject.toml` contents, so
-editing dependencies re-triggers it and an unchanged app never pays twice.
-A failed app install warns and continues (most apps need nothing the NORTH
-image lacks, and breaking a working app over it would be a regression);
-only the `shared/` install is fatal.
-
-Last, it **silences import-time stdout** for the rest of the kernel's life by
-wrapping `builtins.__import__`: several third-party packages greet stdout when
-imported (`insitu_analyser` pulls in INSIGHT, which prints a multi-line
-welcome banner), and under Voila that renders above the app where it reads as
-an error. Cell 0 has returned before an app's imports run, so this has to be a
-lasting hook rather than a `with` block. Narrow on purpose — stderr untouched
-so warnings still surface, runtime output untouched, already-imported modules
-take a fast path, text kept at DEBUG rather than dropped. Set
-`HYSPRINT_KEEP_IMPORT_OUTPUT=1` to disable it while debugging an import. Don't
-add per-app banner suppression on top of this.
-
-Don't reimplement any of this per-app; the two apps that used to have their own
-install cell (`App_dashboard`, `JV-Analysis`) were migrated to call
-`bootstrap.py` instead.
+Don't reimplement any of this per app. See `DEPLOYMENT.md` for the deployment
+side.
 
 ## Known gaps (tracked, not silently fixed)
 
-- `log_notebook_usage()` (in `shared/hysprint_utils/access_token.py`) writes
-  its log file next to itself, so it ends up inside whichever upload that
-  app is installed in — there is no cross-app aggregation. App_dashboard's
-  own copy is the only one anyone normally looks at, which makes it look
-  like "only App_dashboard logs usage," but every app's calls are actually
-  firing into their own isolated copy. Real aggregation needs a
-  `shared/hysprint_utils` change (rule 2 sign-off) plus a central log
-  destination — not attempted; tracked as issue #7, which in the meantime
-  added `log_button_usage`/`button_usage.log` for App_dashboard's own
-  in-dashboard navigation and app-launch clicks.
-- `T20` (flake8-print) is not yet in the root ruff `select` list — enabling
-  it surfaces ~650+ pre-existing `print()` violations across several
-  already-unified and out-of-scope apps. Don't add it without a dedicated
-  cleanup pass across the whole repo; see
-  `project_hysprint_unification_batch2` memory for the exact per-app counts.
-- `TRPL_Analysis`, `XRD_peak_finder`, `NMR_Analysis`, `JV-Analysis` have
-  broken test setups (their `conftest.py` never puts the app dir on
-  `sys.path`, so their own `test_plot_manager.py` fails even in isolation).
-  Pre-existing, not this repo's newest work — don't assume a red test here
-  means you broke something.
-- `pytest tests/` cannot be run as a whole: collection aborts with 11 errors
-  before a single test executes. Two independent causes, both from `tests/`
-  having no packages, so every directory shares one flat module namespace:
-  duplicate test-file basenames (`test_data_manager.py` exists in six app
-  folders, `test_plot_manager.py` and `test_schema.py` in several), and
-  `tests/Entry_Auditor/test_entry_auditor.py` doing
-  `from conftest import FIXTURE_PATH`, which resolves to whichever app's
-  `conftest.py` was imported last (so even
-  `pytest tests/App_dashboard tests/Entry_Auditor` fails, with no new app
-  involved). `--import-mode=importlib` reduces it from 11 errors to 7 but
-  fixes neither fully. Run one app's folder at a time
-  (`pytest tests/<app>/`) until someone packages `tests/`. Pre-existing and
-  unrelated to whichever app you are working on.
-- A `conftest.py` that registers its app's modules under their bare names
-  (`data_manager`, `gui_components`) must restore `sys.modules` to what it
-  found afterwards, not delete the entries. Rule 3 has every app using the
-  same module names, so leaving yours registered hands it to the next app's
-  tests, while deleting outright removes the entry an earlier conftest put
-  there; both show up only when two apps' tests run together. See
-  `tests/ISA_Previewer/conftest.py::_release_bare_names` for the
-  save-and-restore pattern. Renaming an app's modules is not the fix: it
-  would break rule 3 and leaves both collisions above untouched.
-- `XPS-Automated` isn't a real app yet (one raw personal notebook, no
-  `data_manager`/`plot_manager`/`gui_components`/`app.py` split, no sample
-  data in-repo to validate a rewrite against). Needs a dedicated future pass.
-- None of the nine `Electrochemical_analysis` notebooks has a `bootstrap.py`
-  cell, so they get no deployment environment: bootstrap exports
-  `HYSPRINT_URL_BASE` and the proxy into its own process, and a separate kernel
-  never sees them. `hysprint_utils` itself usually still imports (it is
-  pip-installed into the container once any other app has run), but
-  `config.py` then falls back to its own HZB default and no proxy is applied,
-  so on a non-HZB or proxied Oasis these notebooks reach nothing. Adding cell 0
-  to each (the two-line `runpy.run_path` form) is the small fix and is worth
-  doing on its own; the full unification pass is a separate, much bigger job
-  (nine notebooks including `Untitled.ipynb` and a pyDRTtools tutorial,
-  `!pip install impedance` in cell 0 of three, star imports from
-  `Manuel_echem_function` and `nomad_api_calls`). Don't conflate the two.
-- `apps/Excel_creator/sheet_data_entry_guide.py:213` writes an SE Oasis link,
-  and `:224` an HZB-specific `scribehow.com` how-to link, into every generated
-  workbook. Not simply derivable like the other apps: the link leaves in a file
-  that gets mailed around and targets a Voila GUI page, so what it should point
-  at is a decision first. The citation sheet's GitHub links
-  (`sheet_how_to_cite.py:7,16,22,28`) point at the `nomad-hzb/nomad-hysprint`
-  schema repo and may want revisiting in the same pass. Needs a version bump.
-- Open question, no decision yet: how should content tied to one Oasis be
-  handled in general? Three ad-hoc answers already exist — per-item env
-  override with an opt-out (`App_dashboard/data_manager.py:301`, where an empty
-  string drops a Projects card and all six drop the section), deliberate
-  hardcoding (`PeroDatabase_downloader/config.py` pins the SE Oasis as a fixed
-  data source to download *from*, like the public central server), and plain
-  derivation from `hysprint_utils.config` (everything else). Unsettled: whether
-  "Oasis-specific" is a property of a whole app or only of links inside
-  portable apps; whether a non-portable item should be hidden, labelled, or
-  left pointing at its home Oasis; and whether NORTH tool configuration is the
-  right home for this once the plugin packaging below happens. Don't invent a
-  fourth mechanism without settling it.
+- **Notebook apps are still monolithic** (MPPT_Analysis, Data_Overview_Machines,
+  Data_Tools, Diode_Analyzer, Hansen_green_calculator, Peak_Explorer,
+  Perovskite_calculator, SEM_crystal_counter, UVVis_Simulator,
+  Wetting_envelope, XPS-Automated). Next step per app: move the code into
+  `app.py` + modules and reduce the notebook to 3 cells, following
+  `UNIFICATION_PROMPT.md`.
+- **No app has gone through the full checklist yet**: no Pydantic row models,
+  no `load_offline` demo mode or fixtures, tests are import/construction smoke
+  tests only, and most apps still use `print()` (so `T20` is not in the ruff
+  ruleset).
+- `Process_JV_Overview` keeps its own copies of JV-Analysis modules
+  (`plot_manager`, `utils`, `resizable_plot_utility`, ...) that have drifted
+  slightly; consolidating them is a separate change.
+- `perotf_utils.auth_manager.AuthenticationManager.authenticate_with_token()`
+  calls `access_token.get_token(self.url_base)` with the bare host instead of
+  `URL_BASE + API_ENDPOINT`. Harmless while `NOMAD_CLIENT_ACCESS_TOKEN` is set
+  (always the case in NORTH), wrong for the interactive fallback. Pre-existing.
+- The `KIT_` lab-ID prefix is still written literally in `Excel_creator`
+  (Excel ID formula) and `Data_Tools` (renamers). If it should become
+  configurable, add it to `perotf_utils.config` first.
+- `apps/Excel_creator/sheet_how_to_cite.py` writes a "How to Cite" sheet into
+  every generated workbook that cites HZB's `nomad-hzb/nomad-hysprint` schema
+  repo and names the "nomad-hzb-se OASIS"; `sheet_data_entry_guide.py` links an
+  HZB scribehow how-to, and its example values name HZB tools
+  ("HZB-HySprintBox", "Hysprint Evap"). `apps/JV-Analysis/manual.html` (not
+  loaded by the app) still addresses "HZB Users". All unchanged from the old
+  repo; what peroTF content should say there is a content decision, not a
+  structural one, and needs a version bump when changed.
+- `log_notebook_usage()` writes next to `perotf_utils/access_token.py`, i.e.
+  `shared/perotf_utils/notebook_usage.log` inside the upload; the log contains
+  user names and is gitignored. `shared/log_view.ipynb` and `shared/utils.ipynb`
+  read it from there.
+- `Learning/04_HandlingJVdata.ipynb` contains a placeholder batch id
+  (`KIT_XXX_YYYYMMDD_BATCH`) that needs a real peroTF batch before it runs.
+- `apps/Wetting_envelope/Untitled.ipynb` is a generator that writes
+  `wetting_envelope_app.ipynb` from a template without the bootstrap cell;
+  re-running it would undo the migration of that notebook.
+- Not migrated from the old repo on purpose (they targeted the HZB server):
+  `File_Uploader`, `Ink_Jet_Absorber_Analysis`, `NMR_Analysis`,
+  `Diode_Analyzer/Osails_version.ipynb`, `Diode_Analyzer/advanced_fitting.ipynb`.
+  They remain in `nomad-perotf-jupyter-voila-scripts`.
+- Still open, as at HZB: whether this repo should become an installable NOMAD
+  plugin (NORTH tool entry points, Docker images). Nothing of that exists; don't
+  scaffold it without explicit sign-off.
 
-## Ultimate goal: NOMAD plugin
+## graphify
 
-This repo is meant to eventually become an installable NOMAD plugin (NORTH
-tool entry points, one per app or grouped, published as Docker images).
-That work has NOT started — no `north_tools/`, no Dockerfiles, no root
-`[project]` table. Do not scaffold any of that without explicit sign-off on
-the open questions (repo layout, package name, one-image-vs-per-tool,
-registry) — see `FINALIZE_UNIFICATION_PROMPT.md`'s "Ultimate goal" section.
+This project has a knowledge graph at graphify-out/ with god nodes, community
+structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when
+  graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for
+  relationships and `graphify explain "<concept>"` for focused concepts. These
+  return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw
+  grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of
+  raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when
+  query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current
+  (AST-only, no API cost).
+- Notebook-only apps are mostly invisible to the graph (it extracts `.py`
+  files); search their `.ipynb` files directly.

@@ -3,13 +3,17 @@ Data Manager for the Design of Experiments application.
 Handles variable management, data validation, and file I/O operations.
 """
 
+import base64
+import csv
+import io
+import json
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-from utils import ValidationUtils
+from utils import Constants, ValidationUtils
 
 
 class VariableType(Enum):
@@ -362,8 +366,7 @@ class DataManager:
                     if len(parts) < 4 or len(parts) > 5:
                         return (
                             False,
-                            f"Line {line_num}: Discrete variables need: "
-                            "name,discrete,min,max[,step]",
+                            f"Line {line_num}: Discrete variables need: name,discrete,min,max[,step]",
                             [],
                         )
 
@@ -404,8 +407,7 @@ class DataManager:
                 else:
                     return (
                         False,
-                        f"Line {line_num}: Unknown variable type '{var_type}'. "
-                        "Use: continuous, discrete, or categorical",
+                        f"Line {line_num}: Unknown variable type '{var_type}'. Use: continuous, discrete, or categorical",
                         [],
                     )
 

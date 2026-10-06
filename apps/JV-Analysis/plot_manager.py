@@ -1,6 +1,6 @@
 """
 Plot Management Module
-Handles all plotting operations including JV curves, boxplots, and histograms.
+Handles all plotting operations including JV curves and boxplots.
 Extracted from main.py for better organization.
 """
 
@@ -8,7 +8,8 @@ __author__ = "Edgar Nandayapa"
 __institution__ = "Helmholtz-Zentrum Berlin"
 __created__ = "August 2025"
 
-import logging
+import math  # Add this import for ceiling calculation
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -19,12 +20,9 @@ from plotly.subplots import make_subplots
 try:
     from utils import save_combined_excel_data
 except ImportError:
-
+    # Fallback if utils not available
     def save_combined_excel_data(*args, **kwargs):
         return None
-
-
-logger = logging.getLogger(__name__)
 
 
 def _flatten_multiindex_columns(self, df):
@@ -34,69 +32,30 @@ def _flatten_multiindex_columns(self, df):
     return df
 
 
-def _parse_custom_order(order_str):
-    """
-    Parse a custom order string into an ordered list of display groups.
-
-    Format examples:
-        "L1, L2, L3"                        → simple ordered list
-        "(L1, l1, 10min), L2, (L3, 30min)"  → aliased groups; first alias is displayed,
-                                               all aliases in a group match the same category
-
-    Returns a list of dicts [{'display': str, 'aliases': [str, ...]}, ...],
-    or None if the string is empty.
-    """
-    order_str = order_str.strip()
-    if not order_str:
-        return None
-
-    # Split by top-level commas (ignore commas inside parentheses)
-    tokens = []
-    depth = 0
-    current = ""
-    for char in order_str:
-        if char == "(":
-            depth += 1
-            current += char
-        elif char == ")":
-            depth -= 1
-            current += char
-        elif char == "," and depth == 0:
-            tokens.append(current.strip())
-            current = ""
-        else:
-            current += char
-    if current.strip():
-        tokens.append(current.strip())
-
-    groups = []
-    for token in tokens:
-        token = token.strip()
-        if not token:
-            continue
-        if token.startswith("(") and token.endswith(")"):
-            aliases = [a.strip() for a in token[1:-1].split(",") if a.strip()]
-            if aliases:
-                groups.append({"display": aliases[0], "aliases": aliases})
-        else:
-            groups.append({"display": token, "aliases": [token]})
-
-    return groups if groups else None
-
-
 def plotting_string_action(
     plot_list,
     data,
     supp,
     is_voila=False,
     color_scheme=None,
-    sort_order="Alphanumeric ↑",
-    custom_order="",
-    direction_split=False,
-    flip_current=False,
-):  # noqa: E501
+    separate_scan_dir=False,
+    font_size_axis=None,
+    font_size_title=None,
+    font_size_legend=None,
+    jv_line_width=None,
+    condition_order=None,
+):
     """
     Main plotting function that processes plot codes and creates figures.
+
+    Parameters:
+    -----------
+    font_size_axis : int, optional
+        Font size for axis labels and tick labels (default: 15)
+    font_size_title : int, optional
+        Font size for plot titles (default: 16)
+    font_size_legend : int, optional
+        Font size for legend text (default: 10)
     """
     filtered_jv, complete_jv, filtered_curves = data
     omitted_jv, filter_pars, is_conditions, path, samples = supp
@@ -106,6 +65,13 @@ def plotting_string_action(
     # Create plot manager
     plot_manager = PlotManager()
     plot_manager.set_output_path(path)
+
+    # Set font sizes if provided
+    if font_size_axis is not None or font_size_title is not None or font_size_legend is not None:
+        plot_manager.set_font_sizes(font_size_axis, font_size_title, font_size_legend)
+
+    if jv_line_width is not None:
+        plot_manager.set_jv_line_width(jv_line_width)
 
     if color_scheme is None:
         color_scheme = [
@@ -128,13 +94,13 @@ def plotting_string_action(
         "e": "batch",
         "g": "condition",
         "s": "status",
+        "k": "subbatch",
     }
     vary_dict = {
         "v": "voc",
         "j": "jsc",
         "f": "ff",
         "p": "pce",
-        "x": "vocxff",
         "u": "vmpp",
         "i": "jmpp",
         "m": "pmpp",
@@ -156,223 +122,103 @@ def plotting_string_action(
         if "g" in pl and not is_conditions:
             continue
 
-        # Extract variables from plot code
-        var_x = next((varx_dict[key] for key in varx_dict if key in pl), None)
-        var_y = next((vary_dict[key] for key in vary_dict if key in pl), None)
+        # CRITICAL FIX: sanitize 'all' and use PRIORITY parsing for var_x (Option 2)
+        parse_code = pl
+        if pl.startswith("Ball") or pl.startswith("Jall"):
+            parse_code = pl.replace("all", "")
 
-        try:
-            if pl in ("BCORR", "BCORR_ALL"):
-                use_all = pl == "BCORR_ALL"
-                corr_data = complete_jv if use_all else filtered_jv
-                fig, fig_name = plot_manager.create_correlation_plot(
-                    corr_data, [omitted_jv, filter_pars], all_data=use_all
-                )
-                fig_list.append(fig)
-                fig_names.append(fig_name)
-                continue
-            elif pl in ("BSCORR", "BSCORR_ALL"):
-                use_all = pl == "BSCORR_ALL"
-                corr_data = complete_jv if use_all else filtered_jv
-                fig, fig_name = plot_manager.create_correlation_scatter_matrix(
-                    corr_data, [omitted_jv, filter_pars], all_data=use_all
-                )
-                fig_list.append(fig)
-                fig_names.append(fig_name)
-                continue
-            elif pl.startswith("BVJFP"):
-                rest = pl[6:] if len(pl) > 6 else "a"
-                dir_split = rest.endswith("D")
-                x_code = rest[:-1] if dir_split else rest
-                x_code = x_code or "a"
-                var_x_map = {
-                    "e": "batch",
-                    "g": "condition",
+        # Priority for grouping tokens from Option 2:
+        # prefer 'g' (condition), then 'e' (batch), 'a' (sample), 'b' (cell),
+        # 'c' (direction), 's' (status), 'd' (ilum), 'k' (subbatch)
+        varx_priority = ["g", "e", "a", "b", "c", "s", "d", "k"]
+
+        # Determine var_x using priority (instead of arbitrary substring match)
+        var_x = None
+        for key in varx_priority:
+            if key in parse_code:
+                var_x = {
                     "a": "sample",
                     "b": "cell",
                     "c": "direction",
+                    "d": "ilum",
+                    "e": "batch",
+                    "g": "condition",
                     "s": "status",
-                }
-                var_x = var_x_map.get(x_code, "sample")
-                fig, fig_name = plot_manager.create_voc_jsc_ff_pce_subplots(
+                    "k": "subbatch",
+                }[key]
+                break
+
+        # Determine var_y normally (single-char JV param code)
+        vary_dict = {
+            "v": "voc",
+            "j": "jsc",
+            "f": "ff",
+            "p": "pce",
+            "u": "vmpp",
+            "i": "jmpp",
+            "m": "pmpp",
+            "r": "rser",
+            "h": "rshu",
+            "y": "hysteresis",
+        }
+        var_y = next((vary_dict[key] for key in vary_dict if key in parse_code), None)
+
+        # CRITICAL: Initialize fig and fig_name to None at start of each iteration
+        fig = None
+        fig_name = None
+
+        try:
+            # Combined grid for 'all' – now gets correct var_x from Option 2
+            if "Ball" in pl and var_x:
+                fig, fig_name = plot_manager.create_combined_boxplot_grid(
                     filtered_jv,
+                    var_x,
                     [omitted_jv, filter_pars],
+                    "data",
                     colors=color_scheme,
-                    var_x=var_x,
-                    direction_split=dir_split,
+                    separate_scan_dir=separate_scan_dir,
                 )
-                fig_list.append(fig)
-                fig_names.append(fig_name)
-                continue
-            elif "csg" in pl and var_y:
-                # Direction, Status and Variable combination plots
-                figs, fig_names_combo = plot_manager.create_triple_combination_plots(
-                    filtered_jv, var_y, "csg", [omitted_jv, filter_pars], colors=color_scheme
+            # Regular boxplots (hysteresis merges Forward/Reverse into one value per device)
+            elif "B" in pl and var_x and var_y == "hysteresis":
+                fig, fig_name, wb, title_text, subtitle = plot_manager.create_hysteresis_boxplot(
+                    filtered_jv, var_x, [omitted_jv, filter_pars], "data", colors=color_scheme
                 )
-                fig_list.extend(figs)
-                fig_names.extend(fig_names_combo)
-                continue
-            elif "CwH" in pl:
-                fig, fig_name = plot_manager.create_jv_best_device_plot(
-                    filtered_jv,
-                    filtered_curves,
-                    colors=color_scheme,
-                    show_summary=False,
-                    flip_current=flip_current,
-                )
-            elif "Cxw" in pl:
-                # Create curves that match filtered JV data
-                working_curves = plot_manager._create_matching_curves_data(
-                    filtered_jv, complete_curves
-                )
-                figs, fig_names_new = plot_manager.create_jv_separated_by_cell_plot(
-                    filtered_jv,
-                    working_curves,
-                    colors=color_scheme,
-                    plot_type="working",
-                    flip_current=flip_current,
-                )
-                if isinstance(figs, list) and isinstance(fig_names_new, list):
-                    fig_list.extend(figs)
-                    fig_names.extend(fig_names_new)
-                else:
-                    fig_list.append(figs)
-                    fig_names.append(fig_names_new)
-                continue
-            elif "Cdw" in pl:
-                # Separated by substrate (working only) - USE FILTERED DATA
-                working_curves = plot_manager._create_matching_curves_data(
-                    filtered_jv, complete_curves
-                )
-                figs, fig_names_new = plot_manager.create_jv_separated_by_substrate_plot(
-                    filtered_jv,
-                    working_curves,
-                    colors=color_scheme,
-                    plot_type="working",
-                    flip_current=flip_current,
-                )
-                if isinstance(figs, list) and isinstance(fig_names_new, list):
-                    fig_list.extend(figs)
-                    fig_names.extend(fig_names_new)
-                else:
-                    fig_list.append(figs)
-                    fig_names.append(fig_names_new)
-                continue
-            elif "sg" in pl and var_y:
-                # Status and Variable combination plots
-                figs, fig_names_combo = plot_manager.create_combination_plots(
-                    filtered_jv, var_y, "sg", [omitted_jv, filter_pars], colors=color_scheme
-                )
-                fig_list.extend(figs)
-                fig_names.extend(fig_names_combo)
-                continue
-            elif "cg" in pl and var_y:
-                # Direction and Variable combination plots
-                figs, fig_names_combo = plot_manager.create_combination_plots(
-                    filtered_jv, var_y, "cg", [omitted_jv, filter_pars], colors=color_scheme
-                )
-                fig_list.extend(figs)
-                fig_names.extend(fig_names_combo)
-                continue
-            elif "bg" in pl and var_y:
-                # Cell and Variable combination plots
-                figs, fig_names_combo = plot_manager.create_combination_plots(
-                    filtered_jv, var_y, "bg", [omitted_jv, filter_pars], colors=color_scheme
-                )
-                fig_list.extend(figs)
-                fig_names.extend(fig_names_combo)
-                continue
             elif "B" in pl and var_x and var_y:
-                fig, fig_name, _ = plot_manager.create_boxplot(
+                fig, fig_name, wb, title_text, subtitle = plot_manager.create_boxplot(
                     filtered_jv,
                     var_x,
                     var_y,
                     [omitted_jv, filter_pars],
                     "data",
                     colors=color_scheme,
-                    sort_order=sort_order,
-                    custom_order=custom_order,
-                    direction_split="D" in pl,
+                    separate_scan_dir=separate_scan_dir,
                 )
-            elif "J" in pl and var_x and var_y:
-                fig, fig_name, _ = plot_manager.create_boxplot(
-                    omitted_jv,
-                    var_x,
-                    var_y,
-                    [filtered_jv, filter_pars],
-                    "junk",
-                    sort_order=sort_order,
-                    custom_order=custom_order,
-                    direction_split="D" in pl,
-                )
-            elif "H" in pl and var_y:
-                fig, fig_name = plot_manager.create_histogram(filtered_jv, var_y)
-            # Best-device-by-batch/variable variants (must come before generic "Cw" check)
-            elif pl.startswith("CwBT"):
-                show_summary = not pl.endswith("H")
-                fig, fig_name = plot_manager.create_jv_best_by_batch_together(
+            elif "Cb" in pl:
+                fig, fig_name = plot_manager.create_jv_best_per_condition_plot(
                     filtered_jv,
                     filtered_curves,
                     colors=color_scheme,
-                    show_summary=show_summary,
-                    flip_current=flip_current,
+                    condition_order=condition_order,
                 )
-            elif pl.startswith("CwBS"):
-                show_summary = not pl.endswith("H")
-                figs, fig_names_new = plot_manager.create_jv_best_by_batch_separate(
-                    filtered_jv,
-                    filtered_curves,
-                    colors=color_scheme,
-                    show_summary=show_summary,
-                    flip_current=flip_current,
-                )
-                fig_list.extend(figs)
-                fig_names.extend(fig_names_new)
-                continue
-            elif pl.startswith("CwVT"):
-                show_summary = not pl.endswith("H")
-                fig, fig_name = plot_manager.create_jv_best_by_variable_together(
-                    filtered_jv,
-                    filtered_curves,
-                    colors=color_scheme,
-                    show_summary=show_summary,
-                    flip_current=flip_current,
-                )
-            elif pl.startswith("CwVS"):
-                show_summary = not pl.endswith("H")
-                figs, fig_names_new = plot_manager.create_jv_best_by_variable_separate(
-                    filtered_jv,
-                    filtered_curves,
-                    colors=color_scheme,
-                    show_summary=show_summary,
-                    flip_current=flip_current,
-                )
-                fig_list.extend(figs)
-                fig_names.extend(fig_names_new)
-                continue
+                fig = plot_manager.apply_jv_line_width_to_figure(fig)
             elif "Cw" in pl:
                 fig, fig_name = plot_manager.create_jv_best_device_plot(
-                    filtered_jv,
-                    filtered_curves,
-                    colors=color_scheme,
-                    flip_current=flip_current,
+                    filtered_jv, filtered_curves, colors=color_scheme
                 )
+                fig = plot_manager.apply_jv_line_width_to_figure(fig)
             elif "Cy" in pl:
                 fig, fig_name = plot_manager.create_jv_all_cells_plot(
-                    complete_jv,
-                    filtered_curves,
-                    colors=color_scheme,
-                    flip_current=flip_current,
+                    complete_jv, filtered_curves, colors=color_scheme
                 )
+                fig = plot_manager.apply_jv_line_width_to_figure(fig)
             elif "Cz" in pl:
                 working_curves = plot_manager._create_matching_curves_data(
                     filtered_jv, complete_curves
                 )
                 fig, fig_name = plot_manager.create_jv_working_cells_plot(
-                    filtered_jv,
-                    working_curves,
-                    colors=color_scheme,
-                    flip_current=flip_current,
+                    filtered_jv, working_curves, colors=color_scheme
                 )
+                fig = plot_manager.apply_jv_line_width_to_figure(fig)
             elif "Co" in pl:
                 if not omitted_jv.empty:
                     rejected_pce_min = omitted_jv["PCE(%)"].min()
@@ -386,65 +232,60 @@ def plotting_string_action(
                     for _, row in rejected_samples.iterrows():
                         reason = row.get("filter_reason", "No reason specified")
                 else:
-                    logger.debug("  No rejected data available!")
+                    print("  No rejected data available!")
 
                 # Create filtered curves that match only the omitted JV data
                 rejected_curves = plot_manager._create_matching_curves_data(
                     omitted_jv, complete_curves
                 )
 
-                logger.debug("  Rejected curves after filtering: %s", len(rejected_curves))
+                print(f"  Rejected curves after filtering: {len(rejected_curves)}")
 
                 if not rejected_curves.empty:
                     unique_rejected_devices = (
                         rejected_curves.groupby(["sample", "cell"]).size().reset_index()
                     )
                 fig, fig_name = plot_manager.create_jv_non_working_cells_plot(
-                    omitted_jv,
-                    rejected_curves,
-                    colors=color_scheme,
-                    flip_current=flip_current,
+                    omitted_jv, rejected_curves, colors=color_scheme
                 )
+                fig = plot_manager.apply_jv_line_width_to_figure(fig)
             elif "Cx" in pl:
-                figs, fig_names_new = plot_manager.create_jv_separated_by_cell_plot(
-                    complete_jv,
-                    complete_curves,
-                    colors=color_scheme,
-                    flip_current=flip_current,
+                figs, fig_names_temp = plot_manager.create_jv_separated_by_cell_plot(
+                    complete_jv, complete_curves, colors=color_scheme
                 )
-                if isinstance(figs, list) and isinstance(fig_names_new, list):
+                if isinstance(figs, list) and isinstance(fig_names_temp, list):
+                    figs = [plot_manager.apply_jv_line_width_to_figure(f) for f in figs]
                     fig_list.extend(figs)
-                    fig_names.extend(fig_names_new)
+                    fig_names.extend(fig_names_temp)
                 else:
+                    figs = plot_manager.apply_jv_line_width_to_figure(figs)
                     fig_list.append(figs)
-                    fig_names.append(fig_names_new)
+                    fig_names.append(fig_names_temp)
                 continue
             elif "Cd" in pl:
-                figs, fig_names_new = plot_manager.create_jv_separated_by_substrate_plot(
-                    complete_jv,
-                    complete_curves,
-                    colors=color_scheme,
-                    plot_type="all",
-                    flip_current=flip_current,
+                figs, fig_names_temp = plot_manager.create_jv_separated_by_substrate_plot(
+                    complete_jv, complete_curves, colors=color_scheme, plot_type="all"
                 )
-                if isinstance(figs, list) and isinstance(fig_names_new, list):
+                if isinstance(figs, list) and isinstance(fig_names_temp, list):
+                    figs = [plot_manager.apply_jv_line_width_to_figure(f) for f in figs]
                     fig_list.extend(figs)
-                    fig_names.extend(fig_names_new)
+                    fig_names.extend(fig_names_temp)
                 else:
+                    figs = plot_manager.apply_jv_line_width_to_figure(figs)
                     fig_list.append(figs)
-                    fig_names.append(fig_names_new)
+                    fig_names.append(fig_names_temp)
                 continue
             else:
-                logger.debug("Plot code %s not fully implemented yet", pl)
+                print(f"Plot code {pl} not fully implemented yet")
                 continue
 
-            # Only append single figures (combination plots already added above)
-            if "fig" in locals():
+            # CRITICAL: Only append if fig was actually created
+            if fig is not None and fig_name is not None:
                 fig_list.append(fig)
                 fig_names.append(fig_name)
 
         except Exception as e:
-            logger.error("❌ Error creating plot %s: %s", pl, e)
+            print(f"❌ Error creating plot {pl}: {e}")
             import traceback
 
             traceback.print_exc()
@@ -459,36 +300,31 @@ def plot_list_from_voila(plot_list):
         "Voc": "v",
         "Jsc": "j",
         "FF": "f",
+        "Hysteresis": "y",
         "PCE": "p",
-        "Voc x FF": "x",
         "R_ser": "r",
         "R_shu": "h",
         "V_mpp": "u",
         "J_mpp": "i",
         "P_mpp": "m",
+        "all": "all",  # Maps to combined grid boxplot
     }
+
     box_dict = {
         "by Batch": "e",
         "by Variable": "g",
         "by Sample": "a",
         "by Cell": "b",
         "by Scan Direction": "c",
-        "by Status": "s",
-        "by Status and Variable": "sg",
-        "by Direction and Variable": "cg",
-        "by Cell and Variable": "bg",
-        "by Direction, Status and Variable": "csg",
+        "by Subbatch": "k",
     }
+
     cur_dict = {
         "All cells": "Cy",
         "Only working cells": "Cz",
         "Rejected cells": "Co",
-        "Best device only": "Cw",  # backward compat
-        "Best device overall": "Cw",
-        "Best device by batch (together)": "CwBT",
-        "Best device by batch (separate)": "CwBS",
-        "Best device by variable (together)": "CwVT",
-        "Best device by variable (separate)": "CwVS",
+        "Best device only": "Cw",
+        "Best device per condition": "Cb",
         "Separated by cell (all)": "Cx",
         "Separated by cell (working only)": "Cxw",
         "Separated by substrate (all)": "Cd",
@@ -498,53 +334,18 @@ def plot_list_from_voila(plot_list):
     new_list = []
     for plot in plot_list:
         code = ""
-        if len(plot) == 4:
-            plot_type, option1, option2, direction_split_row = plot
-        else:
-            plot_type, option1, option2 = plot
-            direction_split_row = False
+        plot_type, option1, option2 = plot
 
-        if "omitted" in plot_type:
-            code += "J"
-            code += jvc_dict.get(option1, "")
-            code += box_dict.get(option2, "")
-            if direction_split_row:
-                code += "D"
-        elif plot_type == "Correlation Matrix":
-            suffix = "_ALL" if option2 == "All data" else ""
-            if option1 == "Heatmap":
-                new_list.append("BCORR" + suffix)
-            elif option1 == "Scatter":
-                new_list.append("BSCORR" + suffix)
-            continue
-        elif "Boxplot" in plot_type:
-            if option1 == "The big 4: Voc, Jsc, FF, PCE":
-                x_code = box_dict.get(option2, "a")
-                dir_suffix = "D" if direction_split_row else ""
-                new_list.append("BVJFP_" + x_code + dir_suffix)
-                continue
+        if "Boxplot" in plot_type:
             code += "B"
-            code += jvc_dict.get(option1, "")
-            code += box_dict.get(option2, "")
-            if direction_split_row:
-                code += "D"
-        elif "Histogram" in plot_type:
-            code += "H"
-            code += jvc_dict.get(option1, "")
-        elif "JV Curve" in plot_type:
-            _best_opts = {
-                "Best device only",
-                "Best device overall",
-                "Best device by batch (together)",
-                "Best device by batch (separate)",
-                "Best device by variable (together)",
-                "Best device by variable (separate)",
-            }
-            if option1 in _best_opts:
-                base = cur_dict.get(option1, "Cw")
-                code = base + ("H" if option2 == "Hide JV summary" else "")
+            param_code = jvc_dict.get(option1, "")
+            code += param_code
+            if param_code != "all":
+                code += box_dict.get(option2, "")
             else:
-                code += cur_dict.get(option1, "")
+                code += box_dict.get(option2, "")
+        elif "JV Curve" in plot_type:
+            code += cur_dict.get(option1, "")
 
         if code:
             new_list.append(code)
@@ -555,30 +356,195 @@ def plot_list_from_voila(plot_list):
 class PlotManager:
     """Manages all plotting operations for JV analysis"""
 
-    # Short option code -> actual JV parameter column name. These are the real
-    # DataFrame column names (also used for data access), so they keep their existing
-    # "name(unit)" form -- never rename these values, only their *display* form below.
-    PARAM_COLUMNS = {
-        "voc": "Voc(V)",
-        "jsc": "Jsc(mA/cm2)",
-        "ff": "FF(%)",
-        "pce": "PCE(%)",
-        "vocxff": "Voc x FF(V%)",
-        "vmpp": "V_mpp(V)",
-        "jmpp": "J_mpp(mA/cm2)",
-        "pmpp": "P_mpp(mW/cm2)",
-        "rser": "R_series(Ohmcm2)",
-        "rshu": "R_shunt(Ohmcm2)",
-    }
-
-    # Column name -> axis/legend display label, with units in [..] rather than (..).
-    UNIT_LABELS = {col: col.replace("(", " [").replace(")", "]") for col in PARAM_COLUMNS.values()}
-
     def __init__(self):
         self.plot_output_path = ""
+        self.font_size_axis = 15  # Default font size for axis labels
+        self.font_size_title = 16  # Default font size for titles
+        self.font_size_legend = 10  # Default font size for legend
+        self.jv_line_width = 2.0  # Default JV curve line width
+        # REMOVED: No more FIXED_CATEGORY_COLORS - only use selected color scheme
 
     def set_output_path(self, path):
         self.plot_output_path = path
+
+    def set_font_sizes(self, axis_size=None, title_size=None, legend_size=None):
+        """Set font sizes for plots"""
+        if axis_size is not None:
+            self.font_size_axis = axis_size
+        if title_size is not None:
+            self.font_size_title = title_size
+        if legend_size is not None:
+            self.font_size_legend = legend_size
+
+    def set_jv_line_width(self, line_width=None):
+        """Set default JV curve line width for JV curve plots."""
+        if line_width is None:
+            return
+        try:
+            self.jv_line_width = float(line_width)
+        except (TypeError, ValueError):
+            pass
+
+    def apply_jv_line_width_to_figure(self, fig):
+        """Apply JV line width to all line-based scatter traces in a figure."""
+        if fig is None:
+            return fig
+
+        for trace in fig.data:
+            mode = getattr(trace, "mode", "")
+            trace_type = getattr(trace, "type", "")
+            if trace_type == "scatter" and isinstance(mode, str) and "lines" in mode:
+                if getattr(trace, "line", None) is None:
+                    trace.line = go.scatter.Line(width=self.jv_line_width)
+                else:
+                    cast(Any, trace.line).width = self.jv_line_width
+
+        return fig
+
+    def create_jv_all_cells_plot(self, jvc_data, curves_data, colors=None):
+        """Compatibility wrapper for the all-cells JV plot."""
+        return self._create_jv_cells_plot(jvc_data, curves_data, colors=colors, plot_mode="all")
+
+    def create_jv_working_cells_plot(self, jvc_data, curves_data, colors=None):
+        """Compatibility wrapper for the working-cells JV plot."""
+        return self._create_jv_cells_plot(jvc_data, curves_data, colors=colors, plot_mode="working")
+
+    def create_jv_non_working_cells_plot(self, jvc_data, curves_data, colors=None):
+        """Compatibility wrapper for the non-working-cells JV plot."""
+        return self._create_jv_cells_plot(
+            jvc_data, curves_data, colors=colors, plot_mode="non-working"
+        )
+
+    def _create_jv_cells_plot(self, jvc_data, curves_data, colors=None, plot_mode="all"):
+        """Create a combined JV plot grouped by sample and cell."""
+        if jvc_data is None or jvc_data.empty:
+            fig = go.Figure()
+            fig.update_layout(title="No data available")
+            return fig, f"JV_{plot_mode}_cells.html"
+
+        data = jvc_data[jvc_data["cell"].notna()].copy()
+        if data.empty:
+            fig = go.Figure()
+            fig.update_layout(title="No data available")
+            return fig, f"JV_{plot_mode}_cells.html"
+
+        if colors is None:
+            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+
+        fig = go.Figure()
+        unique_pairs = data[["sample", "cell"]].drop_duplicates()
+        for idx, (_, pair_row) in enumerate(unique_pairs.iterrows()):
+            sample = pair_row["sample"]
+            cell = pair_row["cell"]
+            group_data = data[(data["sample"] == sample) & (data["cell"] == cell)]
+            voltage_data = group_data[group_data["variable"] == "Voltage (V)"]
+            current_data = group_data[group_data["variable"] == "Current Density(mA/cm2)"]
+            if voltage_data.empty or current_data.empty:
+                continue
+
+            max_voc = group_data["Voc(V)"].max() if "Voc(V)" in group_data.columns else 1.2
+            x_max = (math.ceil(max_voc * 10) / 10) + 0.1
+            fig.add_shape(
+                type="line", x0=-0.2, y0=0, x1=x_max, y1=0, line=dict(color="gray", width=2)
+            )
+            fig.add_shape(type="line", x0=0, y0=-5, x1=0, y1=25, line=dict(color="gray", width=2))
+
+            for row_idx in voltage_data.index.intersection(current_data.index):
+                voltage_values = voltage_data.loc[row_idx, voltage_data.columns[8:]].values
+                current_values = current_data.loc[row_idx, current_data.columns[8:]].values
+                if np.all(pd.isna(voltage_values)) or np.all(pd.isna(current_values)):
+                    continue
+
+                voltage_values, current_values = self._mask_boundary_zero_point(
+                    voltage_values, current_values
+                )
+                if len(voltage_values) == 0 or len(current_values) == 0:
+                    continue
+
+                base_color = colors[idx % len(colors)]
+                fig.add_trace(
+                    go.Scatter(
+                        x=voltage_values,
+                        y=current_values,
+                        mode="lines+markers",
+                        line=dict(color=base_color, width=2),
+                        marker=dict(size=6, color=base_color),
+                        name=f"{sample}_{cell}",
+                        legendgroup=f"{sample}_{cell}",
+                        showlegend=True,
+                    )
+                )
+
+        title_suffix = (
+            "All Cells"
+            if plot_mode == "all"
+            else ("Working Cells Only" if plot_mode == "working" else "Non-Working Cells Only")
+        )
+        fig.update_layout(
+            title=f"JV Curves - {title_suffix}",
+            xaxis_title="Voltage [V]",
+            yaxis_title="Current Density [mA/cm²]",
+            template="plotly_white",
+            showlegend=True,
+            width=1600,
+            height=1000,
+        )
+        fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="lightgray")
+        fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="lightgray")
+        return fig, f"JV_{plot_mode}_cells.html"
+
+    def apply_font_sizes_to_axes(self, fig):
+        """Apply current font size settings to a figure's axes"""
+        fig.update_xaxes(
+            titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+        )
+        fig.update_yaxes(
+            titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+        )
+        return fig
+
+    def _mask_boundary_zero_point(
+        self, voltage_values, current_values, atol=1e-12, max_endpoint_step=0.5
+    ):
+        """Remove boundary artifacts from JV arrays.
+
+        Keeps valid inner (0,0) points untouched and removes the first and/or
+        last point if both voltage and current are approximately zero.
+        Also removes a boundary point when the voltage step to its neighbor is
+        unusually large, which catches stray 0 V / 1 V endpoints.
+        """
+        v = np.asarray(voltage_values, dtype=float)
+        c = np.asarray(current_values, dtype=float)
+
+        if v.size == 0 or c.size == 0:
+            return [], []
+
+        n = min(len(v), len(c))
+        v = v[:n]
+        c = c[:n]
+
+        valid_mask = ~(np.isnan(v) | np.isnan(c))
+        v = v[valid_mask]
+        c = c[valid_mask]
+
+        if len(v) == 0:
+            return [], []
+
+        if len(v) > 1 and np.isclose(v[0], 0.0, atol=atol) and np.isclose(c[0], 0.0, atol=atol):
+            v = v[1:]
+            c = c[1:]
+        elif len(v) > 1 and abs(v[1] - v[0]) > max_endpoint_step:
+            v = v[1:]
+            c = c[1:]
+
+        if len(v) > 1 and np.isclose(v[-1], 0.0, atol=atol) and np.isclose(c[-1], 0.0, atol=atol):
+            v = v[:-1]
+            c = c[:-1]
+        elif len(v) > 1 and abs(v[-1] - v[-2]) > max_endpoint_step:
+            v = v[:-1]
+            c = c[:-1]
+
+        return v.tolist(), c.tolist()
 
     def _extract_rgb_from_color(self, color_string):
         """Extract RGB values from color string"""
@@ -612,7 +578,7 @@ class PlotManager:
 
         # Use sample_id for precise matching if available
         if "sample_id" in jv_data.columns and "sample_id" in curves_data.columns:
-            logger.debug("  Using sample_id for precise matching")
+            print("  Using sample_id for precise matching")
 
             # Create set of exact measurement combinations from JV data
             jv_combinations = set()
@@ -636,12 +602,12 @@ class PlotManager:
                     duplicate_combinations.append(combination)
                 jv_combinations.add(combination)
 
-            logger.debug("  JV combinations to match: %s", len(jv_combinations))
-            logger.debug("  Total JV records: %s", len(jv_data))
-            logger.debug("  Duplicate combinations found: %s", len(duplicate_combinations))
+            print(f"  JV combinations to match: {len(jv_combinations)}")
+            print(f"  Total JV records: {len(jv_data)}")
+            print(f"  Duplicate combinations found: {len(duplicate_combinations)}")
 
             if len(duplicate_combinations) > 0:
-                logger.debug("  Example duplicates: %s", duplicate_combinations[:3])
+                print(f"  Example duplicates: {duplicate_combinations[:3]}")
                 # Show what makes these records different
                 example_dup = duplicate_combinations[0] if duplicate_combinations else None
                 if example_dup:
@@ -662,12 +628,10 @@ class PlotManager:
                             & (jv_data["direction"] == direction)
                             & (jv_data["ilum"] == ilum)
                         ]
-                    logger.debug("  Records with same combination:")
+                    print("  Records with same combination:")
                     for _, record in matching_records.iterrows():
-                        logger.debug(
-                            "    PCE: %.2f%%, Status: %s",
-                            record["PCE(%)"],
-                            record.get("status", "N/A"),
+                        print(
+                            f"    PCE: {record['PCE(%)']:.2f}%, Status: {record.get('status', 'N/A')}"
                         )
 
             # Filter curves using exact matching
@@ -693,7 +657,7 @@ class PlotManager:
 
         else:
             # Fallback to sample name matching
-            logger.debug("  Using sample name matching (fallback)")
+            print("  Using sample name matching (fallback)")
 
             jv_combinations = set()
             for _, row in jv_data.iterrows():
@@ -711,10 +675,9 @@ class PlotManager:
 
             matching_curves = curves_data[curves_data.apply(should_include_curve, axis=1)].copy()
 
-        logger.debug("  Matching curve records found: %s", len(matching_curves))
-        logger.debug(
-            "  Expected ratio curves/JV: %.1fx (should be ~2x)",
-            len(matching_curves) / len(jv_data) if jv_data is not None and len(jv_data) > 0 else 0,
+        print(f"  Matching curve records found: {len(matching_curves)}")
+        print(
+            f"  Expected ratio curves/JV: {len(matching_curves) / len(jv_data):.1f}x (should be ~2x)"
         )
 
         # Additional verification: check if we're getting the right samples
@@ -729,35 +692,31 @@ class PlotManager:
                 device = f"{row['sample']}_{row['cell']}"
                 unique_jv_devices.add(device)
 
-            logger.debug("  Unique devices in curves: %s", len(unique_curve_devices))
-            logger.debug("  Unique devices in JV: %s", len(unique_jv_devices))
-            logger.debug(
-                "  Device overlap: %s", len(unique_curve_devices.intersection(unique_jv_devices))
-            )
+            print(f"  Unique devices in curves: {len(unique_curve_devices)}")
+            print(f"  Unique devices in JV: {len(unique_jv_devices)}")
+            print(f"  Device overlap: {len(unique_curve_devices.intersection(unique_jv_devices))}")
 
             # Show some examples to verify correctness
             if len(unique_curve_devices) > 0:
                 curve_examples = list(unique_curve_devices)[:3]
                 jv_examples = list(unique_jv_devices)[:3]
-                logger.debug("  Curve device examples: %s", curve_examples)
-                logger.debug("  JV device examples: %s", jv_examples)
+                print(f"  Curve device examples: {curve_examples}")
+                print(f"  JV device examples: {jv_examples}")
 
         return matching_curves
 
-    def create_jv_best_device_plot(
-        self, jvc_data, curves_data, colors=None, show_summary=True, flip_current=False
-    ):  # noqa: E501
+    def create_jv_best_device_plot(self, jvc_data, curves_data, colors=None):
         """Plot JV curves for the best device (highest PCE) with all available measurements"""
 
         voltage_rows = curves_data[curves_data["variable"] == "Voltage (V)"]
         if not voltage_rows.empty:
-            first_v_row = voltage_rows.iloc[0]  # noqa: F841
+            first_v_row = voltage_rows.iloc[0]
 
         # Find best device (sample + cell combination with highest PCE)
         best_idx = jvc_data["PCE(%)"].idxmax()
         best_sample = jvc_data.loc[best_idx]["sample"]
         best_cell = jvc_data.loc[best_idx]["cell"]
-        best_pce = jvc_data.loc[best_idx]["PCE(%)"]  # noqa: F841
+        best_pce = jvc_data.loc[best_idx]["PCE(%)"]
 
         # Get ALL measurements for this sample+cell combination (not just best measurement)
         best_device_jv = jvc_data[
@@ -770,7 +729,7 @@ class PlotManager:
         all_matching_curves = curves_data[curves_data["sample"] == best_sample]
 
         if len(all_matching_curves) > 0:
-            device_curves = all_matching_curves[all_matching_curves["cell"] == best_cell]  # noqa: F841
+            device_curves = all_matching_curves[all_matching_curves["cell"] == best_cell]
 
         # Get ALL measurements for this sample+cell combination (not just best measurement)
         best_device_jv = jvc_data[
@@ -787,41 +746,24 @@ class PlotManager:
             ]
 
         if best_device_curves.empty:
-            logger.debug("No curve data found for best device")
+            print("No curve data found for best device")
             return None, ""
 
         # Organize curves by status, direction
-        voltage_curves = best_device_curves[best_device_curves["variable"] == "Voltage (V)"]  # noqa: F841
-        current_curves = best_device_curves[  # noqa: F841
+        voltage_curves = best_device_curves[best_device_curves["variable"] == "Voltage (V)"]
+        current_curves = best_device_curves[
             best_device_curves["variable"] == "Current Density(mA/cm2)"
         ]
 
         fig = go.Figure()
 
-        # Add axis lines. xref/yref="paper" span the full plot regardless of the
-        # current axis range, and (unlike data-referenced shapes) don't get pulled
-        # into the axis autorange computation -- otherwise the modebar's "Autoscale"
-        # button would zoom out to include these lines instead of just the data.
-        fig.add_shape(
-            type="line",
-            xref="paper",
-            x0=0,
-            x1=1,
-            yref="y",
-            y0=0,
-            y1=0,
-            line=dict(color="gray", width=2),
-        )
-        fig.add_shape(
-            type="line",
-            xref="x",
-            x0=0,
-            x1=0,
-            yref="paper",
-            y0=0,
-            y1=1,
-            line=dict(color="gray", width=2),
-        )
+        # Calculate dynamic axis ranges based on data
+        max_voc = jvc_data["Voc(V)"].max() if "Voc(V)" in jvc_data.columns else 1.2
+        x_max = (math.ceil(max_voc * 10) / 10) + 0.1
+
+        # Add axis lines with dynamic range
+        fig.add_shape(type="line", x0=-0.2, y0=0, x1=x_max, y1=0, line=dict(color="gray", width=2))
+        fig.add_shape(type="line", x0=0, y0=-5, x1=0, y1=25, line=dict(color="gray", width=2))
 
         if colors is None:
             colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
@@ -901,6 +843,10 @@ class PlotManager:
         # Sort pairs to ensure consistent ordering
         measurement_pairs.sort(key=lambda x: (x["measurement_index"], x["direction"]))
 
+        # Add axis lines with extended range
+        fig.add_shape(type="line", x0=-2, y0=0, x1=10, y1=0, line=dict(color="gray", width=2))
+        fig.add_shape(type="line", x0=0, y0=-1000, x1=0, y1=300, line=dict(color="gray", width=2))
+
         # Group pairs: each measurement index gets one color, shared between Forward and Reverse
         unique_measurements = {}
         for pair in measurement_pairs:
@@ -908,11 +854,6 @@ class PlotManager:
             if idx not in unique_measurements:
                 unique_measurements[idx] = []
             unique_measurements[idx].append(pair)
-
-        # Track every plotted point so the axis range can fall back to the data's own
-        # extent (with an edge gap) once it no longer fits the default window.
-        plotted_voltages = []
-        plotted_currents = []
 
         # Plot each measurement pair with proper color pairing
         for measurement_idx, pairs in unique_measurements.items():
@@ -927,13 +868,15 @@ class PlotManager:
             for pair in pairs:
                 voltage_values = pair["voltage"]
                 current_values = pair["current"]
-                if flip_current:
-                    current_values = [-v for v in current_values]
                 direction = pair["direction"]
 
                 if len(voltage_values) > 0 and len(current_values) > 0:
-                    plotted_voltages.extend(voltage_values)
-                    plotted_currents.extend(current_values)
+                    voltage_values, current_values = self._mask_boundary_zero_point(
+                        voltage_values, current_values
+                    )
+                    if len(voltage_values) == 0 or len(current_values) == 0:
+                        continue
+
                     if direction == "Reverse":
                         # Forward gets 50% lighter color with solid line and crosses
                         light_r = min(255, int(r + (255 - r) * 0.5))
@@ -964,151 +907,54 @@ class PlotManager:
                         )
                     )
 
-        # Add MPP points and JV characteristics (from older version)
-        # Get JV characteristics values for Forward and Reverse
-        df_rev = best_device_jv[(best_device_jv["direction"] == "Reverse")]
-        df_for = best_device_jv[(best_device_jv["direction"] == "Forward")]
+        # Count number of traces (measurements) for dynamic spacing - ADD THIS BEFORE fig.update_layout
+        num_traces = len(unique_measurements) * 2  # Each measurement has Forward and Reverse
 
-        # Pick the row with the highest PCE within each direction (not simply the first row)
-        best_rev_row = df_rev.loc[df_rev["PCE(%)"].idxmax()] if not df_rev.empty else None
-        best_for_row = df_for.loc[df_for["PCE(%)"].idxmax()] if not df_for.empty else None
+        # Calculate legend space
+        items_per_row = 4  # Slightly more items per row for device plot
+        num_legend_rows = (num_traces + items_per_row - 1) // items_per_row
 
-        if not df_rev.empty and not df_for.empty:
-            # Extract values
-            char_vals = ["Voc(V)", "Jsc(mA/cm2)", "FF(%)", "PCE(%)"]
-            char_rev = []
-            char_for = []
+        base_margin = 80
+        pixels_per_legend_row = 30
+        required_bottom_margin = base_margin + (num_legend_rows * pixels_per_legend_row)
 
-            for cv in char_vals:
-                if cv in df_rev.columns:
-                    char_rev.append(best_rev_row[cv])
-                else:
-                    char_rev.append(0)
-                if cv in df_for.columns:
-                    char_for.append(best_for_row[cv])
-                else:
-                    char_for.append(0)
+        base_y_position = -0.35
+        additional_y_offset = -0.05 * (num_legend_rows - 1)
+        legend_y_position = base_y_position + additional_y_offset
 
-            # Add MPP points if available
-            if "V_mpp(V)" in df_for.columns and "J_mpp(mA/cm2)" in df_for.columns:
-                v_f = best_for_row["V_mpp(V)"]
-                j_f = best_for_row["J_mpp(mA/cm2)"]
-                if flip_current:
-                    j_f = -j_f
-
-                fig.add_trace(
-                    go.Scatter(
-                        x=[v_f],
-                        y=[j_f],
-                        mode="markers",
-                        marker=dict(color="red", size=10),
-                        name="Forward MPP",
-                        hoverinfo="text",
-                        hovertext=f"MPP Forward<br>V: {v_f:.3f} V<br>J: {j_f:.3f} mA/cm²",
-                    )
-                )
-
-            if "V_mpp(V)" in df_rev.columns and "J_mpp(mA/cm2)" in df_rev.columns:
-                v_r = best_rev_row["V_mpp(V)"]
-                j_r = best_rev_row["J_mpp(mA/cm2)"]
-                if flip_current:
-                    j_r = -j_r
-
-                fig.add_trace(
-                    go.Scatter(
-                        x=[v_r],
-                        y=[j_r],
-                        mode="markers",
-                        marker=dict(color="red", size=10, symbol="x"),
-                        name="Reverse MPP",
-                        hoverinfo="text",
-                        hovertext=f"MPP Reverse<br>V: {v_r:.3f} V<br>J: {j_r:.3f} mA/cm²",
-                    )
-                )
-
-        if show_summary:
-            # Add JV information as annotations (initially visible)
-            text_rev = f"""Rev:
-        <br>Voc: {char_rev[0]:>5.2f}
-        <br>Jsc:  {char_rev[1]:>5.1f}
-        <br>FF:   {char_rev[2]:>5.1f}
-        <br>PCE: {char_rev[3]:>5.1f}"""
-
-            text_for = f"For:<br>{char_for[0]:.2f} V<br>{char_for[1]:.1f} mA/cm²<br>{char_for[2]:.1f}%<br>{char_for[3]:.1f}%"  # noqa: E501
-
-            # Anchor the text block by its top/bottom edge (instead of centering it on
-            # annot_y) and start it a couple of units clear of the y=0 line, so it never
-            # sits on top of the zero-reference line drawn above.
-            annot_y = 2 if flip_current else -2
-            annot_yanchor = "bottom" if flip_current else "top"
-            # Add annotations for values
-            fig.add_annotation(
-                x=0.24,
-                y=annot_y,
-                yanchor=annot_yanchor,
-                text=text_rev,
-                showarrow=False,
-                font=dict(size=12),
-                align="left",
-                name="summary_rev",
-            )
-
-            fig.add_annotation(
-                x=0.55,
-                y=annot_y,
-                yanchor=annot_yanchor,
-                text=text_for,
-                showarrow=False,
-                font=dict(size=12),
-                align="left",
-                name="summary_for",
-            )
-
-        # Default axis windows requested for this plot. As long as the measured data
-        # fits inside them, keep them fixed (so repeat views of different devices are
-        # visually comparable); once data falls outside, fall back to the data's own
-        # extent plus a 7% edge gap instead of clipping it.
-        default_x_range = (-0.2, 1.2)
-        default_y_range = (-5, 25) if flip_current else (-25, 5)
-        edge_gap = 0.07
-
-        def _resolve_range(values, default_range):
-            lo_default, hi_default = default_range
-            if not values:
-                return [lo_default, hi_default]
-            data_min, data_max = min(values), max(values)
-            if data_min >= lo_default and data_max <= hi_default:
-                return [lo_default, hi_default]
-            span = data_max - data_min
-            pad = span * edge_gap if span > 0 else (abs(data_max) * edge_gap or 1)
-            return [data_min - pad, data_max + pad]
-
-        x_range = _resolve_range(plotted_voltages, default_x_range)
-        y_range = _resolve_range(plotted_currents, default_y_range)
-
-        # Update layout with custom modebar
+        # Update layout
         fig.update_layout(
-            title=f"JV Curves - Best Device ({best_sample} [Cell {best_cell}])",
+            title=dict(
+                text=f"JV Curves - Best Device ({best_sample} [Cell {best_cell}])",
+                font=dict(size=self.font_size_title),
+            ),
             xaxis_title="Voltage [V]",
             yaxis_title="Current Density [mA/cm²]",
-            xaxis=dict(range=x_range),
-            yaxis=dict(range=y_range),
+            xaxis=dict(
+                range=[-0.2, x_max],
+                titlefont=dict(size=self.font_size_axis),
+                tickfont=dict(size=self.font_size_axis),
+            ),
+            yaxis=dict(
+                range=[-5, 25],
+                titlefont=dict(size=self.font_size_axis),
+                tickfont=dict(size=self.font_size_axis),
+            ),
             template="plotly_white",
-            # 4:3 aspect ratio by default; the resizable display wrapper picks this up
-            # as the plot's initial size and lets the user drag-resize it from there.
-            width=800,
-            height=600,
             legend=dict(
-                x=1.02,
-                y=1,
-                bgcolor="rgba(255,255,255,0.9)",
-                bordercolor="black",
-                borderwidth=1,
+                x=0.02,  # Start left inside
+                y=0.98,  # Start top
                 xanchor="left",
                 yanchor="top",
+                bgcolor="rgba(255,255,255,0.85)",
+                bordercolor="black",
+                borderwidth=1,
+                font=dict(size=self.font_size_legend),
             ),
             showlegend=True,
-            margin=dict(r=150),
+            margin=dict(l=80, r=50, t=80, b=80),
+            width=1600,  # 16:10 ratio width
+            height=1000,  # 16:10 ratio height
         )
 
         fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="lightgray")
@@ -1117,267 +963,1021 @@ class PlotManager:
         sample_name = f"JV_best_device_{best_sample} (Cell {best_cell}).html"
         return fig, sample_name
 
-    def create_boxplot(
-        self,
-        data,
-        var_x,
-        var_y,
-        filtered_info,
-        datatype="data",
-        wb=None,
-        colors=None,
-        sort_order="Alphanumeric ↑",
-        custom_order="",
-        direction_split=False,
+    def create_jv_best_per_condition_plot(
+        self, jvc_data, curves_data, colors=None, condition_order=None
     ):
-        """Create a boxplot with statistical analysis - ENHANCED with data verification"""
-        names_dict = self.PARAM_COLUMNS
-        var_name_y = names_dict[var_y]
-        trash, filters = filtered_info
+        """Plot JV curves for the SINGLE best measurement per condition/variable"""
 
-        if var_x == "batch" and "batch_for_plotting" in data.columns:
-            var_x = "batch_for_plotting"
+        if jvc_data.empty:
+            fig = go.Figure()
+            fig.update_layout(title="No data available")
+            return fig, "JV_best_per_condition.html"
 
-        # Show what samples are included in this plot
-        unique_samples = data["sample"].nunique()  # noqa: F841
-        unique_cells = data.groupby("sample")["cell"].nunique().sum()  # noqa: F841
-
-        try:
-            data["sample"] = data["sample"].astype(int)
-        except ValueError:
-            pass
-
-        data = data.copy()  # Don't modify original data
-
-        # Handle MultiIndex if present
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = [
-                "_".join(str(col).strip() for col in column if str(col) != "")
-                for column in data.columns.values
-            ]
-        if isinstance(data.index, pd.MultiIndex):
-            data = data.reset_index()
-
-        data["Jsc(mA/cm2)"] = data["Jsc(mA/cm2)"].abs()
-
-        # Apply custom order: filter data to only listed categories and relabel aliases
-        custom_groups = None
-        if sort_order == "Custom" and custom_order:
-            custom_groups = _parse_custom_order(custom_order)
-            if custom_groups:
-                alias_to_display = {}
-                for g in custom_groups:
-                    for alias in g["aliases"]:
-                        alias_to_display[alias] = g["display"]
-                data[var_x] = data[var_x].astype(str)
-                mask = data[var_x].isin(alias_to_display)
-                data = data[mask].copy()
-                data[var_x] = data[var_x].map(alias_to_display)
-                # Trash counts are no longer meaningful after relabelling
-                trash = trash.iloc[0:0]
-
-        # Calculate statistics
-        descriptor = data.groupby(var_x)[var_name_y].describe()
-
-        # Get initial ordering
-        initial_orderc = descriptor.sort_index()["count"].index
-
-        # Custom ordering to put Reverse before Forward (always overrides sort_order)
-        if "direction" in var_x.lower() or (
-            len(initial_orderc) == 2 and set(initial_orderc) == {"Forward", "Reverse"}
-        ):
-            orderc = (
-                ["Reverse", "Forward"]
-                if set(initial_orderc) == {"Forward", "Reverse"}
-                else list(initial_orderc)
-            )
-        elif sort_order == "Custom" and custom_groups:
-            # Preserve the exact order from the parsed groups (already applied to data above)
-            present = set(initial_orderc)
-            orderc = [g["display"] for g in custom_groups if g["display"] in present]
-        elif sort_order == "Alphanumeric ↓":
-            orderc = sorted(initial_orderc, reverse=True)
-        elif sort_order == "Mean ↑":
-            means = data.groupby(var_x)[var_name_y].mean()
-            orderc = means.sort_values(ascending=True).index.tolist()
-        elif sort_order == "Mean ↓":
-            means = data.groupby(var_x)[var_name_y].mean()
-            orderc = means.sort_values(ascending=False).index.tolist()
-        elif sort_order == "Median ↑":
-            medians = data.groupby(var_x)[var_name_y].median()
-            orderc = medians.sort_values(ascending=True).index.tolist()
-        elif sort_order == "Median ↓":
-            medians = data.groupby(var_x)[var_name_y].median()
-            orderc = medians.sort_values(ascending=False).index.tolist()
-        else:  # "Alphanumeric ↑" (default)
-            orderc = list(initial_orderc)  # already sorted by sort_index()
-
-        # Create dictionaries to map categories to their counts
-        data_counts = data.groupby(var_x)[var_name_y].count().to_dict()
-        trash_counts = trash.groupby(var_x)[var_name_y].count().to_dict() if not trash.empty else {}
+        # Check if condition column exists
+        if "condition" not in jvc_data.columns:
+            print("Warning: No 'condition' column found. Using sample grouping instead.")
+            grouping_col = "sample"
+        else:
+            grouping_col = "condition"
 
         fig = go.Figure()
 
-        # Use provided color scheme or default
-        if colors is None:
-            colors = [
-                "rgba(93, 164, 214, 0.7)",
-                "rgba(255, 144, 14, 0.7)",
-                "rgba(44, 160, 101, 0.7)",
-                "rgba(255, 65, 54, 0.7)",
-                "rgba(207, 114, 255, 0.7)",
-                "rgba(127, 96, 0, 0.7)",
-                "rgba(255, 140, 184, 0.7)",
-                "rgba(79, 90, 117, 0.7)",
-            ]
+        # Calculate dynamic axis ranges based on data
+        max_voc = jvc_data["Voc(V)"].max() if "Voc(V)" in jvc_data.columns else 1.2
+        x_max = (math.ceil(max_voc * 10) / 10) + 0.1
 
-        _dir_colors = {
-            "Reverse": "rgba(255, 182, 193, 0.8)",
-            "Forward": "rgba(173, 216, 230, 0.8)",
+        # Add axis lines with dynamic range
+        fig.add_shape(type="line", x0=-0.2, y0=0, x1=x_max, y1=0, line=dict(color="gray", width=2))
+        fig.add_shape(type="line", x0=0, y0=-5, x1=0, y1=25, line=dict(color="gray", width=2))
+
+        if colors is None:
+            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+
+        # CRITICAL CHANGE: Get only the SINGLE best measurement per condition (not per sample+condition)
+        # This will automatically pick the best direction (Forward or Reverse)
+        best_per_condition = jvc_data.loc[jvc_data.groupby(grouping_col)["PCE(%)"].idxmax()]
+
+        # Apply condition_order so color assignment matches boxplot order
+        if condition_order:
+            present_conditions = set(best_per_condition[grouping_col].unique())
+            ordered = [c for c in condition_order if c in present_conditions]
+            # Append any conditions not covered by condition_order (safety)
+            for c in best_per_condition[grouping_col].unique():
+                if c not in set(ordered):
+                    ordered.append(c)
+            if ordered:
+                cat_type = pd.CategoricalDtype(categories=ordered, ordered=True)
+                best_per_condition = best_per_condition.copy()
+                best_per_condition[grouping_col] = best_per_condition[grouping_col].astype(cat_type)
+                best_per_condition = best_per_condition.sort_values(grouping_col)
+
+        # CRITICAL: Calculate legend space based on number of conditions
+        num_conditions = len(best_per_condition)
+
+        # Calculate how many rows the legend will need (assuming 3 items per row in horizontal mode)
+        items_per_row = 3
+        num_legend_rows = (num_conditions + items_per_row - 1) // items_per_row  # Ceiling division
+
+        # Calculate required bottom margin: base + (rows * pixels per row)
+        base_margin = 80
+        pixels_per_legend_row = 30  # Each legend row needs about 30 pixels
+        required_bottom_margin = base_margin + (num_legend_rows * pixels_per_legend_row)
+
+        # Calculate y position for legend (further down with more items)
+        # Base position + additional offset for extra rows
+        base_y_position = -0.35
+        additional_y_offset = -0.05 * (
+            num_legend_rows - 1
+        )  # Push down more for each additional row
+        legend_y_position = base_y_position + additional_y_offset
+
+        print(f"Found {num_conditions} conditions with best measurements:")
+        print(f"   Legend will use {num_legend_rows} rows")
+        print(f"   Required bottom margin: {required_bottom_margin}px")
+        print(f"   Legend y position: {legend_y_position}")
+
+        for i, (_, best_row) in enumerate(best_per_condition.iterrows()):
+            sample = best_row["sample"]
+            cell = best_row["cell"]
+            condition = best_row.get(grouping_col, "Unknown")
+            pce = best_row["PCE(%)"]
+            direction = best_row["direction"]  # ADD: Get the direction of the best measurement
+            sample_id = best_row["sample_id"]
+            ilum = best_row["ilum"]
+
+            print(f"  • {condition}: {sample}_{cell} ({direction}, PCE: {pce:.2f}%)")
+
+            device_curves = self._select_best_curve_rows_for_jv_row(best_row, curves_data)
+
+            if device_curves.empty:
+                print(f"    Warning: No curves found for {condition}")
+                continue
+
+            # Process voltage and current measurements
+            voltage_measurements = {}
+            current_measurements = {}
+
+            for _, curve_row in device_curves.iterrows():
+                curve_direction = curve_row["direction"]
+                variable_type = curve_row["variable"]
+
+                # Extract data values
+                data_values = []
+                for col in curve_row.index[8:]:
+                    try:
+                        val = float(curve_row[col])
+                        if not pd.isna(val):
+                            data_values.append(val)
+                    except (ValueError, TypeError):
+                        continue
+
+                key = f"{curve_direction}"
+
+                if variable_type == "Voltage (V)":
+                    voltage_measurements[key] = data_values
+                elif variable_type == "Current Density(mA/cm2)":
+                    current_measurements[key] = data_values
+
+            # Plot curves for this measurement (should be only one direction now)
+            base_color = colors[i % len(colors)]
+            r, g, b, alpha = self._extract_rgb_from_color(base_color)
+
+            for key in voltage_measurements.keys():
+                if key in current_measurements:
+                    voltage_values = voltage_measurements[key]
+                    current_values = current_measurements[key]
+                    curve_direction = key
+
+                    if len(voltage_values) > 0 and len(current_values) > 0:
+                        voltage_values, current_values = self._mask_boundary_zero_point(
+                            voltage_values, current_values
+                        )
+                        if len(voltage_values) == 0 or len(current_values) == 0:
+                            continue
+
+                        # Use solid line with circles for the best measurement
+                        line_color = base_color
+                        line_style = "solid"
+                        marker_symbol = "circle"
+
+                        # CHANGE: Updated trace name to show which direction won
+                        trace_name = f"{condition} ({curve_direction}, {pce:.1f}%)"
+
+                        fig.add_trace(
+                            go.Scatter(
+                                x=voltage_values,
+                                y=current_values,
+                                mode="lines+markers",
+                                line=dict(dash=line_style, color=line_color, width=2),
+                                marker=dict(size=5, color=line_color, symbol=marker_symbol),
+                                name=trace_name,
+                                legendgroup=f"condition_{i}",
+                                showlegend=True,
+                            )
+                        )
+
+        # Update layout with DRAGGABLE legend
+        fig.update_layout(
+            title=dict(
+                text=f"JV Curves - Best Measurement per {grouping_col.title()}",
+                font=dict(size=self.font_size_title),
+            ),
+            xaxis_title="Voltage [V]",
+            yaxis_title="Current Density [mA/cm²]",
+            xaxis=dict(
+                range=[-0.2, x_max],
+                titlefont=dict(size=self.font_size_axis),
+                tickfont=dict(size=self.font_size_axis),
+            ),
+            yaxis=dict(
+                range=[-5, 25],
+                titlefont=dict(size=self.font_size_axis),
+                tickfont=dict(size=self.font_size_axis),
+            ),
+            template="plotly_white",
+            legend=dict(
+                x=0.02,  # Start position left inside plot
+                y=0.98,  # Start position top
+                xanchor="left",
+                yanchor="top",
+                bgcolor="rgba(255,255,255,0.85)",  # Semi-transparent background
+                bordercolor="black",
+                borderwidth=1,
+                font=dict(size=self.font_size_legend),  # Slightly smaller font to save space
+            ),
+            showlegend=True,
+            margin=dict(l=80, r=50, t=80, b=80),  # Normal margins
+            width=1600,  # 16:10 ratio width
+            height=1000,  # 16:10 ratio height
+        )
+
+        fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="lightgray")
+        fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="lightgray")
+
+        return fig, "JV_best_per_condition.html"
+
+    def _extract_curve_data_values(self, curve_row):
+        """Extract numeric curve points from a curve row."""
+        data_values = []
+        for col in curve_row.index[8:]:
+            try:
+                val = float(curve_row[col])
+                if not pd.isna(val):
+                    data_values.append(val)
+            except (ValueError, TypeError):
+                continue
+        return data_values
+
+    def _build_measurement_key(self, row):
+        """Build a stable key for matching JV rows and curve rows."""
+        sample_key = row.get("sample_id", None)
+        if pd.isna(sample_key):
+            sample_key = row.get("sample", None)
+        if pd.isna(sample_key):
+            sample_key = None
+        elif sample_key is not None:
+            sample_key = str(sample_key)
+
+        cell_value = row.get("cell", None)
+        if pd.isna(cell_value):
+            cell_value = None
+        elif cell_value is not None:
+            cell_value = str(cell_value)
+
+        direction_value = row.get("direction", None)
+        if pd.isna(direction_value):
+            direction_value = None
+        elif direction_value is not None:
+            direction_value = str(direction_value)
+
+        ilum_value = row.get("ilum", None)
+        if pd.isna(ilum_value):
+            ilum_value = None
+        elif ilum_value is not None:
+            ilum_value = str(ilum_value)
+
+        cycle_number = row.get("cycle_number", None)
+        if pd.isna(cycle_number):
+            cycle_number = None
+        else:
+            cycle_number = int(cycle_number)
+
+        px_number = row.get("px_number", None)
+        if pd.isna(px_number):
+            px_number = None
+        else:
+            px_number = str(px_number)
+
+        return (sample_key, cell_value, direction_value, ilum_value, px_number, cycle_number)
+
+    def _select_best_curve_rows_for_jv_row(self, best_row, curves_data):
+        """Select curve rows that best match one JV summary row."""
+        if curves_data is None or curves_data.empty:
+            return pd.DataFrame()
+
+        target_key = self._build_measurement_key(best_row)
+        target_sample = target_key[0]
+        target_cell = target_key[1]
+
+        keyed_curves = curves_data.copy()
+        keyed_curves["_match_key"] = keyed_curves.apply(self._build_measurement_key, axis=1)
+
+        exact = keyed_curves[keyed_curves["_match_key"] == target_key]
+        if not exact.empty:
+            return exact.drop(columns=["_match_key"])
+
+        scoped = keyed_curves[
+            keyed_curves["_match_key"].apply(
+                lambda k: k[0] == target_sample and k[1] == target_cell
+            )
+        ]
+        if scoped.empty:
+            return pd.DataFrame()
+
+        candidate_keys = scoped["_match_key"].drop_duplicates().tolist()
+
+        def _score_key(candidate_key):
+            score = 0
+            for idx, weight in ((2, 4), (3, 3), (4, 2), (5, 2)):
+                target_value = target_key[idx]
+                if target_value is None:
+                    continue
+                if candidate_key[idx] == target_value:
+                    score += weight
+            non_null_meta = sum(v is not None for v in candidate_key[2:])
+            return (score, non_null_meta)
+
+        best_key = max(candidate_keys, key=lambda k: (_score_key(k), str(k)))
+        return scoped[scoped["_match_key"] == best_key].drop(columns=["_match_key"])
+
+    def _split_batch_sample_label(self, value):
+        """Split a label at the last underscore into batch and sample parts."""
+        if value is None or pd.isna(value):
+            return None, None
+
+        text = str(value).strip()
+        if not text or text.lower() == "unknown":
+            return None, None
+
+        if "_" not in text:
+            return text, text
+
+        batch_part, sample_part = text.rsplit("_", 1)
+        return batch_part or text, sample_part or text
+
+    def _derive_batch_sample_labels(
+        self, batch_value=None, sample_value=None, identifier_value=None
+    ):
+        """Derive display labels for batch and sample fields."""
+        batch_candidates = [batch_value, sample_value, identifier_value]
+        for candidate in batch_candidates:
+            batch_label, sample_label = self._split_batch_sample_label(candidate)
+            if batch_label is not None or sample_label is not None:
+                return batch_label or "Unknown", sample_label or "Unknown"
+
+        return "Unknown", "Unknown"
+
+    def create_jv_separated_by_cell_plot(self, jvc_data, curves_data, colors=None, plot_type="all"):
+        """Create separate plots for each sample, showing all cells together"""
+
+        # Filter out empty cells
+        jvc_data = jvc_data[jvc_data["cell"].notna()]
+
+        if jvc_data.empty:
+            fig = go.Figure()
+            fig.update_layout(title="No data available")
+            return fig, "JV_separated_by_cell.html"
+
+        # Group by sample and cell, count measurements
+        grouped_data = (
+            jvc_data.groupby(["sample", "cell"]).size().reset_index(name="measurement_count")
+        )
+
+        # Sort by measurement count (descending) and then by sample, cell
+        sorted_grouped_data = grouped_data.sort_values(
+            by=["measurement_count", "sample", "cell"], ascending=[False, True, True]
+        )
+
+        # Get top N samples with most measurements
+        top_n_samples = sorted_grouped_data.head(20)
+
+        # Filter original data for these samples
+        filtered_jvc_data = jvc_data[
+            jvc_data.set_index(["sample", "cell"]).index.isin(
+                top_n_samples.set_index(["sample", "cell"]).index
+            )
+        ]
+
+        # Unique devices in the filtered data
+        unique_devices = filtered_jvc_data.groupby(["sample", "cell"]).size().reset_index()
+
+        if len(unique_devices) == 0:
+            print("No matching devices found for top samples")
+            return None, "JV_separated_by_cell.html"
+
+        fig_list = []
+        fig_names = []
+
+        # Create one figure per sample
+        for (sample, cell), group_data in filtered_jvc_data.groupby(["sample", "cell"]):
+            fig = go.Figure()
+
+            # Calculate dynamic axis ranges for this sample
+            max_voc = group_data["Voc(V)"].max() if "Voc(V)" in group_data.columns else 1.2
+            x_max = (math.ceil(max_voc * 10) / 10) + 0.1
+
+            # Add axis lines with dynamic range
+            fig.add_shape(
+                type="line", x0=-0.2, y0=0, x1=x_max, y1=0, line=dict(color="gray", width=2)
+            )
+            fig.add_shape(type="line", x0=0, y0=-5, x1=0, y1=25, line=dict(color="gray", width=2))
+
+            if colors is None:
+                colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+
+            # CRITICAL CHANGE: Plot all measurements for this device, showing all cells
+            voltage_data = group_data[group_data["variable"] == "Voltage (V)"]
+            current_data = group_data[group_data["variable"] == "Current Density(mA/cm2)"]
+
+            # Ensure we have data for both voltage and current
+            if voltage_data.empty or current_data.empty:
+                print(f"Missing voltage or current data for {sample}_{cell}")
+                continue
+
+            # Match voltage and current data by index
+            for idx in voltage_data.index.intersection(current_data.index):
+                voltage_values = voltage_data.loc[idx, voltage_data.columns[8:]].values
+                current_values = current_data.loc[idx, current_data.columns[8:]].values
+
+                # Skip if no valid data
+                if np.all(pd.isna(voltage_values)) or np.all(pd.isna(current_values)):
+                    continue
+
+                voltage_values, current_values = self._mask_boundary_zero_point(
+                    voltage_values, current_values
+                )
+                if len(voltage_values) == 0 or len(current_values) == 0:
+                    continue
+
+                # Group by direction
+                direction = voltage_data.loc[idx, "direction"]
+
+                # Base color for this sample+cell
+                base_color = colors[sum(1 for _ in getattr(fig, "data", [])) % len(colors)]
+
+                # Add trace for this measurement
+                fig.add_trace(
+                    go.Scatter(
+                        x=voltage_values,
+                        y=current_values,
+                        mode="lines+markers",
+                        line=dict(color=base_color, width=2),
+                        marker=dict(size=6, color=base_color),
+                        name=f"{sample}_{cell} ({direction})",
+                        legendgroup=f"{sample}_{cell}",
+                        showlegend=True,
+                    )
+                )
+
+            # FIX: Define missing variables before using them
+            base_margin = 80
+            pixels_per_legend_row = 30
+
+            # ADD: Calculate dynamic spacing AFTER all traces are added
+            num_traces = sum(1 for _ in getattr(fig, "data", []))
+            items_per_row = 3
+            num_legend_rows = (num_traces + items_per_row - 1) // items_per_row
+            required_bottom_margin = base_margin + (num_legend_rows * pixels_per_legend_row)
+            legend_y_position = -0.35 + (-0.05 * (num_legend_rows - 1))
+
+            # Update layout for this figure
+            if plot_type == "working":
+                fig.update_layout(
+                    title=dict(
+                        text=f"JV Curves - Sample: {sample} (Working Cells Only)",
+                        font=dict(size=self.font_size_title),
+                    ),
+                    xaxis_title="Voltage [V]",
+                    yaxis_title="Current Density [mA/cm²]",
+                    xaxis=dict(
+                        range=[-0.2, x_max],
+                        titlefont=dict(size=self.font_size_axis),
+                        tickfont=dict(size=self.font_size_axis),
+                    ),
+                    yaxis=dict(
+                        range=[-5, 25],
+                        titlefont=dict(size=self.font_size_axis),
+                        tickfont=dict(size=self.font_size_axis),
+                    ),
+                    template="plotly_white",
+                    legend=dict(
+                        x=0.02,
+                        y=0.98,
+                        xanchor="left",
+                        yanchor="top",
+                        bgcolor="rgba(255,255,255,0.85)",
+                        bordercolor="black",
+                        borderwidth=1,
+                        font=dict(size=self.font_size_legend),
+                    ),
+                    showlegend=True,
+                    margin=dict(l=80, r=50, t=80, b=80),
+                    width=1600,  # 16:10 ratio width
+                    height=1000,  # 16:10 ratio height
+                )
+            else:
+                fig.update_layout(
+                    title=dict(
+                        text=f"JV Curves - Sample: {sample} (All Cells)",
+                        font=dict(size=self.font_size_title),
+                    ),
+                    xaxis_title="Voltage [V]",
+                    yaxis_title="Current Density [mA/cm²]",
+                    xaxis=dict(
+                        range=[-0.2, x_max],
+                        titlefont=dict(size=self.font_size_axis),
+                        tickfont=dict(size=self.font_size_axis),
+                    ),
+                    yaxis=dict(
+                        range=[-5, 25],
+                        titlefont=dict(size=self.font_size_axis),
+                        tickfont=dict(size=self.font_size_axis),
+                    ),
+                    template="plotly_white",
+                    legend=dict(
+                        x=0.02,
+                        y=0.98,
+                        xanchor="left",
+                        yanchor="top",
+                        bgcolor="rgba(255,255,255,0.85)",
+                        bordercolor="black",
+                        borderwidth=1,
+                        font=dict(size=self.font_size_legend),
+                    ),
+                    showlegend=True,
+                    margin=dict(l=80, r=50, t=80, b=80),
+                    width=1600,  # 16:10 ratio width
+                    height=1000,  # 16:10 ratio height
+                )
+
+            fig_list.append(fig)
+            fig_names.append(f"JV_separated_by_cell_{sample}.html")
+
+        return fig_list, fig_names
+
+    def create_jv_separated_by_substrate_plot(
+        self, jvc_data, curves_data, colors=None, plot_type="all"
+    ):
+        """Create separate plots for each sample"""
+
+        # Filter out empty cells
+        jvc_data = jvc_data[jvc_data["cell"].notna()]
+
+        if jvc_data.empty:
+            fig = go.Figure()
+            fig.update_layout(title="No data available")
+            return fig, "JV_separated_by_substrate.html"
+
+        # Group by sample and cell, count measurements
+        grouped_data = (
+            jvc_data.groupby(["sample", "cell"]).size().reset_index(name="measurement_count")
+        )
+
+        # Sort by measurement count (descending) and then by sample, cell
+        sorted_grouped_data = grouped_data.sort_values(
+            by=["measurement_count", "sample", "cell"], ascending=[False, True, True]
+        )
+
+        # Get top N samples with most measurements
+        top_n_samples = sorted_grouped_data.head(20)
+
+        # Filter original data for these samples
+        filtered_jvc_data = jvc_data[
+            jvc_data.set_index(["sample", "cell"]).index.isin(
+                top_n_samples.set_index(["sample", "cell"]).index
+            )
+        ]
+
+        # Unique devices in the filtered data
+        unique_devices = filtered_jvc_data.groupby(["sample", "cell"]).size().reset_index()
+
+        if len(unique_devices) == 0:
+            print("No matching devices found for top samples")
+            return None, "JV_separated_by_substrate.html"
+
+        fig_list = []
+        fig_names = []
+
+        # Create one figure per sample
+        for (sample, cell), group_data in filtered_jvc_data.groupby(["sample", "cell"]):
+            fig = go.Figure()
+
+            # Calculate dynamic axis ranges for this substrate
+            max_voc = group_data["Voc(V)"].max() if "Voc(V)" in group_data.columns else 1.2
+            x_max = (math.ceil(max_voc * 10) / 10) + 0.1
+
+            # Add axis lines with dynamic range
+            fig.add_shape(
+                type="line", x0=-0.2, y0=0, x1=x_max, y1=0, line=dict(color="gray", width=2)
+            )
+            fig.add_shape(type="line", x0=0, y0=-5, x1=0, y1=25, line=dict(color="gray", width=2))
+
+            if colors is None:
+                colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+
+            # CRITICAL CHANGE: Plot all measurements for this device, showing all cells
+            voltage_data = group_data[group_data["variable"] == "Voltage (V)"]
+            current_data = group_data[group_data["variable"] == "Current Density(mA/cm2)"]
+
+            # Ensure we have data for both voltage and current
+            if voltage_data.empty or current_data.empty:
+                print(f"Missing voltage or current data for {sample}_{cell}")
+                continue
+
+            # Match voltage and current data by index
+            for idx in voltage_data.index.intersection(current_data.index):
+                voltage_values = voltage_data.loc[idx, voltage_data.columns[8:]].values
+                current_values = current_data.loc[idx, current_data.columns[8:]].values
+
+                # Skip if no valid data
+                if np.all(pd.isna(voltage_values)) or np.all(pd.isna(current_values)):
+                    continue
+
+                voltage_values, current_values = self._mask_boundary_zero_point(
+                    voltage_values, current_values
+                )
+                if len(voltage_values) == 0 or len(current_values) == 0:
+                    continue
+
+                # Group by direction
+                direction = voltage_data.loc[idx, "direction"]
+
+                # Base color for this sample+cell
+                base_color = colors[sum(1 for _ in getattr(fig, "data", [])) % len(colors)]
+
+                # Add trace for this measurement
+                fig.add_trace(
+                    go.Scatter(
+                        x=voltage_values,
+                        y=current_values,
+                        mode="lines+markers",
+                        line=dict(color=base_color, width=2),
+                        marker=dict(size=6, color=base_color),
+                        name=f"{sample}_{cell} ({direction})",
+                        legendgroup=f"{sample}_{cell}",
+                        showlegend=True,
+                    )
+                )
+
+            # FIX: Define missing variables before using them
+            base_margin = 80
+            pixels_per_legend_row = 30
+
+            # ADD: Calculate dynamic spacing AFTER all traces are added
+            num_traces = sum(1 for _ in getattr(fig, "data", []))
+            items_per_row = 3
+            num_legend_rows = (num_traces + items_per_row - 1) // items_per_row
+            required_bottom_margin = base_margin + (num_legend_rows * pixels_per_legend_row)
+            legend_y_position = -0.35 + (-0.05 * (num_legend_rows - 1))
+
+            # Update layout for this figure
+            if plot_type == "working":
+                fig.update_layout(
+                    title=dict(
+                        text=f"JV Curves - Sample: {sample} (Working Cells Only)",
+                        font=dict(size=self.font_size_title),
+                    ),
+                    xaxis_title="Voltage [V]",
+                    yaxis_title="Current Density [mA/cm²]",
+                    xaxis=dict(
+                        range=[-0.2, x_max],
+                        titlefont=dict(size=self.font_size_axis),
+                        tickfont=dict(size=self.font_size_axis),
+                    ),
+                    yaxis=dict(
+                        range=[-5, 25],
+                        titlefont=dict(size=self.font_size_axis),
+                        tickfont=dict(size=self.font_size_axis),
+                    ),
+                    template="plotly_white",
+                    legend=dict(
+                        x=0.02,
+                        y=0.98,
+                        xanchor="left",
+                        yanchor="top",
+                        bgcolor="rgba(255,255,255,0.85)",
+                        bordercolor="black",
+                        borderwidth=1,
+                        font=dict(size=self.font_size_legend),
+                    ),
+                    showlegend=True,
+                    margin=dict(l=80, r=50, t=80, b=80),
+                    width=1600,  # 16:10 ratio width
+                    height=1000,  # 16:10 ratio height
+                )
+            else:
+                fig.update_layout(
+                    title=dict(
+                        text=f"JV Curves - Sample: {sample} (All Cells)",
+                        font=dict(size=self.font_size_title),
+                    ),
+                    xaxis_title="Voltage [V]",
+                    yaxis_title="Current Density [mA/cm²]",
+                    xaxis=dict(
+                        range=[-0.2, x_max],
+                        titlefont=dict(size=self.font_size_axis),
+                        tickfont=dict(size=self.font_size_axis),
+                    ),
+                    yaxis=dict(
+                        range=[-5, 25],
+                        titlefont=dict(size=self.font_size_axis),
+                        tickfont=dict(size=self.font_size_axis),
+                    ),
+                    template="plotly_white",
+                    legend=dict(
+                        x=0.02,
+                        y=0.98,
+                        xanchor="left",
+                        yanchor="top",
+                        bgcolor="rgba(255,255,255,0.85)",
+                        bordercolor="black",
+                        borderwidth=1,
+                        font=dict(size=self.font_size_legend),
+                    ),
+                    showlegend=True,
+                    margin=dict(l=80, r=50, t=80, b=80),
+                    width=1600,  # 16:10 ratio width
+                    height=1000,  # 16:10 ratio height
+                )
+
+            fig_list.append(fig)
+            fig_names.append(f"JV_separated_by_substrate_{sample}.html")
+
+        return fig_list, fig_names
+
+    def create_combined_boxplot_grid(
+        self, data, var_x, other_data, data_type="data", colors=None, separate_scan_dir=False
+    ):
+        """
+        Create a 2x2 grid of boxplots showing PCE, FF, Jsc, and Voc together.
+        var_x should be the GROUPING variable (e.g., 'condition' for "by Variable")
+        """
+
+        def _jsc_positive(value):
+            return abs(value) if pd.notna(value) else value
+
+        var_x_map = {
+            "sample": "sample",
+            "cell": "cell",
+            "direction": "direction",
+            "ilum": "ilum",
+            "batch": "batch_for_plotting",
+            "condition": "condition",
+            "status": "status",
         }
 
-        use_direction_split = (
-            direction_split and "direction" in data.columns and var_x != "direction"
+        name_x = var_x_map.get(var_x, var_x)
+        if name_x not in data.columns:
+            print(f"⚠️ Warning: Column {name_x} not found in data")
+            return None, ""
+
+        parameters = [
+            {"name": "PCE(%)", "title": "PCE", "unit": "%"},
+            {"name": "FF(%)", "title": "Fill Factor", "unit": "%"},
+            {"name": "Jsc(mA/cm2)", "title": "J<sub>sc</sub>", "unit": "mA/cm²"},
+            {"name": "Voc(V)", "title": "V<sub>oc</sub>", "unit": "V"},
+        ]
+
+        fig = make_subplots(
+            rows=2,
+            cols=2,
+            subplot_titles=None,
+            # SPACING CONTROLS:
+            vertical_spacing=0.07,  # 👈 Distance between rows (0-1, default ~0.2)
+            horizontal_spacing=0.06,  # 👈 Distance between columns (0-1, default ~0.2)
+            specs=[[{"type": "box"}, {"type": "box"}], [{"type": "box"}, {"type": "box"}]],
         )
 
-        if use_direction_split:
-            # Two traces (one per direction); x values are the category labels so Plotly
-            # automatically groups them side by side under boxmode="group".
-            for direction in ["Reverse", "Forward"]:
-                dir_data = data[data["direction"] == direction]
-                x_vals, y_vals, customdata = [], [], []
-                for category in orderc:
-                    cat_dir = dir_data[dir_data[var_x] == category]
-                    ys = cat_dir[var_name_y].dropna()
-                    if not ys.empty:
-                        x_vals.extend([str(category)] * len(ys))
-                        y_vals.extend(ys.tolist())
-                        customdata.extend(cat_dir.loc[ys.index, ["sample", "cell"]].values.tolist())
+        group_keys = list(data[name_x].unique())
+        num_categories = len(group_keys)
 
-                if y_vals:
-                    fig.add_trace(
-                        go.Box(
-                            x=x_vals,
-                            y=y_vals,
-                            name=direction,
-                            legendgroup=direction,
-                            boxpoints="all",
-                            pointpos=0,
-                            jitter=0.5,
-                            whiskerwidth=0.4,
-                            marker=dict(size=5, opacity=0.7, color="rgba(0,0,0,0.7)"),
-                            line=dict(width=1.5),
-                            fillcolor=_dir_colors.get(direction, colors[0]),
-                            boxmean=True,
-                            customdata=customdata,
-                            hovertemplate=(
-                                f"<b>%{{x}} — {direction}</b><br>"
-                                + "Value: %{y:.3f}<br>"
-                                + "Sample: %{customdata[0]}<br>"
-                                + "Cell: %{customdata[1]}"
-                            ),
-                        )
-                    )
-            show_legend = True
+        if separate_scan_dir and "direction" in data.columns and name_x != "direction":
+            # Use one base color per category
+            distributed_colors = self._get_intelligent_colors(
+                group_keys, num_categories, color_scheme=colors
+            )
         else:
-            # Original single-color per category
-            for i, category in enumerate(orderc):
-                category_data = data[data[var_x] == category][var_name_y].dropna()
-                if not category_data.empty:
-                    data_count = data_counts.get(category, 0)
-                    trash_count = trash_counts.get(category, 0)
-                    median = category_data.median()
-                    mean = category_data.mean()
+            distributed_colors = self._get_intelligent_colors(
+                group_keys, num_categories, color_scheme=colors
+            )
 
-                    category_name = (
-                        f"{category} (n={data_count})"
-                        if trash_count == 0
-                        else f"{category} ({data_count}/{data_count + trash_count})"
+        positions_map = [(1, 1), (1, 2), (2, 1), (2, 2)]
+
+        for param_idx, param in enumerate(parameters):
+            row, col = positions_map[param_idx]
+            param_name = param["name"]
+            if param_name not in data.columns:
+                print(f"⚠️ Warning: Parameter {param_name} not found in data")
+                continue
+
+            if separate_scan_dir and "direction" in data.columns and name_x != "direction":
+                for i, key in enumerate(group_keys):
+                    group_data = data[data[name_x] == key]
+                    base_color = distributed_colors[i]
+                    rev_color = self._darken_rgba(base_color, factor=0.25)
+                    fwd_color = self._lighten_rgba(base_color, factor=0.25)
+                    x_center = i
+                    x_left = x_center - 0.2
+                    x_right = x_center + 0.2
+
+                    rev_data = group_data[group_data["direction"] == "Reverse"]
+                    if not rev_data.empty:
+                        # Prepare hover data for reverse
+                        hover_data = []
+                        for idx, row_data in rev_data.iterrows():
+                            condition_val = row_data.get("condition", row_data.get(name_x, "N/A"))
+                            jsc_value = _jsc_positive(row_data.get("Jsc(mA/cm2)", "N/A"))
+                            hover_data.append(
+                                [
+                                    condition_val,
+                                    row_data.get("direction", "N/A"),
+                                    row_data.get("PCE(%)", "N/A"),
+                                    row_data.get("FF(%)", "N/A"),
+                                    jsc_value,
+                                    row_data.get("Voc(V)", "N/A"),
+                                ]
+                            )
+
+                        y_values = (
+                            rev_data[param_name].abs()
+                            if param_name == "Jsc(mA/cm2)"
+                            else rev_data[param_name]
+                        )
+
+                        fig.add_trace(
+                            go.Box(
+                                y=y_values,
+                                name=f"{key} [R]" if param_idx == 0 else "",
+                                x=[x_left] * len(rev_data),
+                                boxpoints="all",
+                                pointpos=0,
+                                jitter=0.5,
+                                whiskerwidth=0.4,
+                                marker=dict(size=4, opacity=0.7, color="rgba(0,0,0,0.7)"),
+                                line=dict(width=1.5, color="black"),
+                                fillcolor=rev_color,
+                                boxmean=True,
+                                width=0.3,
+                                legendgroup=f"{key}_R",
+                                showlegend=(param_idx == 0),
+                                customdata=hover_data,
+                                hovertemplate="<b>%{customdata[0]}</b><br>"
+                                + "Direction: %{customdata[1]}<br>"
+                                + "PCE: %{customdata[2]:.2f}%<br>"
+                                + "FF: %{customdata[3]:.2f}%<br>"
+                                + "Jsc: %{customdata[4]:.2f} mA/cm²<br>"
+                                + "Voc: %{customdata[5]:.3f} V<br>"
+                                + "<extra></extra>",
+                            ),
+                            row=row,
+                            col=col,
+                        )
+
+                    fwd_data = group_data[group_data["direction"] == "Forward"]
+                    if not fwd_data.empty:
+                        # Prepare hover data for forward
+                        hover_data = []
+                        for idx, row_data in fwd_data.iterrows():
+                            condition_val = row_data.get("condition", row_data.get(name_x, "N/A"))
+                            jsc_value = _jsc_positive(row_data.get("Jsc(mA/cm2)", "N/A"))
+                            hover_data.append(
+                                [
+                                    condition_val,
+                                    row_data.get("direction", "N/A"),
+                                    row_data.get("PCE(%)", "N/A"),
+                                    row_data.get("FF(%)", "N/A"),
+                                    jsc_value,
+                                    row_data.get("Voc(V)", "N/A"),
+                                ]
+                            )
+
+                        y_values = (
+                            fwd_data[param_name].abs()
+                            if param_name == "Jsc(mA/cm2)"
+                            else fwd_data[param_name]
+                        )
+
+                        fig.add_trace(
+                            go.Box(
+                                y=y_values,
+                                name=f"{key} [F]" if param_idx == 0 else "",
+                                x=[x_right] * len(fwd_data),
+                                boxpoints="all",
+                                pointpos=0,
+                                jitter=0.5,
+                                whiskerwidth=0.4,
+                                marker=dict(size=4, opacity=0.7, color="rgba(0,0,0,0.7)"),
+                                line=dict(width=1.5, color="black"),
+                                fillcolor=fwd_color,
+                                boxmean=True,
+                                width=0.3,
+                                legendgroup=f"{key}_F",
+                                showlegend=(param_idx == 0),
+                                customdata=hover_data,
+                                hovertemplate="<b>%{customdata[0]}</b><br>"
+                                + "Direction: %{customdata[1]}<br>"
+                                + "PCE: %{customdata[2]:.2f}%<br>"
+                                + "FF: %{customdata[3]:.2f}%<br>"
+                                + "Jsc: %{customdata[4]:.2f} mA/cm²<br>"
+                                + "Voc: %{customdata[5]:.3f} V<br>"
+                                + "<extra></extra>",
+                            ),
+                            row=row,
+                            col=col,
+                        )
+
+                fig.update_xaxes(
+                    tickmode="array",
+                    tickvals=list(range(len(group_keys))),
+                    ticktext=list(group_keys) if row == 2 else [""] * len(group_keys),
+                    showgrid=True,
+                    gridwidth=1,
+                    gridcolor="lightgray",
+                    row=row,
+                    col=col,
+                )
+            else:
+                if name_x == "direction" and set(data[name_x].unique()) == {"Forward", "Reverse"}:
+                    group_keys_param = ["Reverse", "Forward"]
+                else:
+                    group_keys_param = group_keys
+
+                for i, key in enumerate(group_keys_param):
+                    group_data = data[data[name_x] == key]
+                    if group_data.empty:
+                        continue
+
+                    # Prepare hover data
+                    hover_data = []
+                    for idx, row_data in group_data.iterrows():
+                        condition_val = row_data.get("condition", row_data.get(name_x, "N/A"))
+                        jsc_value = _jsc_positive(row_data.get("Jsc(mA/cm2)", "N/A"))
+                        hover_data.append(
+                            [
+                                condition_val,
+                                row_data.get("direction", "N/A"),
+                                row_data.get("PCE(%)", "N/A"),
+                                row_data.get("FF(%)", "N/A"),
+                                jsc_value,
+                                row_data.get("Voc(V)", "N/A"),
+                            ]
+                        )
+
+                    y_values = (
+                        group_data[param_name].abs()
+                        if param_name == "Jsc(mA/cm2)"
+                        else group_data[param_name]
                     )
 
+                    color = distributed_colors[i]
                     fig.add_trace(
                         go.Box(
-                            y=category_data,
-                            name=category_name,
+                            y=y_values,
+                            name=str(key) if param_idx == 0 else "",
+                            x=[str(key)] * len(group_data),
                             boxpoints="all",
                             pointpos=0,
                             jitter=0.5,
                             whiskerwidth=0.4,
-                            marker=dict(size=5, opacity=0.7, color="rgba(0,0,0,0.7)"),
-                            line=dict(width=1.5),
-                            fillcolor=colors[i % len(colors)],
+                            marker=dict(size=4, opacity=0.7, color="rgba(0,0,0,0.7)"),
+                            line=dict(width=1.5, color="black"),
+                            fillcolor=color,
                             boxmean=True,
                             width=0.8,
-                            customdata=data[data[var_x] == category][["sample", "cell"]].values,
-                            hovertemplate=(
-                                f"<b>{category}</b><br>"
-                                + "Value: %{y:.3f}<br>"
-                                + "Sample: %{customdata[0]}<br>"
-                                + "Cell: %{customdata[1]}<br>"
-                                + f"Median: {median:.3f}<br>"
-                                + f"Mean: {mean:.3f}<br>"
-                                + f"Count: {data_count}"
-                            ),
-                        )
+                            legendgroup=str(key),
+                            showlegend=(param_idx == 0),
+                            customdata=hover_data,
+                            hovertemplate="<b>%{customdata[0]}</b><br>"
+                            + "Direction: %{customdata[1]}<br>"
+                            + "PCE: %{customdata[2]:.2f}%<br>"
+                            + "FF: %{customdata[3]:.2f}%<br>"
+                            + "Jsc: %{customdata[4]:.2f} mA/cm²<br>"
+                            + "Voc: %{customdata[5]:.3f} V<br>"
+                            + "<extra></extra>",
+                        ),
+                        row=row,
+                        col=col,
                     )
-            show_legend = False
 
-        # Create title with data info
-        dir_note = " | split by scan direction" if use_direction_split else ""
-        title_text = f"Boxplot of {var_y} by {var_x}{dir_note}" + (
-            " (filtered out)" if datatype == "junk" else " (filtered data)"
-        )
-        subtitle = f"Data from {len(data)} measurements across {data[var_x].nunique()} {var_x} categories (after filtering)"  # noqa: E501
+                fig.update_xaxes(
+                    ticktext=list(group_keys_param) if row == 2 else [""] * len(group_keys_param),
+                    tickfont=dict(size=self.font_size_axis),
+                    showgrid=True,
+                    gridwidth=1,
+                    gridcolor="lightgray",
+                    row=row,
+                    col=col,
+                )
+
+            # Per-subplot y-axis label with units
+            y_axis_label = f"{param['title']} ({param['unit']})"
+            fig.update_yaxes(
+                title_text=y_axis_label,
+                title_standoff=5,
+                titlefont=dict(size=self.font_size_axis),
+                tickfont=dict(size=self.font_size_axis),
+                showgrid=True,
+                gridwidth=1,
+                gridcolor="lightgray",
+                row=row,
+                col=col,
+            )
 
         fig.update_layout(
-            title=f"{title_text}<br><sup>{subtitle}</sup>",
-            xaxis_title=var_x,
-            yaxis_title=self.UNIT_LABELS.get(var_name_y, var_name_y),
-            boxmode="group",
-            boxgap=0.05,
-            boxgroupgap=0.1,
+            # No internal figure title for combined 'all' boxplots;
+            # axis labels already provide sufficient context.
+            # title=dict(text=''),
             template="plotly_white",
-            margin=dict(l=40, r=40, t=100, b=80),
-            showlegend=show_legend,
+            showlegend=False,
+            width=1400,
+            height=900,  # 👈 Reduced height to compress plots vertically
+            margin=dict(l=80, r=200, t=130, b=130),  # 👈 Larger bottom margin for rotated labels
             plot_bgcolor="white",
             paper_bgcolor="white",
+            hovermode="closest",
         )
 
-        # Rotate x-axis labels if many categories
-        if len(orderc) > 4:
-            fig.update_layout(xaxis=dict(tickangle=-10, tickfont=dict(size=10)))
-
-        # Save to Excel if workbook provided
-        if wb:
-            try:
-                from utils import save_combined_excel_data
-
-                wb = save_combined_excel_data(
-                    self.plot_output_path,
-                    wb,
-                    data,
-                    filtered_info,
-                    var_x,
-                    var_name_y,
-                    var_y,
-                    descriptor,
-                )
-            except ImportError:
-                pass  # Skip Excel save if utils not available
-
-        sample_name = (
-            f"boxplotj_{var_y}_by_{var_x}.html"
-            if datatype == "junk"
-            else f"boxplot_{var_y}_by_{var_x}.html"
+        # Apply font sizes to all axes
+        fig.update_xaxes(
+            titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+        )
+        fig.update_yaxes(
+            titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
         )
 
-        return fig, sample_name, wb
+        # Tilt x-axis tick labels for many categories (bottom row only)
+        if not separate_scan_dir and len(group_keys) > 4:
+            fig.update_xaxes(tickangle=-45, row=2, col=1)
+            fig.update_xaxes(tickangle=-45, row=2, col=2)
 
-    def create_histogram(self, df, var_y, colors=None):
-        """Create a histogram with statistics"""
-        logger.debug("📊 Creating histogram with %s records for %s", len(df), var_y)
+        fig_name = f"Boxplot_Combined_by_{name_x}"
+        if separate_scan_dir:
+            fig_name += "_separated"
+        if data_type == "junk":
+            fig_name += "_filtered_out"
+        fig_name += ".html"
 
-        names_dict = {
+        return fig, fig_name
+
+    def create_boxplot(
+        self, data, var_x, var_y, other_data, data_type="data", colors=None, separate_scan_dir=False
+    ):
+        """Create normal single-parameter boxplot"""
+
+        def _jsc_positive(value):
+            return abs(value) if pd.notna(value) else value
+
+        var_y_map = {
             "voc": "Voc(V)",
             "jsc": "Jsc(mA/cm2)",
             "ff": "FF(%)",
@@ -1388,2065 +1988,768 @@ class PlotManager:
             "rser": "R_series(Ohmcm2)",
             "rshu": "R_shunt(Ohmcm2)",
         }
-
-        pl_y = names_dict[var_y]
-
-        # Determine number of bins
-        bins = {"voc": 20, "jsc": 30}.get(var_y, 40)
-
-        # Create histogram
-        fig = go.Figure()
-
-        primary_color = colors[0] if colors else "rgba(0, 0, 255, 0.6)"
-        line_color = (
-            colors[0].replace("0.6", "1.0")
-            if colors and "rgba" in colors[0]
-            else "rgba(0, 0, 255, 1)"
-        )
-
-        fig.add_trace(
-            go.Histogram(
-                x=df[pl_y],
-                marker=dict(color=primary_color, line=dict(color=line_color, width=1)),
-                hovertemplate=f"{pl_y}: %{{x:.3f}}<br>Count: %{{y}}<extra></extra>",
-            )
-        )
-
-        # Add KDE if enough data points
-        if len(df) > 5:
-            try:
-                from scipy import stats
-
-                kde_x = np.linspace(df[pl_y].min(), df[pl_y].max(), 100)
-                kde = stats.gaussian_kde(df[pl_y].dropna())
-                kde_y = kde(kde_x) * len(df) * (df[pl_y].max() - df[pl_y].min()) / bins
-
-                fig.add_trace(
-                    go.Scatter(
-                        x=kde_x,
-                        y=kde_y,
-                        mode="lines",
-                        line=dict(color="red", width=2),
-                        name="KDE",
-                        hoverinfo="skip",
-                    )
-                )
-            except ImportError:
-                pass  # Skip KDE if scipy not available
-
-        # Calculate statistics
-        mean_val = df[pl_y].mean()
-        median_val = df[pl_y].median()
-        std_val = df[pl_y].std()
-        min_val = df[pl_y].min()
-        max_val = df[pl_y].max()
-        count_val = len(df)
-
-        # Create subplot with statistics table
-        fig_with_stats = make_subplots(
-            rows=2,
-            cols=1,
-            row_heights=[0.7, 0.3],  # Main plot takes 75%, stats take 25%
-            specs=[[{"type": "histogram"}], [{"type": "table"}]],
-            subplot_titles=["", "Statistics"],
-            vertical_spacing=0.2,
-        )
-
-        # Add the histogram trace to the first subplot
-        fig_with_stats.add_trace(
-            go.Histogram(
-                x=df[pl_y],
-                marker=dict(color=primary_color, line=dict(color=line_color, width=1)),
-                hovertemplate=f"{pl_y}: %{{x:.3f}}<br>Count: %{{y}}<extra></extra>",
-            ),
-            row=1,
-            col=1,
-        )
-
-        # Add KDE if enough data points
-        if len(df) > 5:
-            try:
-                from scipy import stats
-
-                kde_x = np.linspace(df[pl_y].min(), df[pl_y].max(), 100)
-                kde = stats.gaussian_kde(df[pl_y].dropna())
-                kde_y = kde(kde_x) * len(df) * (df[pl_y].max() - df[pl_y].min()) / bins
-
-                fig_with_stats.add_trace(
-                    go.Scatter(
-                        x=kde_x,
-                        y=kde_y,
-                        mode="lines",
-                        line=dict(color="red", width=2),
-                        name="KDE",
-                        hoverinfo="skip",
-                    ),
-                    row=1,
-                    col=1,
-                )
-            except ImportError:
-                pass
-
-        # Add statistics table
-        fig_with_stats.add_trace(
-            go.Table(
-                header=dict(values=["Statistic", "Value"], fill_color="lightgray", align="left"),
-                cells=dict(
-                    values=[
-                        ["Count", "Mean", "Median", "Std Dev", "Min", "Max"],
-                        [
-                            f"{count_val}",
-                            f"{mean_val:.3f}",
-                            f"{median_val:.3f}",
-                            f"{std_val:.3f}",
-                            f"{min_val:.3f}",
-                            f"{max_val:.3f}",
-                        ],
-                    ],
-                    fill_color="white",
-                    align="left",
-                ),
-            ),
-            row=2,
-            col=1,
-        )
-
-        # Update layout
-        fig_with_stats.update_layout(
-            title=f"Histogram of {pl_y} (Filtered Data)",
-            template="plotly_white",
-            bargap=0.1,
-            hovermode="closest",
-            height=750,
-            showlegend=True,  # Change from False to True
-            legend=dict(
-                x=1.02,
-                y=1,
-                bgcolor="rgba(255,255,255,0.9)",
-                bordercolor="black",
-                borderwidth=1,
-                xanchor="left",
-                yanchor="top",
-            ),
-            margin=dict(r=150),  # Add right margin for external legend
-        )
-
-        fig_with_stats.update_xaxes(title_text=pl_y, row=1, col=1)
-        fig_with_stats.update_yaxes(title_text="Frequency", row=1, col=1)
-        fig_with_stats.update_xaxes(showgrid=True, gridwidth=1, gridcolor="lightgray", row=1, col=1)
-        fig_with_stats.update_yaxes(showgrid=True, gridwidth=1, gridcolor="lightgray", row=1, col=1)
-
-        # Use the subplot figure instead of the original
-        fig = fig_with_stats
-        sample_name = f"histogram_{var_y}_filtered.html"
-
-        return fig, sample_name
-
-    def create_combination_plots(self, data, var_y, combination_type, filtered_info, colors=None):
-        """Create multiple plots separated by condition/direction/cell and grouped by status/condition"""  # noqa: E501
-        logger.debug("📊 Creating combination plots: %s", combination_type)
-
-        names_dict = self.PARAM_COLUMNS
-        var_name_y = names_dict[var_y]
-
-        # Filter out dark measurements (D1, D2, etc.) for these combination plots
-        data = data[~data["status"].str.startswith("D")].copy()
-        logger.debug("   Filtered out dark measurements, %s records remaining", len(data))
-
-        # Define what we separate plots by and what we group within plots
-        plot_config = {
-            "sg": {
-                "primary_var": "condition",
-                "primary_label": "Condition",
-                "secondary_var": "status",
-                "secondary_label": "Status",
-            },
-            "cg": {
-                "primary_var": "condition",
-                "primary_label": "Condition",
-                "secondary_var": "direction",
-                "secondary_label": "Direction",
-            },
-            "bg": {
-                "primary_var": "condition",
-                "primary_label": "Condition",
-                "secondary_var": "cell",
-                "secondary_label": "Cell",
-            },
+        var_x_map = {
+            "sample": "sample",
+            "cell": "cell",
+            "direction": "direction",
+            "ilum": "ilum",
+            "batch": "batch_for_plotting",
+            "condition": "condition",
+            "status": "status",
         }
 
-        if combination_type not in plot_config:
-            logger.warning("Warning: Unknown combination type %s", combination_type)
-            return [], []
+        name_y = var_y_map.get(var_y, var_y)
+        name_x = var_x_map.get(var_x, var_x)
 
-        config = plot_config[combination_type]
-        primary_var = config["primary_var"]
-        primary_label = config["primary_label"]
-        secondary_var = config["secondary_var"]
-        secondary_label = config["secondary_label"]
+        if name_y not in data.columns or name_x not in data.columns:
+            print(f"⚠️ Warning: Column {name_y} or {name_x} not found")
+            return None, "", None, "", ""
 
-        # Check if required columns exist
-        missing_cols = []
-        for col in [primary_var, secondary_var]:
-            if col not in data.columns:
-                missing_cols.append(col)
+        fig = go.Figure()
 
-        if missing_cols:
-            logger.warning("Warning: Missing columns %s in data", missing_cols)
-            return [], []
+        group_keys = list(data[name_x].unique())
+        num_categories = len(group_keys)
 
-        # Get unique values for primary variable (what we separate plots by)
-        primary_values = sorted(data[primary_var].unique())
+        if separate_scan_dir and "direction" in data.columns and name_x != "direction":
+            distributed_colors = self._get_intelligent_colors(
+                group_keys, num_categories, color_scheme=colors
+            )
+        else:
+            distributed_colors = self._get_intelligent_colors(
+                group_keys, num_categories, color_scheme=colors
+            )
 
-        if not primary_values:
-            logger.warning("Warning: No data found for primary variable %s", primary_var)
-            return [], []
+        if separate_scan_dir and "direction" in data.columns and name_x != "direction":
+            for i, key in enumerate(group_keys):
+                group_data = data[data[name_x] == key]
+                base_color = distributed_colors[i]
+                rev_color = self._darken_rgba(base_color, factor=0.25)
+                fwd_color = self._lighten_rgba(base_color, factor=0.25)
+                x_center = i
+                x_left = x_center - 0.2
+                x_right = x_center + 0.2
 
-        figures = []
-        figure_names = []
+                rev_data = group_data[group_data["direction"] == "Reverse"]
+                if not rev_data.empty:
+                    # Prepare hover data for reverse
+                    hover_data = []
+                    for idx, row_data in rev_data.iterrows():
+                        condition_val = row_data.get("condition", row_data.get(name_x, "N/A"))
+                        jsc_value = _jsc_positive(row_data.get("Jsc(mA/cm2)", "N/A"))
+                        hover_data.append(
+                            [
+                                condition_val,
+                                row_data.get("direction", "N/A"),
+                                row_data.get("PCE(%)", "N/A"),
+                                row_data.get("FF(%)", "N/A"),
+                                jsc_value,
+                                row_data.get("Voc(V)", "N/A"),
+                            ]
+                        )
 
-        # Create separate plot for each primary variable value
-        for primary_val in primary_values:
-            primary_data = data[data[primary_var] == primary_val]
-
-            if primary_data.empty:
-                continue
-
-            # Custom ordering for direction to put Reverse before Forward
-            if secondary_var == "direction":
-                secondary_values = (
-                    ["Reverse", "Forward"]
-                    if set(primary_data[secondary_var].unique()) == {"Forward", "Reverse"}
-                    else sorted(primary_data[secondary_var].unique())
-                )
-            else:
-                secondary_values = sorted(primary_data[secondary_var].unique())
-
-            if not secondary_values:
-                continue
-
-            fig = go.Figure()
-
-            # Use a pleasing color palette
-            if colors is None:
-                colors = [
-                    "rgba(93, 164, 214, 0.7)",
-                    "rgba(255, 144, 14, 0.7)",
-                    "rgba(44, 160, 101, 0.7)",
-                    "rgba(255, 65, 54, 0.7)",
-                    "rgba(207, 114, 255, 0.7)",
-                    "rgba(127, 96, 0, 0.7)",
-                    "rgba(255, 140, 184, 0.7)",
-                    "rgba(79, 90, 117, 0.7)",
-                ]
-
-            # Add boxplot for each secondary value within this primary value
-            for i, secondary_val in enumerate(secondary_values):
-                subset_data = primary_data[primary_data[secondary_var] == secondary_val][
-                    var_name_y
-                ].dropna()
-
-                if not subset_data.empty:
-                    count = len(subset_data)
-                    median = subset_data.median()
-                    mean = subset_data.mean()
+                    y_values = (
+                        rev_data[name_y].abs() if name_y == "Jsc(mA/cm2)" else rev_data[name_y]
+                    )
 
                     fig.add_trace(
                         go.Box(
-                            y=subset_data,
-                            name=f"{secondary_val} (n={count})",
+                            y=y_values,
+                            name=f"{key} [R]",
+                            x=[x_left] * len(rev_data),
                             boxpoints="all",
                             pointpos=0,
                             jitter=0.5,
                             whiskerwidth=0.4,
-                            marker=dict(size=5, opacity=0.7, color="rgba(0,0,0,0.7)"),
-                            line=dict(width=1.5),
-                            fillcolor=colors[i % len(colors)],
+                            marker=dict(size=4, opacity=0.7, color="rgba(0,0,0,0.7)"),
+                            line=dict(width=1.5, color="black"),
+                            fillcolor=rev_color,
                             boxmean=True,
-                            width=0.8,
-                            hovertemplate=(
-                                f"<b>{secondary_val}</b><br>"
-                                + "Value: %{y:.3f}<br>"
-                                + f"Median: {median:.3f}<br>"
-                                + f"Mean: {mean:.3f}<br>"
-                                + f"Count: {count}"
-                            ),
+                            width=0.3,
+                            legendgroup=f"{key}_R",
+                            customdata=hover_data,
+                            hovertemplate="<b>%{customdata[0]}</b><br>"
+                            + "Direction: %{customdata[1]}<br>"
+                            + "PCE: %{customdata[2]:.2f}%<br>"
+                            + "FF: %{customdata[3]:.2f}%<br>"
+                            + "Jsc: %{customdata[4]:.2f} mA/cm²<br>"
+                            + "Voc: %{customdata[5]:.3f} V<br>"
+                            + "<extra></extra>",
                         )
                     )
 
-            # Update layout
-            title_text = f"{var_y} by {secondary_label} ({primary_label}: {primary_val})"
-            subtitle = f"Data from {len(primary_data)} measurements (light only)"
+                fwd_data = group_data[group_data["direction"] == "Forward"]
+                if not fwd_data.empty:
+                    # Prepare hover data for forward
+                    hover_data = []
+                    for idx, row_data in fwd_data.iterrows():
+                        condition_val = row_data.get("condition", row_data.get(name_x, "N/A"))
+                        jsc_value = _jsc_positive(row_data.get("Jsc(mA/cm2)", "N/A"))
+                        hover_data.append(
+                            [
+                                condition_val,
+                                row_data.get("direction", "N/A"),
+                                row_data.get("PCE(%)", "N/A"),
+                                row_data.get("FF(%)", "N/A"),
+                                jsc_value,
+                                row_data.get("Voc(V)", "N/A"),
+                            ]
+                        )
 
-            fig.update_layout(
-                title=f"{title_text}<br><sup>{subtitle}</sup>",
-                xaxis_title=f"{secondary_label}",
-                yaxis_title=self.UNIT_LABELS.get(var_name_y, var_name_y),
-                boxmode="group",
-                boxgap=0.05,
-                boxgroupgap=0.1,
-                template="plotly_white",
-                margin=dict(l=40, r=40, t=100, b=80),
-                showlegend=False,
-                plot_bgcolor="white",
-                paper_bgcolor="white",
-            )
+                    y_values = (
+                        fwd_data[name_y].abs() if name_y == "Jsc(mA/cm2)" else fwd_data[name_y]
+                    )
 
-            # Rotate x-axis labels if many secondary values
-            if len(secondary_values) > 4:
-                fig.update_layout(xaxis=dict(tickangle=-10, tickfont=dict(size=10)))
-
-            figures.append(fig)
-
-            # Clean primary_val for filename (remove special characters)
-            clean_primary_val = (
-                str(primary_val).replace(" ", "_").replace("/", "_").replace("&", "and")
-            )
-            figure_names.append(
-                f"boxplot_{var_y}_by_{secondary_var}_{primary_var}_{clean_primary_val}.html"
-            )
-
-        logger.debug("   Created %s combination plots", len(figures))
-        return figures, figure_names
-
-    def create_triple_combination_plots(
-        self, data, var_y, combination_type, filtered_info, colors=None
-    ):
-        """Create a single figure with facet subplots per condition, colored by direction."""
-        logger.debug("🎨 Creating triple combination plots: %s", combination_type)
-
-        names_dict = self.PARAM_COLUMNS
-        var_name_y = names_dict[var_y]
-
-        data = data[~data["status"].str.startswith("D")].copy()
-        logger.debug("   Filtered out dark measurements, %s records remaining", len(data))
-
-        required_cols = ["condition", "status", "direction"]
-        missing_cols = [col for col in required_cols if col not in data.columns]
-        if missing_cols:
-            logger.warning("Warning: Missing columns %s in data", missing_cols)
-            return [], []
-
-        if data.empty:
-            return [], []
-
-        # Order direction so Reverse always comes first
-        data["direction"] = pd.Categorical(
-            data["direction"], categories=["Reverse", "Forward"], ordered=True
-        )
-        data = data.sort_values("direction")
-
-        fig = px.box(
-            data,
-            x="status",
-            y=var_name_y,
-            color="direction",
-            facet_col="condition",
-            facet_col_wrap=3,
-            points="outliers",
-            template="plotly_white",
-            color_discrete_map={
-                "Reverse": "rgba(255, 182, 193, 0.8)",
-                "Forward": "rgba(173, 216, 230, 0.8)",
-            },
-            labels={var_name_y: self.UNIT_LABELS.get(var_name_y, var_name_y)},
-            title=f"{var_y} by Direction and Status per Condition<br><sup>Light measurements only, {len(data)} records</sup>",  # noqa: E501
-        )
-
-        fig.update_traces(quartilemethod="linear", jitter=0.4, marker=dict(size=4, opacity=0.6))
-
-        n_conditions = data["condition"].nunique()
-        n_rows = int(np.ceil(n_conditions / 3))
-
-        fig.update_layout(
-            height=400 * n_rows,
-            boxmode="group",
-            boxgap=0.01,
-            boxgroupgap=0.02,
-            margin=dict(l=60, r=160, t=120, b=80),
-            legend=dict(
-                x=1.01,
-                y=1,
-                xanchor="left",
-                yanchor="top",
-                bgcolor="rgba(255,255,255,0.9)",
-                bordercolor="black",
-                borderwidth=1,
-            ),
-        )
-
-        # Clean up facet labels (remove "condition=")
-        fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
-
-        figure_name = f"boxplot_{var_y}_by_direction_status_all_conditions.html"
-        logger.debug("   Created 1 combined facet figure for %s conditions", n_conditions)
-        return [fig], [figure_name]
-
-    def create_correlation_plot(self, data, filtered_info, colors=None, all_data=False):
-        """Create a correlation heatmap of all JV parameters."""
-        logger.debug("📊 Creating correlation plot")
-
-        col_map = {
-            "Voc": "Voc(V)",
-            "Jsc": "Jsc(mA/cm2)",
-            "FF": "FF(%)",
-            "PCE": "PCE(%)",
-            "Voc x FF": "Voc x FF(V%)",
-            "R_ser": "R_series(Ohmcm2)",
-            "R_shu": "R_shunt(Ohmcm2)",
-            "V_mpp": "V_mpp(V)",
-            "J_mpp": "J_mpp(mA/cm2)",
-            "P_mpp": "P_mpp(mW/cm2)",
-        }
-        display_labels = list(col_map.keys())
-        actual_cols = [col_map[k] for k in display_labels]
-
-        available = [c for c in actual_cols if c in data.columns]
-        available_labels = [display_labels[actual_cols.index(c)] for c in available]
-
-        subset = data[available].copy()
-        subset["Jsc(mA/cm2)"] = subset["Jsc(mA/cm2)"].abs()
-
-        corr = subset.corr()
-        corr_rounded = corr.round(2)
-
-        fig = go.Figure(
-            go.Heatmap(
-                z=corr.values,
-                x=available_labels,
-                y=available_labels,
-                colorscale="RdBu",
-                zmid=0,
-                zmin=-1,
-                zmax=1,
-                text=corr_rounded.values,
-                texttemplate="%{text}",
-                hovertemplate="x: %{x}<br>y: %{y}<br>r = %{z:.3f}<extra></extra>",
-                colorbar=dict(title="Pearson r"),
-            )
-        )
-
-        data_label = "all data" if all_data else "filtered data"
-        fig.update_layout(
-            title=(
-                f"Correlation Matrix of JV Parameters<br>"
-                f"<sup>{len(data)} measurements ({data_label})</sup>"
-            ),
-            template="plotly_white",
-            autosize=True,
-            height=650,
-            margin=dict(l=80, r=40, t=100, b=80),
-        )
-
-        return fig, "correlation_jv_parameters.html"
-
-    def create_correlation_scatter_matrix(self, data, filtered_info, colors=None, all_data=False):
-        """Create a scatter matrix with histograms on the diagonal (lower triangle only)."""
-        logger.debug("📊 Creating correlation scatter matrix")
-
-        col_map = {
-            "Voc": "Voc(V)",
-            "Jsc": "Jsc(mA/cm2)",
-            "FF": "FF(%)",
-            "PCE": "PCE(%)",
-            "Voc x FF": "Voc x FF(V%)",
-            "R_ser": "R_series(Ohmcm2)",
-            "R_shu": "R_shunt(Ohmcm2)",
-            "V_mpp": "V_mpp(V)",
-            "J_mpp": "J_mpp(mA/cm2)",
-            "P_mpp": "P_mpp(mW/cm2)",
-        }
-        display_labels = list(col_map.keys())
-        actual_cols = [col_map[k] for k in display_labels]
-
-        available = [c for c in actual_cols if c in data.columns]
-        available_labels = [display_labels[actual_cols.index(c)] for c in available]
-
-        subset = data[available].copy()
-        subset.columns = available_labels
-        subset["Jsc"] = subset["Jsc"].abs()
-
-        corr = subset.corr()
-
-        n = len(available_labels)
-        scatter_color = "rgba(93, 164, 214, 0.5)"
-        hist_color = "rgba(93, 164, 214, 0.7)"
-
-        fig = make_subplots(
-            rows=n,
-            cols=n,
-            shared_xaxes=False,
-            shared_yaxes=False,
-            horizontal_spacing=0.04,
-            vertical_spacing=0.04,
-        )
-
-        for row_idx, label_y in enumerate(available_labels):
-            for col_idx, label_x in enumerate(available_labels):
-                r, c = row_idx + 1, col_idx + 1
-
-                if col_idx > row_idx:
-                    # Upper triangle: show Pearson R value
-                    r_val = corr.loc[label_y, label_x]
-                    abs_r = abs(r_val)
-                    # Color: red (positive) / blue (negative), intensity scales with |r|
-                    if r_val > 0:
-                        text_color = f"rgba(215, 48, 39, {0.4 + 0.6 * abs_r:.2f})"
-                    else:
-                        text_color = f"rgba(69, 117, 180, {0.4 + 0.6 * abs_r:.2f})"
-                    font_size = int(9 + 9 * abs_r)
                     fig.add_trace(
-                        go.Scatter(
-                            x=[0.5],
-                            y=[0.5],
-                            mode="text",
-                            text=[f"<b>{r_val:.2f}</b>"],
-                            textfont=dict(size=font_size, color=text_color),
-                            showlegend=False,
-                            hovertemplate=(
-                                f"<b>{label_x} vs {label_y}</b><br>"
-                                f"Pearson R = {r_val:.3f}<extra></extra>"
-                            ),
-                        ),
-                        row=r,
-                        col=c,
+                        go.Box(
+                            y=y_values,
+                            name=f"{key} [F]",
+                            x=[x_right] * len(fwd_data),
+                            boxpoints="all",
+                            pointpos=0,
+                            jitter=0.5,
+                            whiskerwidth=0.4,
+                            marker=dict(size=4, opacity=0.7, color="rgba(0,0,0,0.7)"),
+                            line=dict(width=1.5, color="black"),
+                            fillcolor=fwd_color,
+                            boxmean=True,
+                            width=0.3,
+                            legendgroup=f"{key}_F",
+                            customdata=hover_data,
+                            hovertemplate="<b>%{customdata[0]}</b><br>"
+                            + "Direction: %{customdata[1]}<br>"
+                            + "PCE: %{customdata[2]:.2f}%<br>"
+                            + "FF: %{customdata[3]:.2f}%<br>"
+                            + "Jsc: %{customdata[4]:.2f} mA/cm²<br>"
+                            + "Voc: %{customdata[5]:.3f} V<br>"
+                            + "<extra></extra>",
+                        )
                     )
-                    fig.update_xaxes(
-                        range=[0, 1],
-                        showticklabels=False,
-                        showgrid=False,
-                        zeroline=False,
-                        row=r,
-                        col=c,
-                    )
-                    fig.update_yaxes(
-                        range=[0, 1],
-                        showticklabels=False,
-                        showgrid=False,
-                        zeroline=False,
-                        row=r,
-                        col=c,
-                    )
+
+            fig.update_xaxes(
+                tickmode="array",
+                tickvals=list(range(len(group_keys))),
+                ticktext=list(group_keys),
+                showgrid=True,
+                gridwidth=1,
+                gridcolor="lightgray",
+            )
+        else:
+            if name_x == "direction" and set(data[name_x].unique()) == {"Forward", "Reverse"}:
+                group_keys = ["Reverse", "Forward"]
+
+            for i, key in enumerate(group_keys):
+                group_data = data[data[name_x] == key]
+                if group_data.empty:
                     continue
-                elif col_idx == row_idx:
-                    # Diagonal: histogram of the variable
-                    vals = subset[label_x].dropna()
-                    fig.add_trace(
-                        go.Histogram(
-                            x=vals,
-                            marker_color=hist_color,
-                            showlegend=False,
-                            hovertemplate=(
-                                f"<b>{label_x}</b><br>Value: %{{x:.3f}}<br>"
-                                "Count: %{y}<extra></extra>"
-                            ),
-                        ),
-                        row=r,
-                        col=c,
-                    )
-                else:
-                    # Lower triangle: scatter
-                    # Align indices
-                    common_idx = subset[[label_x, label_y]].dropna().index
-                    fig.add_trace(
-                        go.Scatter(
-                            x=subset.loc[common_idx, label_x],
-                            y=subset.loc[common_idx, label_y],
-                            mode="markers",
-                            marker=dict(size=3, color=scatter_color, opacity=0.7),
-                            showlegend=False,
-                            hovertemplate=(
-                                f"<b>{label_x} vs {label_y}</b><br>"
-                                f"{label_x}: %{{x:.3f}}<br>"
-                                f"{label_y}: %{{y:.3f}}<extra></extra>"
-                            ),
-                        ),
-                        row=r,
-                        col=c,
+
+                # Prepare hover data
+                hover_data = []
+                for idx, row_data in group_data.iterrows():
+                    condition_val = row_data.get("condition", row_data.get(name_x, "N/A"))
+                    jsc_value = _jsc_positive(row_data.get("Jsc(mA/cm2)", "N/A"))
+                    hover_data.append(
+                        [
+                            condition_val,
+                            row_data.get("direction", "N/A"),
+                            row_data.get("PCE(%)", "N/A"),
+                            row_data.get("FF(%)", "N/A"),
+                            jsc_value,
+                            row_data.get("Voc(V)", "N/A"),
+                        ]
                     )
 
-        # Add axis labels along the edges only
-        for i, label in enumerate(available_labels):
-            # Bottom row: x-axis titles
-            fig.update_xaxes(title_text=label, title_font=dict(size=10), row=n, col=i + 1)
-            # Left column: y-axis titles (skip diagonal)
-            if i > 0:
-                fig.update_yaxes(title_text=label, title_font=dict(size=10), row=i + 1, col=1)
+                y_values = (
+                    group_data[name_y].abs() if name_y == "Jsc(mA/cm2)" else group_data[name_y]
+                )
 
-        cell_size = max(110, min(170, 900 // n))
-        data_label = "all data" if all_data else "filtered data"
+                color = distributed_colors[i]
+                fig.add_trace(
+                    go.Box(
+                        y=y_values,
+                        name=str(key),
+                        x=[str(key)] * len(group_data),
+                        boxpoints="all",
+                        pointpos=0,
+                        jitter=0.5,
+                        whiskerwidth=0.4,
+                        marker=dict(size=4, opacity=0.7, color="rgba(0,0,0,0.7)"),
+                        line=dict(width=1.5, color="black"),
+                        fillcolor=color,
+                        boxmean=True,
+                        width=0.8,
+                        legendgroup=str(key),
+                        customdata=hover_data,
+                        hovertemplate="<b>%{customdata[0]}</b><br>"
+                        + "Direction: %{customdata[1]}<br>"
+                        + "PCE: %{customdata[2]:.2f}%<br>"
+                        + "FF: %{customdata[3]:.2f}%<br>"
+                        + "Jsc: %{customdata[4]:.2f} mA/cm²<br>"
+                        + "Voc: %{customdata[5]:.3f} V<br>"
+                        + "<extra></extra>",
+                    )
+                )
+
+            fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="lightgray")
+
+        # Title and layout
+        x_axis_display = str(name_x or "variable").replace("_", " ").title()
+        if name_x == "condition":
+            x_axis_display = "Variable"
+        elif name_x == "batch_for_plotting":
+            x_axis_display = "Batch"
+
+        title_text = f"Boxplot of {x_axis_display} by {name_y}"
+        if separate_scan_dir and "direction" in data.columns and name_x != "direction":
+            title_text += " (Reverse/Forward split)"
+        if data_type == "junk":
+            title_text += " (Filtered Out Data)"
+
         fig.update_layout(
-            title=(
-                f"Scatter Matrix of JV Parameters<br>"
-                f"<sup>{len(data)} measurements ({data_label}) — "
-                f"diagonal: distribution, lower triangle: scatter</sup>"
+            title=dict(
+                text=title_text,
+                x=0.5,
+                xanchor="center",
+                font=dict(size=self.font_size_title, color="black"),
             ),
-            height=cell_size * n + 80,
-            autosize=True,
             template="plotly_white",
-            margin=dict(l=80, r=40, t=100, b=80),
             showlegend=False,
-        )
-
-        return fig, "correlation_scatter_matrix.html"
-
-    def create_voc_jsc_ff_pce_subplots(
-        self, data, filtered_info, colors=None, var_x=None, direction_split=False
-    ):
-        """Create a 2x2 facet figure with Voc, Jsc, FF, PCE boxplots."""
-        logger.debug("📊 Creating Voc/Jsc/FF/PCE subplots")
-
-        params = ["Voc(V)", "Jsc(mA/cm2)", "FF(%)", "PCE(%)"]
-        param_labels = ["Voc", "Jsc", "FF", "PCE"]
-
-        available = [c for c in params if c in data.columns]
-        if not available:
-            logger.warning("Warning: none of the expected columns found in data")
-            return None, ""
-
-        data = data.copy()
-        data["Jsc(mA/cm2)"] = data["Jsc(mA/cm2)"].abs()
-
-        if var_x is None:
-            var_x = "batch_for_plotting" if "batch_for_plotting" in data.columns else "sample"
-        elif var_x == "batch" and "batch_for_plotting" in data.columns:
-            var_x = "batch_for_plotting"
-
-        if var_x not in data.columns:
-            var_x = "sample"
-
-        try:
-            data[var_x] = data[var_x].astype(int)
-        except (ValueError, TypeError):
-            pass
-
-        use_direction_color = (
-            direction_split and "direction" in data.columns and var_x != "direction"
-        )
-
-        if use_direction_color:
-            # Order direction so Reverse always comes first
-            data["direction"] = pd.Categorical(
-                data["direction"], categories=["Reverse", "Forward"], ordered=True
-            )
-            data = data.sort_values("direction")
-            id_vars = [var_x, "direction"]
-        else:
-            id_vars = [var_x]
-
-        # Melt to long format so px.box can use facet_col
-        melt_df = data[id_vars + available].melt(
-            id_vars=id_vars, value_vars=available, var_name="parameter", value_name="value"
-        )
-
-        # Use short labels for display
-        label_map = dict(zip(params, param_labels))
-        melt_df["parameter"] = melt_df["parameter"].map(label_map)
-
-        # Fix parameter order
-        melt_df["parameter"] = pd.Categorical(
-            melt_df["parameter"], categories=param_labels, ordered=True
-        )
-        melt_df = melt_df.sort_values("parameter")
-
-        if colors is None:
-            colors = [
-                "rgba(93, 164, 214, 0.7)",
-                "rgba(255, 144, 14, 0.7)",
-                "rgba(44, 160, 101, 0.7)",
-                "rgba(255, 65, 54, 0.7)",
-                "rgba(207, 114, 255, 0.7)",
-                "rgba(127, 96, 0, 0.7)",
-                "rgba(255, 140, 184, 0.7)",
-                "rgba(79, 90, 117, 0.7)",
-            ]
-
-        dir_note = " | split by scan direction" if use_direction_color else ""
-        common_kwargs = dict(
-            x=var_x,
-            y="value",
-            facet_col="parameter",
-            facet_col_wrap=2,
-            facet_col_spacing=0.08,
-            points="all",
-            template="plotly_white",
-            title=(
-                f"The big 4 — Voc, Jsc, FF, PCE by {var_x}{dir_note}<br>"
-                f"<sup>{len(data)} measurements (filtered data)</sup>"
+            width=1400,
+            height=700,  # 👈 Reduced height to compress plot vertically
+            margin=dict(l=80, r=200, t=130, b=130),  # 👈 Larger bottom margin for rotated labels
+            plot_bgcolor="white",
+            paper_bgcolor="white",
+            hovermode="closest",
+            xaxis=dict(
+                titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+            ),
+            yaxis=dict(
+                titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
             ),
         )
-        if use_direction_color:
-            px_kwargs = {
-                **common_kwargs,
-                "color": "direction",
-                "color_discrete_map": {
-                    "Reverse": "rgba(255, 182, 193, 0.8)",
-                    "Forward": "rgba(173, 216, 230, 0.8)",
-                },
+
+        # Apply rotation for x-axis
+        if len(group_keys) > 4:
+            fig.update_xaxes(tickangle=-45)
+
+        fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="lightgray")
+
+        fig_name = f"Boxplot_{name_y}_by_{name_x}"
+        if separate_scan_dir:
+            fig_name += "_separated"
+        if data_type == "junk":
+            fig_name += "_filtered_out"
+        fig_name += ".html"
+
+        return fig, fig_name, None, title_text, ""
+
+    def _build_hysteresis_dataframe(self, data):
+        """Collapse each sample's Forward/Reverse row-pair into one hysteresis value: (PCE_rev - PCE_fwd) / PCE_rev."""
+        if (
+            data is None
+            or data.empty
+            or "direction" not in data.columns
+            or "PCE(%)" not in data.columns
+        ):
+            return pd.DataFrame()
+
+        df = data.copy()
+        if "ilum" in df.columns:
+            df = df[df["ilum"] != "Dark"]
+        if df.empty:
+            return pd.DataFrame()
+
+        group_cols = [c for c in ["sample", "cell", "px_number", "cycle_number"] if c in df.columns]
+        if not group_cols:
+            return pd.DataFrame()
+
+        carry_cols = ["condition", "batch", "batch_for_plotting", "subbatch", "status", "sample_id"]
+
+        rows = []
+        for keys, group in df.groupby(group_cols, dropna=False):
+            if not isinstance(keys, tuple):
+                keys = (keys,)
+            key_dict = dict(zip(group_cols, keys))
+
+            rev = group[group["direction"] == "Reverse"]
+            fwd = group[group["direction"] == "Forward"]
+            if rev.empty or fwd.empty:
+                continue  # need both scan directions to form a hysteresis value
+
+            rev_row = rev.sort_values("PCE(%)").iloc[-1]
+            fwd_row = fwd.sort_values("PCE(%)").iloc[-1]
+
+            rev_pce = rev_row["PCE(%)"]
+            fwd_pce = fwd_row["PCE(%)"]
+            if pd.isna(rev_pce) or pd.isna(fwd_pce) or rev_pce == 0:
+                continue
+
+            row = {
+                "hysteresis": (rev_pce - fwd_pce) / rev_pce,
+                "PCE_reverse": rev_pce,
+                "PCE_forward": fwd_pce,
+                **key_dict,
             }
-        else:
-            px_kwargs = {
-                **common_kwargs,
-                "color": var_x,
-                "color_discrete_sequence": colors,
+            for col in carry_cols:
+                if col in rev_row.index:
+                    row[col] = rev_row[col]
+            rows.append(row)
+
+        return pd.DataFrame(rows)
+
+    def create_hysteresis_boxplot(self, data, var_x, other_data, data_type="data", colors=None):
+        """Boxplot of hysteresis = (PCE_reverse - PCE_forward) / PCE_reverse, one box per x-tick (directions are already merged)."""
+        var_x_map = {
+            "sample": "sample",
+            "cell": "cell",
+            "ilum": "ilum",
+            "batch": "batch_for_plotting",
+            "condition": "condition",
+            "status": "status",
+            "subbatch": "subbatch",
+        }
+        name_x = var_x_map.get(var_x, var_x)
+
+        hyst_df = self._build_hysteresis_dataframe(data)
+        if hyst_df.empty or name_x not in hyst_df.columns:
+            print(
+                f"⚠️ Warning: could not build hysteresis data for grouping column '{name_x}' "
+                f"('by Scan Direction' is not applicable to Hysteresis, since it merges both directions)."
+            )
+            return None, "", None, "", ""
+
+        fig = go.Figure()
+        group_keys = list(hyst_df[name_x].unique())
+        num_categories = len(group_keys)
+        distributed_colors = self._get_intelligent_colors(
+            group_keys, num_categories, color_scheme=colors
+        )
+
+        for i, key in enumerate(group_keys):
+            group_data = hyst_df[hyst_df[name_x] == key]
+            if group_data.empty:
+                continue
+
+            hover_data = []
+            for _, row_data in group_data.iterrows():
+                hover_data.append(
+                    [
+                        row_data.get("condition", row_data.get(name_x, "N/A")),
+                        row_data.get("sample", "N/A"),
+                        row_data.get("batch_for_plotting", row_data.get("batch", "N/A")),
+                        row_data.get("cell", "N/A"),
+                        row_data.get("PCE_reverse", float("nan")),
+                        row_data.get("PCE_forward", float("nan")),
+                    ]
+                )
+
+            color = distributed_colors[i]
+            fig.add_trace(
+                go.Box(
+                    y=group_data["hysteresis"] * 100.0,
+                    name=str(key),
+                    x=[str(key)] * len(group_data),
+                    boxpoints="all",
+                    pointpos=0,
+                    jitter=0.5,
+                    whiskerwidth=0.4,
+                    marker=dict(size=4, opacity=0.7, color="rgba(0,0,0,0.7)"),
+                    line=dict(width=1.5, color="black"),
+                    fillcolor=color,
+                    boxmean=True,
+                    width=0.8,
+                    legendgroup=str(key),
+                    customdata=hover_data,
+                    hovertemplate="<b>%{customdata[0]}</b><br>"
+                    + "Sample: %{customdata[1]}<br>"
+                    + "Upload: %{customdata[2]}<br>"
+                    + "Cell: %{customdata[3]}<br>"
+                    + "PCE Reverse: %{customdata[4]:.2f}%<br>"
+                    + "PCE Forward: %{customdata[5]:.2f}%<br>"
+                    + "Hysteresis: %{y:.2f}%<br>"
+                    + "<extra></extra>",
+                )
+            )
+
+        fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="lightgray")
+
+        x_axis_display = str(name_x or "variable").replace("_", " ").title()
+        if name_x == "condition":
+            x_axis_display = "Variable"
+        elif name_x == "batch_for_plotting":
+            x_axis_display = "Batch"
+
+        title_text = f"Boxplot of {x_axis_display} by Hysteresis"
+        if data_type == "junk":
+            title_text += " (Filtered Out Data)"
+
+        fig.update_layout(
+            title=dict(
+                text=title_text,
+                x=0.5,
+                xanchor="center",
+                font=dict(size=self.font_size_title, color="black"),
+            ),
+            template="plotly_white",
+            showlegend=False,
+            width=1400,
+            height=700,
+            margin=dict(l=80, r=200, t=130, b=130),
+            plot_bgcolor="white",
+            paper_bgcolor="white",
+            hovermode="closest",
+            xaxis=dict(
+                titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+            ),
+            yaxis=dict(
+                title="Hysteresis (%)",
+                titlefont=dict(size=self.font_size_axis),
+                tickfont=dict(size=self.font_size_axis),
+            ),
+        )
+
+        if len(group_keys) > 4:
+            fig.update_xaxes(tickangle=-45)
+
+        fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="lightgray")
+
+        fig_name = f"Boxplot_Hysteresis_by_{name_x}"
+        if data_type == "junk":
+            fig_name += "_filtered_out"
+        fig_name += ".html"
+
+        return fig, fig_name, None, title_text, ""
+
+    def _lighten_rgba(self, rgba_str, factor=0.3):
+        r, g, b, a = self._extract_rgb_from_color(rgba_str)
+        r = min(255, int(r + (255 - r) * factor))
+        g = min(255, int(g + (255 - g) * factor))
+        b = min(255, int(b + (255 - b) * factor))
+        return f"rgba({r}, {g}, {b}, {a})"
+
+    def _darken_rgba(self, rgba_str, factor=0.3):
+        r, g, b, a = self._extract_rgb_from_color(rgba_str)
+        r = max(0, int(r * (1 - factor)))
+        g = max(0, int(g * (1 - factor)))
+        b = max(0, int(b * (1 - factor)))
+        return f"rgba({r}, {g}, {b}, {a})"
+
+    def _get_intelligent_colors(self, categories, num_needed, color_scheme=None):
+        """Distribute colors intelligently"""
+        if color_scheme is None:
+            color_scheme = ["rgba(93, 164, 214, 0.7)", "rgba(255, 144, 14, 0.7)"]
+        if num_needed <= len(color_scheme):
+            return color_scheme[:num_needed]
+        colors = []
+        for i in range(num_needed):
+            colors.append(color_scheme[i % len(color_scheme)])
+        return colors
+
+    def create_enhanced_jv_curve_plot(
+        self,
+        jvc_data,
+        curves_data,
+        mode="best_per_condition",
+        log_current=False,
+        colors=None,
+        plot_style="lines+markers",
+        sample_filters=None,
+        legend_config=None,
+        use_plot_filter=True,
+    ):
+        """
+        Enhanced JV curve plotting with advanced features:
+        - Per-sample pixel/cycle selection
+        - Customizable legend configuration
+        - Points + Lines plot style
+        - Optional boundary artifact filtering
+
+        Parameters:
+        -----------
+        sample_filters : dict, optional
+            Format: {sample_name: {'pixels': [...], 'cycles': [...]}}
+        legend_config : dict, optional
+            Format: {'batch': bool, 'condition': bool, 'sample': bool, 'pixel': bool, 'cycle': bool, 'pce': bool}
+        use_plot_filter : bool
+            Whether to apply _mask_boundary_zero_point filter (default: True)
+        """
+
+        if jvc_data is None or jvc_data.empty or curves_data is None or curves_data.empty:
+            fig = go.Figure()
+            fig.update_layout(title="No data available")
+            return fig, "JV_enhanced_curves.html"
+
+        if colors is None:
+            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+
+        if legend_config is None:
+            legend_config = {
+                "batch": True,
+                "condition": True,
+                "sample": True,
+                "pixel": True,
+                "cycle": True,
+                "pce": False,
             }
 
-        fig = px.box(melt_df, **px_kwargs)
-
-        # px.box never sets fillcolor explicitly -- the per-category/direction color
-        # from color_discrete_sequence/color_discrete_map lives entirely in
-        # marker.color, and the box fill falls back to it at render time. Snapshot
-        # that as an explicit fillcolor before overriding marker.color below, or
-        # every box collapses to the same flat marker color.
-        for trace in fig.data:
-            trace.fillcolor = trace.marker.color
-
-        # Match the single-parameter boxplot's styling (create_boxplot): black,
-        # semi-opaque points that read clearly against any fill color, a defined
-        # box outline, and an explicit box width so each box keeps real margin
-        # from its neighbors and the facet frame, instead of nearly filling the
-        # slot boxgap leaves it.
-        fig.update_traces(
-            quartilemethod="linear",
-            jitter=0.5,
-            pointpos=0,
-            whiskerwidth=0.4,
-            width=0.8,
-            marker=dict(size=5, opacity=0.7, color="rgba(0,0,0,0.7)"),
-            line=dict(width=1.5),
-            boxmean=True,
-        )
-
-        layout_kwargs = dict(
-            height=750,
-            # color is tied 1:1 to x here, so there's only ever one box per x
-            # position; "group" would reserve an empty slot per legend entry at
-            # every position and shrink the boxes. Direction-split genuinely has
-            # two groups (Reverse/Forward) sharing each position, so it keeps
-            # "group".
-            boxmode="group" if use_direction_color else "overlay",
-            boxgap=0.05,
-            boxgroupgap=0.1,
-        )
-        if use_direction_color:
-            layout_kwargs["margin"] = dict(l=60, r=160, t=120, b=80)
-            layout_kwargs["legend"] = dict(
-                x=1.01,
-                y=1,
-                xanchor="left",
-                yanchor="top",
-                bgcolor="rgba(255,255,255,0.9)",
-                bordercolor="black",
-                borderwidth=1,
-            )
-        else:
-            layout_kwargs["margin"] = dict(l=60, r=40, t=120, b=80)
-            layout_kwargs["showlegend"] = False
-
-        fig.update_layout(**layout_kwargs)
-
-        # Clean up facet labels (remove "parameter=")
-        fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
-
-        # Independent y-axes per facet, each labelled with its own units. With
-        # facet_col_wrap=2 and this fixed param_labels order (Voc, Jsc, FF, PCE),
-        # Plotly Express lays the grid out as Voc|Jsc on top and FF|PCE below, and
-        # addresses rows bottom-up (row=1 is the bottom row) -- verified empirically,
-        # since that ordering isn't documented.
-        fig.update_yaxes(matches=None, showticklabels=True, title="")
-        n_facet_cols = 2
-        n_facet_rows = -(-len(param_labels) // n_facet_cols)  # ceil division
-        for i, (param, label) in enumerate(zip(params, param_labels)):
-            fig.update_yaxes(
-                title_text=self.UNIT_LABELS.get(param, label),
-                row=n_facet_rows - (i // n_facet_cols),
-                col=i % n_facet_cols + 1,
-            )
-
-        # Solid frame around each of the 4 facet subplots
-        fig.update_xaxes(showline=True, linewidth=1.5, linecolor="#999999", mirror=True)
-        fig.update_yaxes(showline=True, linewidth=1.5, linecolor="#999999", mirror=True)
-
-        return fig, "boxplot_voc_jsc_ff_pce_2x2.html"
-
-    def create_jv_all_cells_plot(self, jvc_data, curves_data, colors=None, flip_current=False):
-        """Plot JV curves for all cells in the complete dataset"""
-
-        jv_devices = set(jvc_data[["sample", "cell"]].apply(tuple, axis=1))
-        curves_devices = set(curves_data[["sample", "cell"]].apply(tuple, axis=1))
-
-        matching_devices = jv_devices.intersection(curves_devices)
-        jv_only_devices = jv_devices - curves_devices
-        curves_only_devices = curves_devices - jv_devices
-
-        logger.debug("  Matching devices: %s", len(matching_devices))
-        logger.debug("  JV-only devices (no curves): %s", len(jv_only_devices))
-        logger.debug("  Curves-only devices (no JV): %s", len(curves_only_devices))
-
-        if len(jv_only_devices) > 0:
-            logger.debug("  Examples of JV-only devices: %s", list(jv_only_devices)[:5])
-        if len(curves_only_devices) > 0:
-            logger.debug("  Examples of curves-only devices: %s", list(curves_only_devices)[:5])
-
-        # Check if the best device from JV data has curves
-        best_idx = jvc_data["PCE(%)"].idxmax()
-        best_sample = jvc_data.loc[best_idx]["sample"]
-        best_cell = jvc_data.loc[best_idx]["cell"]
-        best_pce = jvc_data.loc[best_idx]["PCE(%)"]
-        best_device_curves = curves_data[
-            (curves_data["sample"] == best_sample) & (curves_data["cell"] == best_cell)
-        ]
-
-        logger.debug("  Best device: %s_%s (PCE: %.2f%%)", best_sample, best_cell, best_pce)
-        logger.debug("  Best device has %s curve records", len(best_device_curves))
-
-        # Use the existing best device plot logic but for multiple devices
-        fig = go.Figure()
-
-        # Add axis lines
-        fig.add_shape(
-            type="line",
-            xref="paper",
-            x0=0,
-            x1=1,
-            yref="y",
-            y0=0,
-            y1=0,
-            line=dict(color="gray", width=2),
-        )
-        fig.add_shape(
-            type="line",
-            xref="x",
-            x0=0,
-            x1=0,
-            yref="paper",
-            y0=0,
-            y1=1,
-            line=dict(color="gray", width=2),
-        )
-
-        if colors is None:
-            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-
-        # Get unique sample-cell combinations from filtered data
-        unique_devices = jvc_data.groupby(["sample", "cell"]).first().reset_index()
-
-        plot_count = 0
-        for idx, device_row in unique_devices.iterrows():
-            # if plot_count >= 20:  # Limit to prevent overcrowding
-            #    break
-
-            sample = device_row["sample"]
-            cell = device_row["cell"]
-
-            # Get curves for this device
-            device_curves = curves_data[
-                (curves_data["sample"] == sample) & (curves_data["cell"] == cell)
-            ]
-
-            if device_curves.empty:
-                continue
-
-            # Process curves similar to best device plot
-            voltage_data = {}
-            current_data = {}
-
-            for _, curve_row in device_curves.iterrows():
-                direction = curve_row["direction"]
-                variable_type = curve_row["variable"]
-
-                # Extract data values
-                data_values = []
-                for col in curve_row.index[8:]:
-                    try:
-                        val = float(curve_row[col])
-                        if not pd.isna(val):
-                            data_values.append(val)
-                    except (ValueError, TypeError):
-                        continue
-
-                key = f"{direction}"
-
-                if variable_type == "Voltage (V)":
-                    voltage_data[key] = data_values
-                elif variable_type == "Current Density(mA/cm2)":
-                    current_data[key] = data_values
-
-            # Plot curves for this device
-            for key in voltage_data.keys():
-                if key in current_data:
-                    voltage_values = voltage_data[key]
-                    current_values = current_data[key]
-                    if flip_current:
-                        current_values = [-v for v in current_values]
-                    direction = key.split("_", 1)
-
-                    if len(voltage_values) > 0 and len(current_values) > 0:
-                        color_index = plot_count % len(colors)
-                        base_color = colors[color_index]
-
-                        line_style = "solid" if direction == "Reverse" else "dash"
-                        marker_symbol = "circle" if direction == "Reverse" else "x"
-
-                        trace_name = f"{sample}_{cell} {direction}"
-
-                        fig.add_trace(
-                            go.Scatter(
-                                x=voltage_values,
-                                y=current_values,
-                                mode="lines+markers",
-                                line=dict(dash=line_style, color=base_color, width=1),
-                                marker=dict(size=4, color=base_color, symbol=marker_symbol),
-                                name=trace_name,
-                                showlegend=True,
-                            )
-                        )
-
-            plot_count += 1
-
-        _y_range_all = [-5, 30] if flip_current else [-30, 5]
-        fig.update_layout(
-            title=f"JV Curves - All Cells ({len(unique_devices)} devices, showing first {min(20, len(unique_devices))})",  # noqa: E501
-            xaxis_title="Voltage [V]",
-            yaxis_title="Current Density [mA/cm²]",
-            xaxis=dict(range=[-0.2, 2.0]),
-            yaxis=dict(range=_y_range_all),
-            template="plotly_white",
-            legend=dict(
-                x=1.02,
-                y=1,
-                bgcolor="rgba(255,255,255,0.9)",
-                bordercolor="black",
-                borderwidth=1,
-                xanchor="left",
-                yanchor="top",
-            ),
-            showlegend=True,
-            margin=dict(r=200),
-        )
-
-        sample_name = "JV_all_cells.html"
-        return fig, sample_name
-
-    def create_jv_working_cells_plot(self, jvc_data, curves_data, colors=None, flip_current=False):
-        """Plot JV curves for working cells only (cells that passed filters)"""
-
-        if not jvc_data.empty:
-            working_pce_min = jvc_data["PCE(%)"].min()
-            working_pce_max = jvc_data["PCE(%)"].max()
-            working_pce_mean = jvc_data["PCE(%)"].mean()
-            logger.debug(
-                "  Working PCE range: %.2f%% to %.2f%% (mean: %.2f%%)",
-                working_pce_min,
-                working_pce_max,
-                working_pce_mean,
-            )
-
-        if jvc_data.empty:
-            # Return empty plot
-            fig = go.Figure()
-            fig.update_layout(title="No working cells found (none passed filters)")
-            return fig, "JV_working_cells.html"
-
-        # Use the same logic as create_jv_all_cells_plot but with different title
-        fig = go.Figure()
-
-        # Add axis lines
-        fig.add_shape(
-            type="line",
-            xref="paper",
-            x0=0,
-            x1=1,
-            yref="y",
-            y0=0,
-            y1=0,
-            line=dict(color="gray", width=2),
-        )
-        fig.add_shape(
-            type="line",
-            xref="x",
-            x0=0,
-            x1=0,
-            yref="paper",
-            y0=0,
-            y1=1,
-            line=dict(color="gray", width=2),
-        )
-
-        if colors is None:
-            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-
-        unique_devices = jvc_data.groupby(["sample", "cell"]).first().reset_index()
-
-        # Show PCE range of working devices
-        pce_min = jvc_data["PCE(%)"].min()  # noqa: F841
-        pce_max = jvc_data["PCE(%)"].max()  # noqa: F841
-        pce_mean = jvc_data["PCE(%)"].mean()  # noqa: F841
-
-        plot_count = 0
-        for idx, device_row in unique_devices.iterrows():
-            sample = device_row["sample"]
-            cell = device_row["cell"]
-
-            # Get curves for this device
-            device_curves = curves_data[
-                (curves_data["sample"] == sample) & (curves_data["cell"] == cell)
-            ]
-
-            if device_curves.empty:
-                continue
-
-            # Process curves similar to best device plot
-            voltage_data = {}
-            current_data = {}
-
-            for _, curve_row in device_curves.iterrows():
-                direction = curve_row["direction"]
-                variable_type = curve_row["variable"]
-
-                # Extract data values
-                data_values = []
-                for col in curve_row.index[8:]:
-                    try:
-                        val = float(curve_row[col])
-                        if not pd.isna(val):
-                            data_values.append(val)
-                    except (ValueError, TypeError):
-                        continue
-
-                key = f"{direction}"
-
-                if variable_type == "Voltage (V)":
-                    voltage_data[key] = data_values
-                elif variable_type == "Current Density(mA/cm2)":
-                    current_data[key] = data_values
-
-            # Plot curves for this device
-            for key in voltage_data.keys():
-                if key in current_data:
-                    voltage_values = voltage_data[key]
-                    current_values = current_data[key]
-                    if flip_current:
-                        current_values = [-v for v in current_values]
-                    direction = key.split("_", 1)
-
-                    if len(voltage_values) > 0 and len(current_values) > 0:
-                        color_index = plot_count % len(colors)
-                        base_color = colors[color_index]
-
-                        line_style = "solid" if direction == "Reverse" else "dash"
-                        marker_symbol = "circle" if direction == "Reverse" else "x"
-
-                        trace_name = f"{sample}_{cell} {direction}"
-
-                        fig.add_trace(
-                            go.Scatter(
-                                x=voltage_values,
-                                y=current_values,
-                                mode="lines+markers",
-                                line=dict(dash=line_style, color=base_color, width=1),
-                                marker=dict(size=4, color=base_color, symbol=marker_symbol),
-                                name=trace_name,
-                                showlegend=True,
-                            )
-                        )
-
-            plot_count += 1
-
-        _y_range_wk = [-5, 30] if flip_current else [-30, 5]
-        fig.update_layout(
-            title=f"JV Curves - Working Cells Only ({len(unique_devices)} devices passed filters)",
-            xaxis_title="Voltage [V]",
-            yaxis_title="Current Density [mA/cm²]",
-            xaxis=dict(range=[-0.2, 2.0]),
-            yaxis=dict(range=_y_range_wk),
-            template="plotly_white",
-            legend=dict(
-                x=1.02,
-                y=1,
-                bgcolor="rgba(255,255,255,0.9)",
-                bordercolor="black",
-                borderwidth=1,
-                xanchor="left",
-                yanchor="top",
-            ),
-            showlegend=True,
-            margin=dict(r=200),
-        )
-
-        return fig, "JV_working_cells.html"
-
-    def create_jv_non_working_cells_plot(
-        self, jvc_data, curves_data, colors=None, flip_current=False
-    ):
-        """Plot JV curves for rejected cells only (cells that were filtered out)"""
-
-        if jvc_data.empty:
-            fig = go.Figure()
-            fig.update_layout(title="No rejected cells found (none were filtered out)")
-            return fig, "JV_rejected_cells.html"
-
-        # Use the same logic as create_jv_all_cells_plot but with different title
-        fig = go.Figure()
-
-        # Add axis lines
-        fig.add_shape(
-            type="line",
-            xref="paper",
-            x0=0,
-            x1=1,
-            yref="y",
-            y0=0,
-            y1=0,
-            line=dict(color="gray", width=2),
-        )
-        fig.add_shape(
-            type="line",
-            xref="x",
-            x0=0,
-            x1=0,
-            yref="paper",
-            y0=0,
-            y1=1,
-            line=dict(color="gray", width=2),
-        )
-
-        if colors is None:
-            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-
-        # Get unique sample-cell combinations from REJECTED data
-        unique_devices = jvc_data.groupby(["sample", "cell"]).first().reset_index()
-
-        # Show PCE range of rejected devices
-        pce_min = jvc_data["PCE(%)"].min()  # noqa: F841
-        pce_max = jvc_data["PCE(%)"].max()  # noqa: F841
-        pce_mean = jvc_data["PCE(%)"].mean()  # noqa: F841
-
-        plot_count = 0
-        for idx, device_row in unique_devices.iterrows():
-            sample = device_row["sample"]
-            cell = device_row["cell"]
-
-            # Get curves for this device
-            device_curves = curves_data[
-                (curves_data["sample"] == sample) & (curves_data["cell"] == cell)
-            ]
-
-            if device_curves.empty:
-                continue
-
-            # Process curves similar to best device
-            voltage_data = {}
-            current_data = {}
-
-            for _, curve_row in device_curves.iterrows():
-                direction = curve_row["direction"]
-                variable_type = curve_row["variable"]
-
-                # Extract data values
-                data_values = []
-                for col in curve_row.index[8:]:
-                    try:
-                        val = float(curve_row[col])
-                        if not pd.isna(val):
-                            data_values.append(val)
-                    except (ValueError, TypeError):
-                        continue
-
-                key = f"{direction}"
-
-                if variable_type == "Voltage (V)":
-                    voltage_data[key] = data_values
-                elif variable_type == "Current Density(mA/cm2)":
-                    current_data[key] = data_values
-
-            # Plot curves for this device
-            for key in voltage_data.keys():
-                if key in current_data:
-                    voltage_values = voltage_data[key]
-                    current_values = current_data[key]
-                    if flip_current:
-                        current_values = [-v for v in current_values]
-                    direction = key.split("_", 1)
-
-                    if len(voltage_values) > 0 and len(current_values) > 0:
-                        color_index = plot_count % len(colors)
-                        base_color = colors[color_index]
-
-                        line_style = "solid" if direction == "Reverse" else "dash"
-                        marker_symbol = "circle" if direction == "Reverse" else "x"
-
-                        trace_name = f"{sample}_{cell} {direction}"
-
-                        fig.add_trace(
-                            go.Scatter(
-                                x=voltage_values,
-                                y=current_values,
-                                mode="lines+markers",
-                                line=dict(dash=line_style, color=base_color, width=1),
-                                marker=dict(size=4, color=base_color, symbol=marker_symbol),
-                                name=trace_name,
-                                showlegend=True,
-                            )
-                        )
-
-            plot_count += 1
-
-        _y_range_rej = [-5, 30] if flip_current else [-30, 5]
-        fig.update_layout(
-            title=f"JV Curves - Rejected Cells ({len(unique_devices)} devices filtered out)",
-            xaxis_title="Voltage [V]",
-            yaxis_title="Current Density [mA/cm²]",
-            xaxis=dict(range=[-0.2, 2.0]),
-            yaxis=dict(range=_y_range_rej),
-            template="plotly_white",
-            legend=dict(
-                x=1.02,
-                y=1,
-                bgcolor="rgba(255,255,255,0.9)",
-                bordercolor="black",
-                borderwidth=1,
-                xanchor="left",
-                yanchor="top",
-            ),
-            showlegend=True,
-            margin=dict(r=200),
-        )
-
-        return fig, "JV_rejected_cells.html"
-
-    def create_jv_separated_by_cell_plot(
-        self, jvc_data, curves_data, colors=None, plot_type="all", flip_current=False
-    ):  # noqa: E501
-        """Create separate figures for each sample, with 6 subplots (one per cell) in each figure"""
-        if plot_type == "working":
-            logger.debug("Creating JV curves separated by cell (working cells only)")
-        else:
-            logger.debug("Creating JV curves separated by cell (all cells)")
-
-        if colors is None:
-            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-
-        # Get unique samples
-        unique_samples = jvc_data["sample"].unique()
-        logger.debug("  Found %s unique samples", len(unique_samples))
-
-        figures = []
-        figure_names = []
-
-        for sample in unique_samples:
-            sample_jv = jvc_data[jvc_data["sample"] == sample]
-            sample_curves = curves_data[curves_data["sample"] == sample]
-
-            if sample_curves.empty:
-                continue
-
-            # Get unique cells for this sample
-            unique_cells = sorted(sample_jv["cell"].unique())
-            logger.debug("  Sample %s: %s cells", sample, len(unique_cells))
-
-            # Create subplots (2 rows x 3 cols for 6 cells)
-            rows, cols = 2, 3
-            fig = make_subplots(
-                rows=rows,
-                cols=cols,
-                subplot_titles=[f"Cell {cell}" for cell in unique_cells[:6]],  # Limit to 6 cells
-                shared_xaxes=False,
-                shared_yaxes=False,
-                vertical_spacing=0.15,
-                horizontal_spacing=0.08,
-            )
-
-            for i, cell in enumerate(unique_cells[:6]):  # Limit to 6 cells
-                row = (i // cols) + 1
-                col = (i % cols) + 1
-
-                cell_curves = sample_curves[sample_curves["cell"] == cell]
-
-                if cell_curves.empty:
-                    continue
-
-                # Process curves for this cell - HANDLE MULTIPLE MEASUREMENTS
-                voltage_measurements = []  # List of voltage arrays with metadata
-                current_measurements = []  # List of current arrays with metadata
-
-                for _, curve_row in cell_curves.iterrows():
-                    direction = curve_row["direction"]
-                    variable_type = curve_row["variable"]
-                    status = curve_row.get("status", "N/A")
-
-                    # Extract data values
-                    data_values = []
-                    for col_idx in curve_row.index[8:]:  # Skip metadata columns
-                        try:
-                            val = float(curve_row[col_idx])
-                            if not pd.isna(val):
-                                data_values.append(val)
-                        except (ValueError, TypeError):
-                            continue
-
-                    # Store with full metadata to distinguish measurements
-                    measurement_info = {
-                        "direction": direction,
-                        "status": status,
-                        "data": data_values,
-                    }
-
-                    if variable_type == "Voltage (V)":
-                        voltage_measurements.append(measurement_info)
-                    elif variable_type == "Current Density(mA/cm2)":
-                        current_measurements.append(measurement_info)
-
-                # Create measurement pairs by matching direction, and status
-                measurement_pairs = []
-                for v_measurement in voltage_measurements:
-                    for c_measurement in current_measurements:
-                        if (
-                            v_measurement["direction"] == c_measurement["direction"]
-                            and
-                            # v_measurement['illumination'] == c_measurement['illumination'] and
-                            v_measurement["status"] == c_measurement["status"]
-                        ):
-                            measurement_pairs.append(
-                                {
-                                    "voltage": v_measurement["data"],
-                                    "current": c_measurement["data"],
-                                    "direction": v_measurement["direction"],
-                                    #'illumination': v_measurement['illumination'],
-                                    "status": v_measurement["status"],
-                                }
-                            )
-
-                # Plot all measurement pairs with proper coloring like best device plot
-                for pair_idx, pair in enumerate(measurement_pairs):
-                    if len(pair["voltage"]) > 0 and len(pair["current"]) > 0:
-                        # Get base color from color scheme
-                        color_index = pair_idx % len(colors)
-                        base_color = colors[color_index]
-
-                        # Extract RGB values for color manipulation
-                        r, g, b, alpha = self._extract_rgb_from_color(base_color)
-
-                        if pair["direction"] == "Reverse":
-                            # Reverse gets the main color with solid line and circles
-                            line_color = f"rgba({r}, {g}, {b}, {alpha})"
-                            line_style = "solid"
-                            marker_symbol = "circle"
-                        else:
-                            # Forward gets 50% lighter color with dashed line and x markers
-                            light_r = min(255, int(r + (255 - r) * 0.5))
-                            light_g = min(255, int(g + (255 - g) * 0.5))
-                            light_b = min(255, int(b + (255 - b) * 0.5))
-                            line_color = f"rgba({light_r}, {light_g}, {light_b}, {alpha})"
-                            line_style = "dash"
-                            marker_symbol = "x"
-
-                        # Create trace name with status info
-                        trace_name = f"{pair['direction']} {pair['status']}"
-                        c_vals = pair["current"]
-                        if flip_current:
-                            c_vals = [-v for v in c_vals]
-
-                        fig.add_trace(
-                            go.Scatter(
-                                x=pair["voltage"],
-                                y=c_vals,
-                                mode="lines+markers",
-                                line=dict(dash=line_style, color=line_color, width=2),
-                                marker=dict(size=4, color=line_color, symbol=marker_symbol),
-                                name=trace_name,
-                                showlegend=(i == 0),  # Only show legend for first subplot
-                                legendgroup=f"{pair['direction']}_{pair['status']}",
-                            ),
-                            row=row,
-                            col=col,
-                        )
-
-            # Update layout with appropriate title
-            if plot_type == "working":
-                fig.update_layout(
-                    title=f"JV Curves by Cell - Sample: {sample} (Working Cells Only)",
-                    template="plotly_white",
-                    height=650,  # Increased from 600
-                    showlegend=True,
-                    margin=dict(
-                        t=80, b=60, l=50, r=50
-                    ),  # Add margins: top=100, bottom=80, left=60, right=60
-                )
-                figure_name = f"JV_by_cell_working_{sample}.html"
-            else:
-                fig.update_layout(
-                    title=f"JV Curves by Cell - Sample: {sample} (All Cells)",
-                    template="plotly_white",
-                    height=650,  # Increased from 600
-                    showlegend=True,
-                    margin=dict(t=80, b=60, l=50, r=50),  # Add margins
-                )
-                figure_name = f"JV_by_cell_all_{sample}.html"
-
-            # Update axes for all subplots
-            _y_range_cell = [-5, 30] if flip_current else [-30, 5]
-            for i in range(1, min(len(unique_cells), 6) + 1):
-                subplot_row = ((i - 1) // cols) + 1
-                subplot_col = ((i - 1) % cols) + 1
-                fig.update_xaxes(
-                    title_text="Voltage [V]", range=[-0.2, 1.5], row=subplot_row, col=subplot_col
-                )
-                fig.update_yaxes(
-                    title_text="Current Density [mA/cm²]",
-                    range=_y_range_cell,
-                    row=subplot_row,
-                    col=subplot_col,
-                )
-
-            figures.append(fig)
-            figure_names.append(figure_name)
-
-        logger.debug("  Created %s figures (one per sample)", len(figures))
-        return figures, figure_names
-
-    def create_jv_separated_by_substrate_plot(
-        self, jvc_data, curves_data, colors=None, plot_type="all", flip_current=False
-    ):
-        """Create separate plots for each sample, showing all cells together with multiple measurements"""  # noqa: E501
-        if plot_type == "working":
-            logger.debug("Creating JV curves separated by sample (working cells only)")
-        else:
-            logger.debug("Creating JV curves separated by sample (all cells)")
-
-        if colors is None:
-            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-
-        # Get unique samples
-        unique_samples = jvc_data["sample"].unique()
-        logger.debug("  Found %s unique samples", len(unique_samples))
-
-        figures = []
-        figure_names = []
-
-        for sample in unique_samples:
-            sample_jv = jvc_data[jvc_data["sample"] == sample]
-            sample_curves = curves_data[curves_data["sample"] == sample]
-
-            if sample_curves.empty:
-                continue
-
-            fig = go.Figure()
-
-            # Add axis lines
-            fig.add_shape(
-                type="line",
-                xref="paper",
-                x0=0,
-                x1=1,
-                yref="y",
-                y0=0,
-                y1=0,
-                line=dict(color="gray", width=1),
-            )
-            fig.add_shape(
-                type="line",
-                xref="x",
-                x0=0,
-                x1=0,
-                yref="paper",
-                y0=0,
-                y1=1,
-                line=dict(color="gray", width=1),
-            )
-
-            # Get unique cells for this sample
-            unique_cells = sorted(sample_jv["cell"].unique())
-            logger.debug("  Sample %s: %s cells", sample, len(unique_cells))
-
-            # Plot all cells for this sample with multiple measurements
-            color_idx = 0
-            for cell in unique_cells:
-                cell_curves = sample_curves[sample_curves["cell"] == cell]
-
-                if cell_curves.empty:
-                    continue
-
-                # Process curves for this cell - HANDLE MULTIPLE MEASUREMENTS
-                voltage_measurements = []  # List of voltage arrays with metadata
-                current_measurements = []  # List of current arrays with metadata
-
-                for _, curve_row in cell_curves.iterrows():
-                    direction = curve_row["direction"]
-                    variable_type = curve_row["variable"]
-                    status = curve_row.get("status", "N/A")
-
-                    # Extract data values
-                    data_values = []
-                    for col_idx in curve_row.index[8:]:  # Skip metadata columns
-                        try:
-                            val = float(curve_row[col_idx])
-                            if not pd.isna(val):
-                                data_values.append(val)
-                        except (ValueError, TypeError):
-                            continue
-
-                    # Store with full metadata to distinguish measurements
-                    measurement_info = {
-                        "direction": direction,
-                        "status": status,
-                        "data": data_values,
-                    }
-
-                    if variable_type == "Voltage (V)":
-                        voltage_measurements.append(measurement_info)
-                    elif variable_type == "Current Density(mA/cm2)":
-                        current_measurements.append(measurement_info)
-
-                # Create measurement pairs by matching direction, and status
-                measurement_pairs = []
-                for v_measurement in voltage_measurements:
-                    for c_measurement in current_measurements:
-                        if (
-                            v_measurement["direction"] == c_measurement["direction"]
-                            and
-                            # v_measurement['illumination'] == c_measurement['illumination'] and
-                            v_measurement["status"] == c_measurement["status"]
-                        ):
-                            measurement_pairs.append(
-                                {
-                                    "voltage": v_measurement["data"],
-                                    "current": c_measurement["data"],
-                                    "direction": v_measurement["direction"],
-                                    #'illumination': v_measurement['illumination'],
-                                    "status": v_measurement["status"],
-                                    "cell": cell,
-                                }
-                            )
-
-                # Plot all measurement pairs for this cell
-                for pair in measurement_pairs:
-                    if len(pair["voltage"]) > 0 and len(pair["current"]) > 0:
-                        # Get base color from color scheme for this cell
-                        base_color = colors[color_idx % len(colors)]
-
-                        # Extract RGB values for color manipulation
-                        r, g, b, alpha = self._extract_rgb_from_color(base_color)
-
-                        if pair["direction"] == "Reverse":
-                            # Reverse gets the main color with solid line and circles
-                            line_color = f"rgba({r}, {g}, {b}, {alpha})"
-                            line_style = "solid"
-                            marker_symbol = "circle"
-                        else:
-                            # Forward gets 50% lighter color with dashed line and x markers
-                            light_r = min(255, int(r + (255 - r) * 0.5))
-                            light_g = min(255, int(g + (255 - g) * 0.5))
-                            light_b = min(255, int(b + (255 - b) * 0.5))
-                            line_color = f"rgba({light_r}, {light_g}, {light_b}, {alpha})"
-                            line_style = "dash"
-                            marker_symbol = "x"
-
-                        # Create trace name with cell and status info
-                        trace_name = f"Cell {pair['cell']} {pair['direction']} {pair['status']}"
-                        c_vals = pair["current"]
-                        if flip_current:
-                            c_vals = [-v for v in c_vals]
-
-                        fig.add_trace(
-                            go.Scatter(
-                                x=pair["voltage"],
-                                y=c_vals,
-                                mode="lines+markers",
-                                line=dict(dash=line_style, color=line_color, width=2),
-                                marker=dict(size=4, color=line_color, symbol=marker_symbol),
-                                name=trace_name,
-                                showlegend=True,
-                            )
-                        )
-
-                color_idx += 1
-
-            # Update layout with appropriate title
-            _y_range_sub = [-5, 30] if flip_current else [-30, 5]
-            if plot_type == "working":
-                fig.update_layout(
-                    title=f"JV Curves - Sample: {sample} (Working Cells Only)",
-                    xaxis_title="Voltage [V]",
-                    yaxis_title="Current Density [mA/cm²]",
-                    xaxis=dict(range=[-0.2, 1.5]),
-                    yaxis=dict(range=_y_range_sub),
-                    template="plotly_white",
-                    legend=dict(
-                        x=1.02,
-                        y=1,
-                        bgcolor="rgba(255,255,255,0.9)",
-                        bordercolor="black",
-                        borderwidth=1,
-                        xanchor="left",
-                        yanchor="top",
-                    ),
-                    showlegend=True,
-                    margin=dict(r=200),
-                )
-                figure_name = f"JV_by_sample_working_{sample}.html"
-            else:
-                fig.update_layout(
-                    title=f"JV Curves - Sample: {sample} (All Cells)",
-                    xaxis_title="Voltage [V]",
-                    yaxis_title="Current Density [mA/cm²]",
-                    xaxis=dict(range=[-0.2, 1.5]),
-                    yaxis=dict(range=_y_range_sub),
-                    template="plotly_white",
-                    legend=dict(
-                        x=1.02,
-                        y=1,
-                        bgcolor="rgba(255,255,255,0.9)",
-                        bordercolor="black",
-                        borderwidth=1,
-                        xanchor="left",
-                        yanchor="top",
-                    ),
-                    showlegend=True,
-                    margin=dict(r=200),
-                )
-                figure_name = f"JV_by_sample_all_{sample}.html"
-
-            figures.append(fig)
-            figure_names.append(figure_name)
-
-        logger.debug("  Created %s figures (one per sample)", len(figures))
-        return figures, figure_names
-
-    # ------------------------------------------------------------------
-    # Best-device variants: by batch / by variable
-    # ------------------------------------------------------------------
-
-    def _plot_best_device_curves(
-        self, fig, best_device_jv, best_curves, base_color, label, flip_current=False
-    ):  # noqa: E501
-        """Add traces for one best-device to an existing figure."""
-        r, g, b, alpha = self._extract_rgb_from_color(base_color)
-
-        voltage_meas, current_meas = {}, {}
-        for _, curve_row in best_curves.iterrows():
-            direction = curve_row["direction"]
-            var_type = curve_row["variable"]
-            vals = []
-            for col in curve_row.index[8:]:
-                try:
-                    v = float(curve_row[col])
-                    if not pd.isna(v):
-                        vals.append(v)
-                except (ValueError, TypeError):
-                    continue
-            if var_type == "Voltage (V)":
-                voltage_meas.setdefault(direction, []).append(vals)
-            elif var_type == "Current Density(mA/cm2)":
-                current_meas.setdefault(direction, []).append(vals)
-
-        for direction, v_list in voltage_meas.items():
-            c_list = current_meas.get(direction, [])
-            for v_vals, c_vals in zip(v_list, c_list):
-                if flip_current:
-                    c_vals = [-v for v in c_vals]
-                if not v_vals or not c_vals:
-                    continue
-                if direction == "Reverse":
-                    line_color = base_color
-                    line_style = "solid"
+        if sample_filters is None:
+            sample_filters = {}
+
+        working_jv = jvc_data.copy()
+
+        # Apply per-sample pixel/cycle filtering
+        if sample_filters:
+            filtered_rows = []
+            for _, row in working_jv.iterrows():
+                sample = row.get("sample", "Unknown")
+                if sample not in sample_filters:
+                    # No specific filter for this sample - include all
+                    filtered_rows.append(row)
                 else:
-                    lr = min(255, int(r + (255 - r) * 0.5))
-                    lg = min(255, int(g + (255 - g) * 0.5))
-                    lb = min(255, int(b + (255 - b) * 0.5))
-                    line_color = f"rgba({lr}, {lg}, {lb}, {alpha})"
-                    line_style = "dash"
+                    filters = sample_filters[sample]
+                    pixels = filters.get("pixels", [])
+                    cycles = filters.get("cycles", [])
+                    directions = filters.get("directions", [])
+
+                    # Check pixel filter
+                    if pixels:
+                        px = row.get("px_number")
+                        if px is None or str(px) not in [str(p) for p in pixels]:
+                            continue
+
+                    # Check cycle filter
+                    if cycles:
+                        cyc = row.get("cycle_number")
+                        if cyc is None or int(cyc) not in [int(c) for c in cycles]:
+                            continue
+
+                    # Check direction filter
+                    if directions:
+                        direction_value = str(row.get("direction", "Unknown"))
+                        if direction_value not in [str(d) for d in directions]:
+                            continue
+
+                    filtered_rows.append(row)
+
+            if filtered_rows:
+                working_jv = pd.DataFrame(filtered_rows)
+            else:
+                working_jv = pd.DataFrame()
+
+        if working_jv.empty:
+            fig = go.Figure()
+            fig.update_layout(title="No data after sample filtering")
+            return fig, "JV_enhanced_curves.html"
+
+        if mode == "best_per_condition":
+            grouping_col = "condition" if "condition" in working_jv.columns else "sample"
+            if grouping_col in working_jv.columns and "PCE(%)" in working_jv.columns:
+                pce_numeric = pd.to_numeric(working_jv["PCE(%)"], errors="coerce")
+                valid_rows = working_jv[pce_numeric.notna()].copy()
+                if not valid_rows.empty:
+                    valid_rows["PCE(%)"] = pce_numeric[pce_numeric.notna()]
+                    best_indices = valid_rows.groupby(grouping_col)["PCE(%)"].idxmax()
+                    working_jv = working_jv.loc[best_indices].copy()
+
+        if working_jv.empty:
+            fig = go.Figure()
+            fig.update_layout(title="No data after best-per-condition selection")
+            return fig, "JV_enhanced_curves.html"
+
+        condition_col = "condition" if "condition" in working_jv.columns else "sample"
+        condition_values = working_jv[condition_col].fillna("Unknown").astype(str).unique().tolist()
+        color_list = self._get_intelligent_colors(
+            condition_values, len(condition_values), color_scheme=colors
+        )
+        condition_color_map = {cond: color_list[idx] for idx, cond in enumerate(condition_values)}
+
+        # Build metadata map from JV table
+        metadata_by_key = {}
+        for _, row in working_jv.iterrows():
+            key = self._build_measurement_key(row)
+            condition_value = str(row.get(condition_col, "Unknown"))
+            batch_display, sample_display = self._derive_batch_sample_labels(
+                row.get("batch", None), row.get("sample", None), row.get("identifier", None)
+            )
+            metadata_by_key[key] = {
+                "batch": batch_display,
+                "condition": condition_value,
+                "sample": sample_display,
+                "cell": row.get("cell", "Unknown"),
+                "direction": row.get("direction", "Unknown"),
+                "px_number": row.get("px_number", None),
+                "cycle_number": row.get("cycle_number", None),
+                "pce": row.get("PCE(%)", None),
+            }
+
+        # Build curve map
+        curves_by_key = {}
+        for _, curve_row in curves_data.iterrows():
+            key = self._build_measurement_key(curve_row)
+            variable_type = str(curve_row.get("variable", ""))
+            data_values = self._extract_curve_data_values(curve_row)
+            if not data_values:
+                continue
+
+            if key not in curves_by_key:
+                curves_by_key[key] = {"voltage": [], "current": []}
+
+            if variable_type == "Voltage (V)":
+                curves_by_key[key]["voltage"].append(data_values)
+            elif variable_type == "Current Density(mA/cm2)":
+                curves_by_key[key]["current"].append(data_values)
+
+        fig = go.Figure()
+        all_current_values = []
+        max_voc = working_jv["Voc(V)"].max() if "Voc(V)" in working_jv.columns else 1.2
+        x_max = (math.ceil(max_voc * 10) / 10) + 0.1
+
+        for key, metadata in metadata_by_key.items():
+            curve_entry = curves_by_key.get(key)
+            if curve_entry is None:
+                continue
+
+            voltage_sets = curve_entry.get("voltage", [])
+            current_sets = curve_entry.get("current", [])
+            pair_count = min(len(voltage_sets), len(current_sets))
+            if pair_count == 0:
+                continue
+
+            condition_value = metadata["condition"]
+            base_color = condition_color_map.get(condition_value, colors[0])
+
+            for idx in range(pair_count):
+                voltage_values = voltage_sets[idx]
+                current_values = current_sets[idx]
+
+                # Apply plot filter if requested
+                if use_plot_filter:
+                    voltage_values, current_values = self._mask_boundary_zero_point(
+                        voltage_values, current_values
+                    )
+
+                if len(voltage_values) == 0 or len(current_values) == 0:
+                    continue
+
+                all_current_values.extend(current_values)
+
+                px = metadata.get("px_number")
+                cycle = metadata.get("cycle_number")
+                pce = metadata.get("pce")
+
+                # Build legend name from selected config
+                legend_parts = []
+                if legend_config.get("batch") and metadata["batch"] != "Unknown":
+                    legend_parts.append(f"Batch: {metadata['batch']}")
+                if legend_config.get("condition") and metadata["condition"] != "Unknown":
+                    legend_parts.append(f"Cond: {metadata['condition']}")
+                if legend_config.get("sample"):
+                    legend_parts.append(f"S: {metadata['sample']}")
+                if legend_config.get("pixel") and px is not None:
+                    legend_parts.append(f"Px: {px}")
+                if legend_config.get("cycle") and cycle is not None and not pd.isna(cycle):
+                    legend_parts.append(f"C: {int(cycle)}")
+                if legend_config.get("direction") and metadata.get("direction") not in (
+                    None,
+                    "Unknown",
+                ):
+                    legend_parts.append(f"Dir: {metadata['direction']}")
+                if legend_config.get("pce") and pce is not None and not pd.isna(pce):
+                    legend_parts.append(f"PCE: {pce:.1f}%")
+
+                legend_name = " | ".join(legend_parts) if legend_parts else str(condition_value)
+
+                customdata = [
+                    [
+                        metadata["batch"],
+                        metadata["sample"],
+                        metadata["cell"],
+                        metadata["direction"],
+                        str(px) if px is not None else "-",
+                        str(int(cycle)) if cycle is not None and not pd.isna(cycle) else "-",
+                        float(pce) if pce is not None and not pd.isna(pce) else float("nan"),
+                    ]
+                ] * len(voltage_values)
+
                 fig.add_trace(
                     go.Scatter(
-                        x=v_vals,
-                        y=c_vals,
-                        mode="lines+markers",
-                        line=dict(dash=line_style, color=line_color, width=2),
-                        marker=dict(size=5, color=line_color),
-                        name=f"{label} {direction}",
+                        x=voltage_values,
+                        y=current_values,
+                        mode=plot_style,
+                        line=dict(color=base_color, width=2),
+                        marker=dict(size=4, color=base_color) if "markers" in plot_style else {},
+                        name=legend_name,
+                        legendgroup=legend_name,
                         showlegend=True,
+                        customdata=customdata,
+                        hovertemplate=(
+                            "<b>%{customdata[0]}</b><br>"
+                            "Sample: %{customdata[1]}<br>"
+                            "Cell: %{customdata[2]}<br>"
+                            "Direction: %{customdata[3]}<br>"
+                            "Pixel: %{customdata[4]}<br>"
+                            "Cycle: %{customdata[5]}<br>"
+                            "PCE: %{customdata[6]:.2f}%<br>"
+                            "Voltage: %{x:.3f} V<br>"
+                            "Current: %{y:.3f} mA/cm²<br>"
+                            "<extra></extra>"
+                        ),
                     )
                 )
 
-    def _add_jv_summary_annotation(self, fig, best_jv_df, x_rev=0.24, flip_current=False):
-        """Add Voc/Jsc/FF/PCE annotations for one best device (Rev and For, data coordinates)."""
-        df_rev = best_jv_df[best_jv_df["direction"] == "Reverse"]
-        df_for = best_jv_df[best_jv_df["direction"] == "Forward"]
-        if df_rev.empty and df_for.empty:
-            return
-        char_vals = ["Voc(V)", "Jsc(mA/cm2)", "FF(%)", "PCE(%)"]
-        char_rev = [
-            df_rev[c].iloc[0] if (not df_rev.empty and c in df_rev.columns) else 0
-            for c in char_vals
-        ]  # noqa: E501
-        char_for = [
-            df_for[c].iloc[0] if (not df_for.empty and c in df_for.columns) else 0
-            for c in char_vals
-        ]  # noqa: E501
-        annot_y = 5 if flip_current else -5
-        text_rev = (
-            f"Rev:<br>Voc: {char_rev[0]:>5.2f}"
-            f"<br>Jsc:  {char_rev[1]:>5.1f}"
-            f"<br>FF:   {char_rev[2]:>5.1f}"
-            f"<br>PCE: {char_rev[3]:>5.1f}"
-        )
-        text_for = (
-            f"For:<br>{char_for[0]:.2f} V"
-            f"<br>{char_for[1]:.1f} mA/cm²"
-            f"<br>{char_for[2]:.1f}%"
-            f"<br>{char_for[3]:.1f}%"
-        )
-        fig.add_annotation(
-            x=x_rev,
-            y=annot_y,
-            text=text_rev,
-            showarrow=False,
-            font=dict(size=12),
-            align="left",
-            name="summary_rev",
-        )
-        fig.add_annotation(
-            x=x_rev + 0.3,
-            y=annot_y,
-            text=text_for,
-            showarrow=False,
-            font=dict(size=12),
-            align="left",
-            name="summary_for",
-        )
+        if not all_current_values:
+            fig.update_layout(title="No matching JV curve traces available")
+            return fig, "JV_enhanced_curves.html"
 
-    def create_jv_best_by_batch_together(
-        self, jvc_data, curves_data, colors=None, show_summary=True, flip_current=False
-    ):  # noqa: E501
-        """One figure showing the best device (highest PCE) for each batch."""
-        if colors is None:
-            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+        y_min = min(all_current_values)
+        y_max = max(all_current_values)
+        y_span = max(1.0, y_max - y_min)
+        y_pad = 0.08 * y_span
 
-        fig = go.Figure()
+        # Add axis lines
+        fig.add_shape(type="line", x0=-0.2, y0=0, x1=x_max, y1=0, line=dict(color="gray", width=2))
         fig.add_shape(
             type="line",
-            xref="paper",
             x0=0,
-            x1=1,
-            yref="y",
-            y0=0,
-            y1=0,
-            line=dict(color="gray", width=1),
-        )
-        fig.add_shape(
-            type="line",
-            xref="x",
-            x0=0,
+            y0=y_min - y_pad,
             x1=0,
-            yref="paper",
-            y0=0,
-            y1=1,
-            line=dict(color="gray", width=1),
+            y1=y_max + y_pad,
+            line=dict(color="gray", width=2),
         )
 
-        batches = sorted(jvc_data["batch"].unique())
+        title_text = "JV Curves - Enhanced Analysis"
+        if mode == "all_curves_unfiltered":
+            title_text = "JV Curves - All Measurements"
 
-        for batch_idx, batch in enumerate(batches):
-            batch_jv = jvc_data[jvc_data["batch"] == batch]
-            if batch_jv.empty:
-                continue
-            best_idx = batch_jv["PCE(%)"].idxmax()
-            best_sample = batch_jv.loc[best_idx]["sample"]
-            best_cell = batch_jv.loc[best_idx]["cell"]
-
-            best_curves = curves_data[
-                (curves_data["sample"] == best_sample) & (curves_data["cell"] == best_cell)
-            ]
-            if best_curves.empty:
-                continue
-
-            base_color = colors[batch_idx % len(colors)]
-            label = f"{batch}: {best_sample}[{best_cell}]"
-            self._plot_best_device_curves(
-                fig, batch_jv, best_curves, base_color, label, flip_current
-            )
-
-        y_range = [-5, 26] if flip_current else [-26, 5]
         fig.update_layout(
-            title=f"JV Curves - Best Device per Batch ({len(batches)} batches)",
+            title=dict(text=title_text, font=dict(size=self.font_size_title)),
             xaxis_title="Voltage [V]",
             yaxis_title="Current Density [mA/cm²]",
-            xaxis=dict(range=[-0.2, 1.5]),
-            yaxis=dict(range=y_range),
+            xaxis=dict(
+                range=[-0.2, x_max],
+                titlefont=dict(size=self.font_size_axis),
+                tickfont=dict(size=self.font_size_axis),
+            ),
+            yaxis=dict(
+                titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+            ),
             template="plotly_white",
             legend=dict(
-                x=1.02,
-                y=1,
-                bgcolor="rgba(255,255,255,0.9)",
-                bordercolor="black",
-                borderwidth=1,
+                x=0.02,
+                y=0.98,
                 xanchor="left",
                 yanchor="top",
-            ),
-            showlegend=True,
-            margin=dict(r=250),
-        )
-        return fig, "JV_best_by_batch_together.html"
-
-    def create_jv_best_by_batch_separate(
-        self, jvc_data, curves_data, colors=None, show_summary=True, flip_current=False
-    ):  # noqa: E501
-        """Separate figure per batch, each showing the best device in that batch."""
-        if colors is None:
-            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-
-        batches = sorted(jvc_data["batch"].unique())
-        figures, figure_names = [], []
-
-        for batch_idx, batch in enumerate(batches):
-            batch_jv = jvc_data[jvc_data["batch"] == batch]
-            if batch_jv.empty:
-                continue
-            best_idx = batch_jv["PCE(%)"].idxmax()
-            best_sample = batch_jv.loc[best_idx]["sample"]
-            best_cell = batch_jv.loc[best_idx]["cell"]
-
-            best_curves = curves_data[
-                (curves_data["sample"] == best_sample) & (curves_data["cell"] == best_cell)
-            ]
-            if best_curves.empty:
-                continue
-
-            fig = go.Figure()
-            fig.add_shape(
-                type="line",
-                xref="paper",
-                x0=0,
-                x1=1,
-                yref="y",
-                y0=0,
-                y1=0,
-                line=dict(color="gray", width=1),
-            )
-            fig.add_shape(
-                type="line",
-                xref="x",
-                x0=0,
-                x1=0,
-                yref="paper",
-                y0=0,
-                y1=1,
-                line=dict(color="gray", width=1),
-            )
-
-            base_color = colors[batch_idx % len(colors)]
-            label = f"{best_sample}[{best_cell}]"
-            self._plot_best_device_curves(
-                fig, batch_jv, best_curves, base_color, label, flip_current
-            )
-
-            if show_summary:
-                best_jv = batch_jv[
-                    (batch_jv["sample"] == best_sample) & (batch_jv["cell"] == best_cell)
-                ]
-                self._add_jv_summary_annotation(fig, best_jv, flip_current=flip_current)
-
-            y_range = [-5, 26] if flip_current else [-26, 5]
-            clean_batch = str(batch).replace(" ", "_").replace("/", "_")
-            fig.update_layout(
-                title=f"JV Curves - Best Device: Batch {batch} ({best_sample} [{best_cell}])",
-                xaxis_title="Voltage [V]",
-                yaxis_title="Current Density [mA/cm²]",
-                xaxis=dict(range=[-0.2, 1.5]),
-                yaxis=dict(range=y_range),
-                template="plotly_white",
-                legend=dict(
-                    x=1.02,
-                    y=1,
-                    bgcolor="rgba(255,255,255,0.9)",
-                    bordercolor="black",
-                    borderwidth=1,
-                    xanchor="left",
-                    yanchor="top",
-                ),
-                showlegend=True,
-                margin=dict(r=200),
-            )
-            figures.append(fig)
-            figure_names.append(f"JV_best_batch_{clean_batch}.html")
-
-        logger.debug("  Created %s best-by-batch figures", len(figures))
-        return figures, figure_names
-
-    def create_jv_best_by_variable_together(
-        self, jvc_data, curves_data, colors=None, show_summary=True, flip_current=False
-    ):  # noqa: E501
-        """One figure showing the best device per condition/variable."""
-        if "condition" not in jvc_data.columns:
-            fig = go.Figure()
-            fig.update_layout(
-                title=(
-                    "Best device by variable -- no conditions set "
-                    "(use Tab 2 to assign variable names)"
-                )
-            )
-            return fig, "JV_best_by_variable_together.html"
-
-        if colors is None:
-            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-
-        fig = go.Figure()
-        fig.add_shape(
-            type="line",
-            xref="paper",
-            x0=0,
-            x1=1,
-            yref="y",
-            y0=0,
-            y1=0,
-            line=dict(color="gray", width=1),
-        )
-        fig.add_shape(
-            type="line",
-            xref="x",
-            x0=0,
-            x1=0,
-            yref="paper",
-            y0=0,
-            y1=1,
-            line=dict(color="gray", width=1),
-        )
-
-        conditions = sorted(jvc_data["condition"].dropna().unique())
-
-        for cond_idx, condition in enumerate(conditions):
-            cond_jv = jvc_data[jvc_data["condition"] == condition]
-            if cond_jv.empty:
-                continue
-            best_idx = cond_jv["PCE(%)"].idxmax()
-            best_sample = cond_jv.loc[best_idx]["sample"]
-            best_cell = cond_jv.loc[best_idx]["cell"]
-
-            best_curves = curves_data[
-                (curves_data["sample"] == best_sample) & (curves_data["cell"] == best_cell)
-            ]
-            if best_curves.empty:
-                continue
-
-            base_color = colors[cond_idx % len(colors)]
-            label = f"{condition}: {best_sample}[{best_cell}]"
-            self._plot_best_device_curves(
-                fig, cond_jv, best_curves, base_color, label, flip_current
-            )
-
-        y_range = [-5, 26] if flip_current else [-26, 5]
-        fig.update_layout(
-            title=f"JV Curves - Best Device per Variable ({len(conditions)} conditions)",
-            xaxis_title="Voltage [V]",
-            yaxis_title="Current Density [mA/cm²]",
-            xaxis=dict(range=[-0.2, 1.5]),
-            yaxis=dict(range=y_range),
-            template="plotly_white",
-            legend=dict(
-                x=1.02,
-                y=1,
-                bgcolor="rgba(255,255,255,0.9)",
+                bgcolor="rgba(255,255,255,0.85)",
                 bordercolor="black",
                 borderwidth=1,
-                xanchor="left",
-                yanchor="top",
+                font=dict(size=self.font_size_legend),
             ),
             showlegend=True,
-            margin=dict(r=250),
+            margin=dict(l=80, r=50, t=80, b=80),
+            width=1600,
+            height=1000,
         )
-        return fig, "JV_best_by_variable_together.html"
 
-    def create_jv_best_by_variable_separate(
-        self, jvc_data, curves_data, colors=None, show_summary=True, flip_current=False
-    ):  # noqa: E501
-        """Separate figure per condition/variable, each showing the best device."""
-        if "condition" not in jvc_data.columns:
-            fig = go.Figure()
-            fig.update_layout(
-                title=(
-                    "Best device by variable -- no conditions set "
-                    "(use Tab 2 to assign variable names)"
-                )
-            )
-            return [fig], ["JV_best_by_variable_separate.html"]
+        fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="lightgray")
+        fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="lightgray")
 
-        if colors is None:
-            colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-
-        conditions = sorted(jvc_data["condition"].dropna().unique())
-        figures, figure_names = [], []
-
-        for cond_idx, condition in enumerate(conditions):
-            cond_jv = jvc_data[jvc_data["condition"] == condition]
-            if cond_jv.empty:
-                continue
-            best_idx = cond_jv["PCE(%)"].idxmax()
-            best_sample = cond_jv.loc[best_idx]["sample"]
-            best_cell = cond_jv.loc[best_idx]["cell"]
-
-            best_curves = curves_data[
-                (curves_data["sample"] == best_sample) & (curves_data["cell"] == best_cell)
-            ]
-            if best_curves.empty:
-                continue
-
-            fig = go.Figure()
-            fig.add_shape(
-                type="line",
-                xref="paper",
-                x0=0,
-                x1=1,
-                yref="y",
-                y0=0,
-                y1=0,
-                line=dict(color="gray", width=1),
-            )
-            fig.add_shape(
-                type="line",
-                xref="x",
-                x0=0,
-                x1=0,
-                yref="paper",
-                y0=0,
-                y1=1,
-                line=dict(color="gray", width=1),
-            )
-
-            base_color = colors[cond_idx % len(colors)]
-            label = f"{best_sample}[{best_cell}]"
-            self._plot_best_device_curves(
-                fig, cond_jv, best_curves, base_color, label, flip_current
-            )
-
-            if show_summary:
-                best_jv = cond_jv[
-                    (cond_jv["sample"] == best_sample) & (cond_jv["cell"] == best_cell)
-                ]
-                self._add_jv_summary_annotation(fig, best_jv, flip_current=flip_current)
-
-            y_range = [-5, 26] if flip_current else [-26, 5]
-            clean_cond = str(condition).replace(" ", "_").replace("/", "_")
-            fig.update_layout(
-                title=f"JV Curves - Best Device: {condition} ({best_sample} [{best_cell}])",
-                xaxis_title="Voltage [V]",
-                yaxis_title="Current Density [mA/cm²]",
-                xaxis=dict(range=[-0.2, 1.5]),
-                yaxis=dict(range=y_range),
-                template="plotly_white",
-                legend=dict(
-                    x=1.02,
-                    y=1,
-                    bgcolor="rgba(255,255,255,0.9)",
-                    bordercolor="black",
-                    borderwidth=1,
-                    xanchor="left",
-                    yanchor="top",
-                ),
-                showlegend=True,
-                margin=dict(r=200),
-            )
-            figures.append(fig)
-            figure_names.append(f"JV_best_variable_{clean_cond}.html")
-
-        logger.debug("  Created %s best-by-variable figures", len(figures))
-        return figures, figure_names
+        return fig, "JV_enhanced_curves.html"

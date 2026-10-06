@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Manual for Values</title>
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; padding: 16px; color: #1a1a1a; }
+    h1, h2, h3 { margin-top: 1.2em; }
+    code { background: #f4f4f4; padding: 2px 4px; border-radius: 4px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f2f2f2; }
+    .note { background: #f9f9f9; border-left: 4px solid #4caf50; padding: 10px; }
+  </style>
+</head>
+<body>
+  <h1>SEM Perovskite Grain Size Analysis Tool</h1>
+
+  <h2>Overview</h2>
+  <p>This tool analyzes the grain size distribution in SEM images of perovskite thin films. The analysis consists of two steps:</p>
+  <ol>
+    <li><strong>Edge Detection</strong> - Identification of grain boundaries</li>
+    <li><strong>Cluster Analysis</strong> - Determination of individual grain sizes</li>
+  </ol>
+
+  <h2>📐 Edge Detection Parameters</h2>
+
+  <h3>1. Edge Threshold</h3>
+  <p><strong>Value Range:</strong> 0.0 - 1.0<br />
+     <strong>Default Value:</strong> 0.3</p>
+  <p><strong>Function:</strong> Determines the sensitivity of edge detection in the Canny algorithm. Lower values detect more (including weaker) edges, higher values only detect strong contrasts.</p>
+  <ul>
+    <li><strong>Too Low (&lt; 0.2):</strong> Detects too many edges, including noise and image artifacts → Over-detection</li>
+    <li><strong>Optimal (0.2 - 0.4):</strong> Detects most real grain boundaries with minimal noise</li>
+    <li><strong>Too High (&gt; 0.5):</strong> Misses weaker grain boundaries → Under-detection, grains merge together</li>
+  </ul>
+  <div class="note">
+    <strong>Tips:</strong> High-contrast images: 0.3-0.5. Noisy/low-contrast images: 0.2-0.3. Check the "Detected Edges" plot for continuity.
+  </div>
+
+  <h3>2. Sigma (Gaussian Smoothing)</h3>
+  <p><strong>Value Range:</strong> 0.0 - 15.0<br />
+     <strong>Default Value:</strong> 2.0</p>
+  <p><strong>Function:</strong> Controls Gaussian blur strength before edge detection. Higher values smooth the image more strongly and remove small structures and noise.</p>
+  <ul>
+    <li><strong>Too Low (&lt; 1.0):</strong> Minimal smoothing, noise becomes edges</li>
+    <li><strong>Optimal (1.5 - 3.0):</strong> Good compromise - removes noise, preserves structures</li>
+    <li><strong>Too High (&gt; 5.0):</strong> Over-smoothing, small grains disappear</li>
+  </ul>
+  <div class="note">
+    <strong>Tips:</strong> Noisy images: 3-5. Clean SEM images: 1-2. Sigma should match noise size (in pixels).
+  </div>
+
+  <h3>3. Histogram Equalization</h3>
+  <p><strong>Type:</strong> Checkbox (On/Off)<br />
+     <strong>Default Value:</strong> Off</p>
+  <p><strong>Function:</strong> Improves contrast by redistributing intensity values. Useful for uneven illumination or weak contrast.</p>
+  <ul>
+    <li><strong>Enable if:</strong> Low contrast, uneven illumination, too few edges</li>
+    <li><strong>Disable if:</strong> Image already has good contrast or noise becomes emphasized</li>
+  </ul>
+
+  <h3>4. Kernel Size (Neighborhood Analysis)</h3>
+  <p><strong>Value Range:</strong> 1 - unlimited<br />
+     <strong>Default Value:</strong> 18</p>
+  <p><strong>Function:</strong> Defines the radius (in pixels) within which connected edge pixels are grouped as one grain. Closes gaps in grain boundaries.</p>
+  <ul>
+    <li><strong>Too Small (&lt; 10):</strong> Grains fragment into small pieces</li>
+    <li><strong>Optimal (15 - 25):</strong> Bridges small gaps, preserves separation</li>
+    <li><strong>Too Large (&gt; 30):</strong> Adjacent grains merge</li>
+  </ul>
+  <div class="note">
+    <strong>Tip:</strong> Kernel Size should be ~2-3× the grain boundary width (in pixels). Start with 15-20.
+  </div>
+
+  <h2>🔍 Cluster Analysis Filter Parameters</h2>
+
+  <h3>5. Min Cluster Size</h3>
+  <p><strong>Value Range:</strong> 1 - 10000 pixels<br />
+     <strong>Default Value:</strong> ~2500 (≈ 7× Kernel Size²)</p>
+  <p><strong>Function:</strong> Filters out small artifacts and noise. Only clusters with at least this many pixels are counted.</p>
+  <p><strong>How to choose:</strong> Estimate smallest expected grain size in μm², then convert:</p>
+  <p><code>Min Size = (smallest grain size in μm²) / (pixel size in μm)²</code></p>
+  <p><strong>Example:</strong> Smallest grain = 0.5 μm², pixel size = 0.01 μm → Min Size = 5000 pixels.</p>
+
+  <h3>6. Max Border Pixels</h3>
+  <p><strong>Value Range:</strong> 0 - 10000<br />
+     <strong>Default Value:</strong> 1000</p>
+  <p><strong>Function:</strong> Removes grains cut off at the image border.</p>
+  <ul>
+    <li><strong>0:</strong> Only grains fully inside the image (strict)</li>
+    <li><strong>0-100:</strong> Removes almost all border grains (recommended)</li>
+    <li><strong>500-1000:</strong> Tolerates partially cut grains</li>
+  </ul>
+  <div class="note">
+    <strong>Recommendation:</strong> Use 0-100 for clean statistics and minimal bias.
+  </div>
+
+  <h2>📊 Recommended Workflow</h2>
+  <ol>
+    <li>Upload image and select it from the dropdown.</li>
+    <li>Adjust <strong>Edge Threshold</strong> (start at 0.3).</li>
+    <li>Optimize <strong>Sigma</strong> (increase to 2-4 for noisy images).</li>
+    <li>Enable <strong>Histogram Equalization</strong> for low-contrast images.</li>
+    <li>Click <strong>Analyze Neighborhoods</strong> with Kernel Size ~18.</li>
+    <li>Adjust filters (Min Cluster Size, Max Border Pixels).</li>
+    <li>Export results via the Download button.</li>
+  </ol>
+
+  <h2>⚠️ Common Problems and Solutions</h2>
+  <table>
+    <tr>
+      <th>Problem</th>
+      <th>Cause</th>
+      <th>Solution</th>
+    </tr>
+    <tr>
+      <td>Too many small clusters</td>
+      <td>Edge Threshold too low</td>
+      <td>Increase Edge Threshold to 0.3-0.4</td>
+    </tr>
+    <tr>
+      <td>Grains not separated</td>
+      <td>Edges too weak</td>
+      <td>Lower Edge Threshold, enable Histogram Equalization</td>
+    </tr>
+    <tr>
+      <td>Grains fragment into pieces</td>
+      <td>Kernel Size too small</td>
+      <td>Increase Kernel Size to 20-25</td>
+    </tr>
+    <tr>
+      <td>Adjacent grains merge</td>
+      <td>Kernel Size too large</td>
+      <td>Decrease Kernel Size to 15-18</td>
+    </tr>
+    <tr>
+      <td>Much noise in edges</td>
+      <td>Sigma too low</td>
+      <td>Increase Sigma to 3-5</td>
+    </tr>
+    <tr>
+      <td>Grains disappear</td>
+      <td>Sigma or Edge Threshold too high</td>
+      <td>Decrease both parameters</td>
+    </tr>
+  </table>
+</body>
+</html>

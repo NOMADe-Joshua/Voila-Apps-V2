@@ -3,19 +3,15 @@ Utilities for the Design of Experiments application.
 Helper functions, validation utilities, and constants.
 """
 
-import csv
 import io
 import json
 import re
-import uuid
 import warnings
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-from scipy.spatial import ConvexHull
-from scipy.spatial.distance import cdist
 
 
 class Constants:
@@ -79,8 +75,7 @@ class ValidationUtils:
         if not re.match(r"^[a-zA-Z][a-zA-Z0-9_-]*$", name):
             return (
                 False,
-                "Variable name must start with letter and contain only letters, "
-                "numbers, underscore, or hyphen",
+                "Variable name must start with letter and contain only letters, numbers, underscore, or hyphen",
             )
 
         # Check for reserved words
@@ -164,8 +159,7 @@ class ValidationUtils:
         if n_samples < recommended_min:
             return (
                 True,
-                f"Warning: Recommended minimum is {recommended_min} samples "
-                f"for {n_variables} variables",
+                f"Warning: Recommended minimum is {recommended_min} samples for {n_variables} variables",
             )
 
         return True, ""
@@ -555,6 +549,8 @@ class FileHandler:
     def create_excel_content(data_dict: Dict[str, pd.DataFrame]) -> bytes:
         """Create Excel content with multiple sheets."""
         try:
+            import io
+
             from openpyxl import Workbook
             from openpyxl.utils.dataframe import dataframe_to_rows
 
@@ -593,11 +589,13 @@ class FileHandler:
             elif filename.endswith(".csv"):
                 content_str = file_content.decode("utf-8")
                 # Try to detect delimiter
+                import csv
+
                 sniffer = csv.Sniffer()
                 try:
                     dialect = sniffer.sniff(content_str[:1024])
                     delimiter = dialect.delimiter
-                except Exception:
+                except:
                     delimiter = ","
 
                 df = pd.read_csv(io.StringIO(content_str), delimiter=delimiter)
@@ -686,6 +684,8 @@ class MathUtils:
     @staticmethod
     def calculate_distance_matrix(points: np.ndarray) -> np.ndarray:
         """Calculate full distance matrix between all points."""
+        from scipy.spatial.distance import cdist
+
         return cdist(points, points)
 
     @staticmethod
@@ -696,11 +696,27 @@ class MathUtils:
 
         n_points, n_dims = points.shape
 
-        if n_points >= n_dims + 1:
-            hull = ConvexHull(points)
-            return min(hull.volume, 1.0)
-        else:
-            return 0.0
+        # Simple approximation: ratio of convex hull volume to unit hypercube
+        try:
+            from scipy.spatial import ConvexHull
+
+            if n_points >= n_dims + 1:
+                hull = ConvexHull(points)
+                hull_volume = hull.volume
+                unit_volume = 1.0  # Unit hypercube volume
+                return min(hull_volume / unit_volume, 1.0)
+            else:
+                # Not enough points for convex hull
+                return 0.0
+
+        except ImportError:
+            # Fallback: range-based approximation
+            ranges = []
+            for dim in range(n_dims):
+                dim_range = points[:, dim].max() - points[:, dim].min()
+                ranges.append(dim_range)
+
+            return np.prod(ranges)
 
     @staticmethod
     def calculate_discrepancy(points: np.ndarray, method: str = "star") -> float:
@@ -774,4 +790,6 @@ def safe_float_conversion(value: Any, default: float = 0.0) -> float:
 
 def generate_experiment_id() -> str:
     """Generate unique experiment identifier."""
+    import uuid
+
     return f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}"

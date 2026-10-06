@@ -1,596 +1,995 @@
 """
-gui_components.py
-All ipywidgets UI panels. Each panel is a self-contained class with a .widget property.
-When migrating to Panel (or another framework), only this file needs to change.
+GUI components for modular AbsPL analysis app.
 """
 
-import base64
-import io
-import logging
+import html
+import json
+import uuid
 
 import ipywidgets as widgets
-import pandas as pd
-from data_manager import MEASUREMENT_TYPE
-from IPython.display import HTML
-from IPython.display import display as ipydisplay
-from natsort import natsorted
-
-from hysprint_utils.api_calls import get_all_batches_wth_data
-from hysprint_utils.batch_selection import create_batch_selection
-from hysprint_utils.error_handler import ErrorHandler
-from hysprint_utils.plotting_utils import WidgetFactory
-
-logger = logging.getLogger(__name__)
+import plotly.express as px
+from IPython.display import HTML, Javascript, clear_output, display
 
 
-# ---------------------------------------------------------------------------
-# BatchPanel
-# ---------------------------------------------------------------------------
+class AbsPLGUIComponents:
+    def __init__(self):
+        self.data_loaded = False
+        self.filter_options = {
+            "measurement_types": [],
+            "samples": [],
+            "laser_spot_sizes": [],
+            "cycles": [],
+            "numeric_columns": [],
+        }
+        self._filter_rows = []
+        self.selection_rows = []
+        self._auto_apply_callback = None
+        self._suspend_auto_apply = False
 
-
-class BatchPanel:
-    """
-    Batch selection UI that wraps the existing create_batch_selection utility
-    and adds an optional AbsPL-specific filter button on top.
-    """
-
-    def __init__(self, url: str, token: str, on_load, measurement_type: str):
-        self._url = url
-        self._token = token
-        self._measurement_type = measurement_type
-
-        self._batch_widget = create_batch_selection(url, token, on_load)
-
-        # The SelectMultiple is the second child of the VBox returned by create_batch_selection
-        self._selector = self._batch_widget.children[1]
-
-        filter_btn = WidgetFactory.create_button(
-            "Show only batches with EQE data", button_style="warning"
+        self.output_messages = widgets.Output(
+            layout=widgets.Layout(border="1px solid #d0d5dd", padding="8px")
         )
-        filter_btn.on_click(self._apply_filter)
+        self.output_plots = widgets.Output()
+        self.output_diagnostics = widgets.HTML(value="")
 
-        self._container = widgets.VBox([self._batch_widget, filter_btn])
+        self._build_filter_widgets()
+        self._build_plot_widgets()
 
-    def _apply_filter(self, _):
-        filtered = natsorted(
-            get_all_batches_wth_data(self._url, self._token, self._measurement_type)
+    def _build_filter_widgets(self):
+        self.selection_rows_container = widgets.VBox([])
+        self.add_filter_row_button = widgets.Button(
+            description="Add Selection", button_style="info"
         )
-        self._selector.options = filtered
-
-    def _build(self):
-        base = create_batch_selection(self._url, self._token, self._on_load)
-
-        # grab the SelectMultiple so we can update its options after filtering
-        self._batch_selector = next(
-            (c for c in base.children if isinstance(c, widgets.SelectMultiple)), None
+        self.clear_filter_rows_button = widgets.Button(description="Clear Selections")
+        self.apply_filters_button = widgets.Button(
+            description="Apply Filters", button_style="primary"
         )
-        total = len(self._batch_selector.options) if self._batch_selector else 0
+        self.auto_apply_toggle = widgets.Checkbox(value=False, description="Apply instantly")
 
-        self._filter_btn = WidgetFactory.create_button(
-            description=f"Filter: show only batches with AbsPL data ({total} total)",
-            button_style="info",
-            min_width=False,
-        )
-        self._filter_btn.layout.width = "450px"
-        self._filter_status = WidgetFactory.create_output(border=False)
-        self._filter_btn.on_click(self._run_filter)
-        self._total = total
+        self.add_filter_row_button.on_click(self._add_selection_row)
+        self.clear_filter_rows_button.on_click(self._clear_selection_rows)
 
-        self._container = widgets.VBox(
+        self.filter_panel = widgets.VBox(
             [
+                widgets.HTML("<h3>Filter Measurements</h3>"),
                 widgets.HTML(
-                    f"<p>Select from all {total} available batches, "
-                    "or use the filter button to narrow to batches with AbsPL data:</p>"
+                    "<p style='margin: 0 0 8px 0;'>Define optional dropdown filters per row: Sample -> Type -> Spot size -> Cycle.</p>"
                 ),
-                self._filter_btn,
-                self._filter_status,
-                base,
+                widgets.HTML(
+                    "<p style='margin: 0 0 8px 0; color: #666;'>If no specific filter is selected, all loaded data is used.</p>"
+                ),
+                widgets.HBox(
+                    [
+                        self.add_filter_row_button,
+                        self.clear_filter_rows_button,
+                        self.apply_filters_button,
+                        self.auto_apply_toggle,
+                    ]
+                ),
+                self.selection_rows_container,
             ]
         )
 
-    def _run_filter(self, b):
-        self._filter_btn.disabled = True
-        self._filter_btn.description = "Filtering in progress..."
+    def set_auto_apply_callback(self, callback):
+        self._auto_apply_callback = callback
 
-        logger.info("Finding batches with AbsPL data...")
+    def _trigger_auto_apply(self):
+        if self._suspend_auto_apply:
+            return
+        if not self.auto_apply_toggle.value:
+            return
+        if self._auto_apply_callback is not None:
+            self._auto_apply_callback()
 
-        try:
-            valid = get_all_batches_wth_data(self._url, self._token, MEASUREMENT_TYPE)
-            if self._batch_selector:
-                self._batch_selector.options = natsorted(valid)
+    def _build_plot_widgets(self):
+        self.plot_rows = []
+        self.plot_rows_container = widgets.VBox([])
+        self.trace_order_values = []
 
-            logger.info("Done: %d of %d batches have AbsPL data.", len(valid), self._total)
-            self._filter_btn.description = "Done: %d batches with AbsPL data" % len(valid)
+        # Define plot presets for AbsPL
+        self.plot_presets = {
+            "Default": [
+                ("PL (only)", "", ""),
+                ("PL + PL (sweep ~1 sun)", "", ""),
+                ("Sweep", "", ""),
+                ("LuQY vs Laser Intensity", "", ""),
+            ],
+            "PL": [
+                ("PL (only)", "", ""),
+                ("PL + PL (sweep ~1 sun)", "", ""),
+            ],
+            "Sweep Analysis": [
+                ("Sweep", "", ""),
+                ("LuQY vs Laser Intensity", "", ""),
+            ],
+        }
 
-        except Exception as e:
-            logger.error("Error during filtering: %s", e)
-            self._filter_btn.disabled = False
-            self._filter_btn.description = "Filter: show only batches with AbsPL data (retry)"
-
-    @property
-    def widget(self):
-        return self._container
-
-
-# ---------------------------------------------------------------------------
-# FilterPanel
-# ---------------------------------------------------------------------------
-
-
-class FilterPanel:
-    """Interactive range filter for any numeric column in the loaded data."""
-
-    def __init__(self, data_manager):
-        self.dm = data_manager
-        self._build()
-
-    def _build(self):
-        numeric_cols = self.dm.numeric_columns
-
-        self._col_dd = WidgetFactory.create_dropdown(
-            options=numeric_cols, description="Column:", width="wide"
+        self.add_plot_button = widgets.Button(description="Add Plot", button_style="success")
+        self.clear_plots_button = widgets.Button(description="Clear Plot Rows")
+        self.create_plots_button = widgets.Button(
+            description="Create Plots", button_style="primary"
         )
-        self._col_dd.style = {"description_width": "initial"}
 
-        self._min_input = widgets.FloatText(
-            description="Min:",
+        self.preset_dropdown = widgets.Dropdown(
+            options=list(self.plot_presets.keys()),
+            value="Default",
+            description="Presets:",
+            style={"description_width": "initial"},
             layout=widgets.Layout(width="200px"),
-            style={"description_width": "40px"},
         )
-        self._max_input = widgets.FloatText(
-            description="Max:",
-            layout=widgets.Layout(width="200px"),
-            style={"description_width": "40px"},
-        )
+        self.load_preset_button = widgets.Button(description="Load Preset", button_style="info")
 
-        apply_btn = WidgetFactory.create_button("Apply Filter", button_style="success")
-        reset_btn = WidgetFactory.create_button("Reset Filters", button_style="danger")
-        show_btn = WidgetFactory.create_button("Show Data", button_style="info")
+        self.color_selector = ColorSchemeSelector()
+        self._create_trace_order_section()
 
-        self._status_out = WidgetFactory.create_output(border=False)
-        self._data_out = WidgetFactory.create_output()
+        self.add_plot_button.on_click(self._add_plot_row)
+        self.clear_plots_button.on_click(self._clear_plot_rows)
+        self.load_preset_button.on_click(self._load_preset)
 
-        self._col_dd.observe(self._update_range, names="value")
-        apply_btn.on_click(self._apply)
-        reset_btn.on_click(self._reset)
-        show_btn.on_click(self._show_data)
-
-        self._update_range({"new": self._col_dd.value})
-
-        self._container = widgets.VBox(
+        self.plot_panel = widgets.VBox(
             [
-                widgets.HTML("<p>Select a column and specify a range to keep:</p>"),
-                self._col_dd,
-                widgets.HBox([self._min_input, self._max_input]),
-                widgets.HBox([apply_btn, reset_btn, show_btn]),
-                self._status_out,
-                self._data_out,
+                widgets.HTML("<h3>Select Plots</h3>"),
+                widgets.HBox([self.preset_dropdown, self.load_preset_button]),
+                widgets.HBox(
+                    [self.add_plot_button, self.clear_plots_button, self.create_plots_button]
+                ),
+                self.color_selector.get_widget(),
+                self.trace_order_section,
+                self.plot_rows_container,
+                self.output_plots,
             ]
         )
 
-    def _update_range(self, change):
-        col = change["new"]
-        if col and self.dm.is_loaded and col in self.dm.data.columns:
-            mn, mx = self.dm.get_column_range(col)
-            self._min_input.value = mn
-            self._max_input.value = mx
+        self._load_preset(None)
 
-    def _apply(self, b):
-        col = self._col_dd.value
-        success, msg = self.dm.apply_filter(col, self._min_input.value, self._max_input.value)
-        logger.info("%s", msg)
-        if success:
-            self._update_range({"new": col})
+    def _create_trace_order_section(self):
+        self.trace_order_state = widgets.Text(value="[]", layout=widgets.Layout(display="none"))
+        self.trace_order_state.add_class("abspl-trace-order-state")
+        self.trace_order_container = widgets.HTML(value="")
 
-    def _reset(self, b):
-        self.dm.reset_filters()
-        self._update_range({"new": self._col_dd.value})
-        logger.info("All filters reset. Original data restored.")
-        with self._data_out:
-            self._data_out.clear_output()
-
-    def _show_data(self, b):
-        with self._data_out:
-            self._data_out.clear_output(wait=True)
-            ipydisplay(self.dm.data.head(10))
-            if len(self.dm.data) > 10:
-                logger.info("Showing first 10 of %d rows.", len(self.dm.data))
-
-    @property
-    def widget(self):
-        return self._container
-
-
-# ---------------------------------------------------------------------------
-# PlottingPanel
-# ---------------------------------------------------------------------------
-
-
-class PlottingPanel:
-    """Scatter and box plot controls."""
-
-    def __init__(self, data_manager, plot_manager):
-        self.dm = data_manager
-        self.pm = plot_manager
-        self._build()
-
-    def _build(self):
-        numeric_cols = self.dm.numeric_columns
-        category_cols = self.dm.category_columns
-        all_cols = numeric_cols + category_cols
-
-        self._x_dd = WidgetFactory.create_dropdown(
-            options=all_cols, description="X-axis:", width="wide"
-        )
-        self._x_dd.value = numeric_cols[0] if numeric_cols else all_cols[0]
-
-        self._y_dd = WidgetFactory.create_dropdown(
-            options=numeric_cols, description="Y-axis:", width="wide"
-        )
-        self._y_dd.value = numeric_cols[1] if len(numeric_cols) > 1 else numeric_cols[0]
-
-        self._color_dd = WidgetFactory.create_dropdown(
-            options=["None"] + category_cols, description="Color by:", width="wide"
-        )
-        self._color_dd.value = "variation"
-
-        self._type_dd = WidgetFactory.create_dropdown(
-            options=["Scatter plot", "Box plot"],
-            description="Plot type:",
-            width="wide",
-        )
-
-        plot_btn = WidgetFactory.create_button("Generate Plot", button_style="success")
-        plot_btn.on_click(self._plot)
-
-        self._plot_out = WidgetFactory.create_output(min_height="large", border=False)
-
-        self._container = widgets.VBox(
+        self.trace_order_section = widgets.VBox(
             [
-                widgets.HBox([self._x_dd, self._y_dd]),
-                widgets.HBox([self._color_dd, self._type_dd]),
-                plot_btn,
-                self._plot_out,
-            ]
+                widgets.HTML("<b>Trace Order (Drag & Drop)</b>"),
+                widgets.HTML(
+                    "<p style='margin: 0 0 8px 0; color: #666;'>Reorder samples to control plotting order and legend order.</p>"
+                ),
+                self.trace_order_container,
+                self.trace_order_state,
+            ],
+            layout=widgets.Layout(
+                border="1px solid #ddd",
+                padding="10px",
+                margin="8px 0",
+                display="none",
+            ),
         )
 
-    def _plot(self, b):
-        with self._plot_out:
-            self._plot_out.clear_output(wait=True)
-            x = self._x_dd.value
-            y = self._y_dd.value
-            color = None if self._color_dd.value == "None" else self._color_dd.value
-            try:
-                if self._type_dd.value == "Scatter plot":
-                    fig = self.pm.scatter(self.dm.data, x, y, color)
-                else:
-                    fig = self.pm.box(self.dm.data, y, color)
-                ipydisplay(fig)
-            except Exception as e:
-                ErrorHandler.log_error("generating plot", e, self._plot_out)
-
-    @property
-    def widget(self):
-        return self._container
-
-
-# ---------------------------------------------------------------------------
-# SpectralPanel
-# ---------------------------------------------------------------------------
-
-
-class SpectralPanel:
-    """Wavelength vs. luminescence spectral plot controls."""
-
-    def __init__(self, data_manager, plot_manager):
-        self.dm = data_manager
-        self.pm = plot_manager
-        self._build()
-
-    def _build(self):
-        spectral_cols = self.dm.get_available_spectral_columns()
-        variations = self.dm.get_variations()
-
-        if not spectral_cols:
-            self._container = widgets.HTML(
-                "<p>No spectral data columns (luminescence_flux_density / "
-                "raw_spectrum_counts) found in the loaded data.</p>"
-            )
+    def _update_trace_order_widget(self, values):
+        self.trace_order_values = [str(v) for v in values if v not in (None, "")]
+        if not self.trace_order_values:
+            self.trace_order_section.layout.display = "none"
+            self.trace_order_state.value = "[]"
+            self.trace_order_container.value = ""
             return
 
-        self._variation_sel = widgets.SelectMultiple(
-            options=variations,
-            value=variations[: min(5, len(variations))],
-            description="Variations:",
-            layout=widgets.Layout(width="60%", height="120px"),
-        )
+        self.trace_order_section.layout.display = "flex"
+        self.trace_order_state.value = json.dumps(self.trace_order_values)
 
-        self._scale_radio = WidgetFactory.create_radio_buttons(
-            options=["linear", "log"], description="Y scale:", value="linear"
-        )
-        self._normalize_cb = widgets.Checkbox(
-            value=False, description="Normalize spectra", indent=False
-        )
-        self._y_col_dd = WidgetFactory.create_dropdown(
-            options=spectral_cols,
-            description="Data column:",
-            width="wide",
-            value=spectral_cols[0],
-        )
+        table_id = f"abspl-order-tbody-{uuid.uuid4().hex[:8]}"
 
-        plot_btn = WidgetFactory.create_button("Generate Spectral Plot", button_style="success")
-        plot_btn.on_click(self._plot)
-
-        self._status_out = WidgetFactory.create_output(border=False)
-        self._plot_out = WidgetFactory.create_output(min_height="large", border=False)
-
-        self._container = widgets.VBox(
-            [
-                widgets.HTML("<p>Select variations to plot:</p>"),
-                self._variation_sel,
-                widgets.HBox([self._scale_radio, self._normalize_cb]),
-                self._y_col_dd,
-                plot_btn,
-                self._status_out,
-                self._plot_out,
-            ]
-        )
-
-    def _plot(self, b):
-        selected = list(self._variation_sel.value)
-        if not selected:
-            logger.warning("No variation selected for plotting.")
-            return
-
-        logger.info("Generating plot...")
-
-        try:
-            fig = self.pm.spectral(
-                self.dm.data,
-                selected,
-                self._y_col_dd.value,
-                scale=self._scale_radio.value,
-                normalize=self._normalize_cb.value,
-            )
-            with self._plot_out:
-                self._plot_out.clear_output(wait=True)
-                ipydisplay(fig)
-            with self._status_out:
-                self._status_out.clear_output(wait=True)
-        except Exception as e:
-            ErrorHandler.log_error(
-                "generating spectral plot", e, self._status_out, show_traceback=True
+        rows = ""
+        for idx, value in enumerate(self.trace_order_values):
+            escaped_value = html.escape(value, quote=True)
+            rows += (
+                f"<tr class='abspl-order-row' draggable='true' data-index='{idx}'>"
+                f"<td style='width:24px;text-align:center;color:#999;cursor:grab;'>≡</td>"
+                f"<td style='padding:8px 10px;'><span class='abspl-order-idx'>{idx + 1}</span></td>"
+                f"<td style='padding:8px 10px;'>{escaped_value}</td>"
+                "</tr>"
             )
 
-    @property
-    def widget(self):
-        return self._container
-
-
-# ---------------------------------------------------------------------------
-# DataTablePanel
-# ---------------------------------------------------------------------------
-
-
-class DataTablePanel:
-    """
-    Data table view with column selection and CSV / pivot-table export.
-    The download_area Output widget is self-contained here (no globals needed).
-    """
-
-    def __init__(self, data_manager):
-        self.dm = data_manager
-        self._build()
-
-    def _build(self):
-        columns = self.dm.data.columns.tolist()
-        numeric_cols = self.dm.numeric_columns
-        category_cols = self.dm.category_columns
-
-        self._col_sel = widgets.SelectMultiple(
-            options=columns,
-            value=columns[:5],
-            description="Columns:",
-            layout=widgets.Layout(width="50%", height="100px"),
+        self.trace_order_container.value = (
+            "<style>"
+            ".abspl-order-table{width:100%;border-collapse:collapse;}"
+            ".abspl-order-table td{border-bottom:1px solid #eee;}"
+            ".abspl-order-row.drag-over{background:#eef6ff;border-top:2px solid #3b82f6;}"
+            "</style>"
+            f"<table class='abspl-order-table'><tbody id='{table_id}'>"
+            f"{rows}"
+            "</tbody></table>"
         )
 
-        update_btn = WidgetFactory.create_button("Update Table", button_style="info")
-        export_btn = WidgetFactory.create_button("Export CSV", button_style="warning")
+        js_code = """
+        (function(){
+            function initDragDrop(attempt){
+                const tbody = document.querySelector('#__TABLE_ID__');
+                if(!tbody){
+                    if(attempt < 20){
+                        setTimeout(function(){ initDragDrop(attempt + 1); }, 120);
+                    }
+                    return;
+                }
+                const rows = Array.from(tbody.querySelectorAll('tr.abspl-order-row'));
+                let dragged = null;
+                const sourceValues = __SOURCE_VALUES__;
 
-        self._pivot_col_dd = WidgetFactory.create_dropdown(
-            options=numeric_cols, description="Pivot column:", width="wide"
-        )
-        self._pivot_group_dd = WidgetFactory.create_dropdown(
-            options=category_cols, description="Group by:", width="wide"
-        )
-        pivot_btn = WidgetFactory.create_button("Export Pivot Table", button_style="success")
+                function syncState(){
+                    const ordered = Array.from(tbody.querySelectorAll('tr.abspl-order-row'))
+                        .map(r => {
+                            const idx = parseInt(r.getAttribute('data-index'), 10);
+                            if(Number.isNaN(idx) || idx < 0 || idx >= sourceValues.length) return null;
+                            return sourceValues[idx];
+                        })
+                        .filter(v => !!v);
+                    const stateInput = document.querySelector('.abspl-trace-order-state input, .abspl-trace-order-state textarea');
+                    if(stateInput){
+                        stateInput.value = JSON.stringify(ordered);
+                        stateInput.dispatchEvent(new Event('input', { bubbles: true }));
+                        stateInput.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    Array.from(tbody.querySelectorAll('tr.abspl-order-row')).forEach((row, i) => {
+                        const idx = row.querySelector('.abspl-order-idx');
+                        if(idx) idx.textContent = String(i+1);
+                    });
+                }
 
-        self._table_out = WidgetFactory.create_output(min_height="large")
-        # Must be in the widget tree for the injected <script> to execute.
-        self._download_area = widgets.Output()
-
-        update_btn.on_click(self._update_table)
-        export_btn.on_click(self._export_csv)
-        pivot_btn.on_click(self._export_pivot)
-
-        self._update_table(None)
-
-        self._container = widgets.VBox(
-            [
-                widgets.HTML("<h4>Select columns to display:</h4>"),
-                self._col_sel,
-                widgets.HBox([update_btn, export_btn]),
-                widgets.HTML("<h4>Export Pivot Table:</h4>"),
-                widgets.HTML(
-                    "<p>Creates a table where each column is a group value "
-                    "and rows are the selected metric.</p>"
-                ),
-                self._pivot_col_dd,
-                self._pivot_group_dd,
-                pivot_btn,
-                self._table_out,
-                self._download_area,
-            ]
-        )
-
-    def _update_table(self, b):
-        with self._table_out:
-            self._table_out.clear_output(wait=True)
-            cols = (
-                list(self._col_sel.value) if self._col_sel.value else self.dm.data.columns.tolist()
-            )
-            ipydisplay(self.dm.data[cols].head(20))
-            if len(self.dm.data) > 20:
-                logger.info("Showing first 20 of %d rows.", len(self.dm.data))
-
-    def _trigger_download(self, csv_string: str, filename: str):
-        """Inject a JS anchor-click to trigger a browser file download."""
-        content_b64 = base64.b64encode(csv_string.encode()).decode()
-        data_url = f"data:text/plain;charset=utf-8;base64,{content_b64}"
-        js = f"""
-            var a = document.createElement('a');
-            a.setAttribute('download', '{filename}');
-            a.setAttribute('href', '{data_url}');
-            a.click();
+                rows.forEach(row => {
+                    row.addEventListener('dragstart', function(e){ dragged=this; this.style.opacity='0.5'; e.dataTransfer.effectAllowed='move'; });
+                    row.addEventListener('dragend', function(){ this.style.opacity='1'; rows.forEach(r => r.classList.remove('drag-over')); });
+                    row.addEventListener('dragover', function(e){ e.preventDefault(); this.classList.add('drag-over'); });
+                    row.addEventListener('dragleave', function(){ this.classList.remove('drag-over'); });
+                    row.addEventListener('drop', function(e){
+                        e.preventDefault(); this.classList.remove('drag-over');
+                        if(!dragged || dragged===this) return;
+                        const all = Array.from(tbody.querySelectorAll('tr.abspl-order-row'));
+                        const di = all.indexOf(dragged); const ti = all.indexOf(this);
+                        if(di < ti) this.parentNode.insertBefore(dragged, this.nextSibling);
+                        else this.parentNode.insertBefore(dragged, this);
+                        syncState();
+                    });
+                });
+                syncState();
+            }
+            initDragDrop(0);
+        })();
         """
-        with self._download_area:
-            self._download_area.clear_output()
-            ipydisplay(HTML(f"<script>{js}</script>"))
+        js_code = js_code.replace("__TABLE_ID__", table_id)
+        js_code = js_code.replace("__SOURCE_VALUES__", json.dumps(self.trace_order_values))
+        display(Javascript(js_code))
 
-    def _export_csv(self, b):
-        ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"abspl_data_{ts}.csv"
-        self._trigger_download(self.dm.to_csv_string(), filename)
-        logger.info("Downloading %s ...", filename)
-        self._update_table(None)
+    def _with_all_option(self, values):
+        return [("All", "__all__")] + [(str(v), v) for v in values]
 
-    def _export_pivot(self, b):
-        value_col = self._pivot_col_dd.value
-        group_col = self._pivot_group_dd.value
-        if not value_col:
-            logger.warning("No pivot column selected.")
+    def _add_selection_row(self, _):
+        sample_options = self._with_all_option(self.filter_options.get("samples", []))
+        sample_dd = widgets.Dropdown(
+            options=sample_options,
+            value="__all__",
+            description="Sample",
+            layout=widgets.Layout(width="320px"),
+        )
+        type_dd = widgets.Dropdown(
+            options=[("All", "__all__")],
+            value="__all__",
+            description="Type",
+            layout=widgets.Layout(width="260px"),
+        )
+        spot_dd = widgets.Dropdown(
+            options=[("All", "__all__")],
+            value="__all__",
+            description="Spot",
+            layout=widgets.Layout(width="240px"),
+        )
+        cycle_dd = widgets.Dropdown(
+            options=[("All", "__all__")],
+            value="__all__",
+            description="Cycle",
+            layout=widgets.Layout(width="200px"),
+        )
+        remove_btn = widgets.Button(
+            description="Remove", button_style="danger", layout=widgets.Layout(width="90px")
+        )
+
+        row = {
+            "sample": sample_dd,
+            "type": type_dd,
+            "spot": spot_dd,
+            "cycle": cycle_dd,
+            "remove": remove_btn,
+        }
+
+        sample_dd.observe(
+            lambda _c, r=row: self._on_selection_row_changed(r, source="sample"), names="value"
+        )
+        type_dd.observe(
+            lambda _c, r=row: self._on_selection_row_changed(r, source="type"), names="value"
+        )
+        spot_dd.observe(
+            lambda _c, r=row: self._on_selection_row_changed(r, source="spot"), names="value"
+        )
+        cycle_dd.observe(lambda _c: self._trigger_auto_apply(), names="value")
+
+        def _remove(_btn):
+            self.selection_rows = [x for x in self.selection_rows if x is not row]
+            self._render_selection_rows()
+
+        remove_btn.on_click(_remove)
+
+        self.selection_rows.append(row)
+        self._update_row_options(row, source="sample")
+        self._render_selection_rows()
+        self._trigger_auto_apply()
+
+    def _clear_selection_rows(self, _):
+        self.selection_rows = []
+        self._render_selection_rows()
+        self._trigger_auto_apply()
+
+    def _on_selection_row_changed(self, row, source="sample"):
+        self._update_row_options(row, source=source)
+        self._trigger_auto_apply()
+
+    def _render_selection_rows(self):
+        boxes = []
+        for row in self.selection_rows:
+            boxes.append(
+                widgets.HBox([row["sample"], row["type"], row["spot"], row["cycle"], row["remove"]])
+            )
+        self.selection_rows_container.children = tuple(boxes)
+
+    def _update_row_options(self, row, source="sample"):
+        rows = self._filter_rows
+        if not rows:
+            row["type"].options = [("All", "__all__")]
+            row["spot"].options = [("All", "__all__")]
+            row["cycle"].options = [("All", "__all__")]
+            row["type"].value = "__all__"
+            row["spot"].value = "__all__"
+            row["cycle"].value = "__all__"
             return
-        try:
-            pivot = self.dm.get_pivot_table(value_col, group_col)
-            buf = io.StringIO()
-            pivot.to_csv(buf)
-            ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"abspl_pivot_{value_col}_by_{group_col}_{ts}.csv"
-            self._trigger_download(buf.getvalue(), filename)
-            logger.info("Downloading %s ...", filename)
-            with self._table_out:
-                self._table_out.clear_output(wait=True)
-                ipydisplay(pivot.head(10))
-        except Exception as e:
-            with self._table_out:
-                self._table_out.clear_output(wait=True)
-            ErrorHandler.log_error("exporting pivot table", e, self._table_out)
 
-    @property
-    def widget(self):
-        return self._container
+        sample_val = row["sample"].value
+        type_val = row["type"].value
+        spot_val = row["spot"].value
 
+        if sample_val != "__all__":
+            rows_after_sample = [r for r in rows if r["sample_id"] == sample_val]
+        else:
+            rows_after_sample = rows
 
-# ---------------------------------------------------------------------------
-# StatisticsPanel
-# ---------------------------------------------------------------------------
+        type_values = sorted({r["measurement_type"] for r in rows_after_sample})
+        type_options = self._with_all_option(type_values)
+        row["type"].options = type_options
+        row["type"].value = type_val if any(v == type_val for _, v in type_options) else "__all__"
 
-
-class StatisticsPanel:
-    """Statistical summary and grouped comparison plots."""
-
-    def __init__(self, data_manager, plot_manager):
-        self.dm = data_manager
-        self.pm = plot_manager
-        self._build()
-
-    def _build(self):
-        numeric_cols = self.dm.numeric_columns
-        category_cols = self.dm.category_columns
-
-        self._col_dd = WidgetFactory.create_dropdown(
-            options=numeric_cols, description="Column:", width="wide"
-        )
-        self._groupby_dd = WidgetFactory.create_dropdown(
-            options=["None"] + category_cols,
-            description="Group by:",
-            width="wide",
-            value="variation",
-        )
-
-        stats_btn = WidgetFactory.create_button("Calculate Statistics", button_style="info")
-        stats_btn.on_click(self._calculate)
-
-        self._stats_out = WidgetFactory.create_output(min_height="large", border=False)
-
-        self._container = widgets.VBox(
-            [
-                widgets.HBox([self._col_dd, self._groupby_dd]),
-                stats_btn,
-                self._stats_out,
+        type_selected = row["type"].value
+        if type_selected != "__all__":
+            rows_after_type = [
+                r for r in rows_after_sample if r["measurement_type"] == type_selected
             ]
+        else:
+            rows_after_type = rows_after_sample
+
+        spot_values = sorted({r["laser_spot_size"] for r in rows_after_type})
+        spot_options = self._with_all_option(spot_values)
+        row["spot"].options = spot_options
+        row["spot"].value = spot_val if any(v == spot_val for _, v in spot_options) else "__all__"
+
+        spot_selected = row["spot"].value
+        if spot_selected != "__all__":
+            rows_after_spot = [r for r in rows_after_type if r["laser_spot_size"] == spot_selected]
+        else:
+            rows_after_spot = rows_after_type
+
+        cycle_values = sorted({r["cycle_number"] for r in rows_after_spot})
+        cycle_options = self._with_all_option(cycle_values)
+        current_cycle = row["cycle"].value
+        row["cycle"].options = cycle_options
+        row["cycle"].value = (
+            current_cycle if any(v == current_cycle for _, v in cycle_options) else "__all__"
         )
 
-    def _calculate(self, b):
-        col = self._col_dd.value
-        groupby = self._groupby_dd.value
+    def _add_plot_row(self, _):
+        kind = widgets.Dropdown(
+            options=[
+                "PL (only)",
+                "PL + PL (sweep ~1 sun)",
+                "Sweep",
+                "LuQY vs Laser Intensity",
+                "QFLS vs Laser Intensity",
+                "PLQY + QFLS vs Laser Intensity",
+            ],
+            value="PL (only)",
+            description="Plot",
+            layout=widgets.Layout(width="300px"),
+        )
+        opt_a = widgets.Dropdown(description="A", layout=widgets.Layout(width="240px"))
+        opt_b = widgets.Dropdown(description="B", layout=widgets.Layout(width="240px"))
+        opt_c = widgets.Dropdown(description="C", layout=widgets.Layout(width="240px"))
+        include_sweep = widgets.Checkbox(
+            value=True,
+            description="Show nearest sweep (~1 sun)",
+            indent=False,
+            layout=widgets.Layout(width="260px"),
+        )
+        legend_table = widgets.Checkbox(
+            value=False,
+            description="Legend as table below",
+            indent=False,
+            layout=widgets.Layout(width="220px"),
+        )
+        fit_enabled = widgets.Checkbox(
+            value=False,
+            description="Linear fit",
+            indent=False,
+            layout=widgets.Layout(width="130px"),
+        )
+        fit_model = widgets.Dropdown(
+            options=[("Gaussian", "gaussian"), ("Voigt", "voigt")],
+            value="gaussian",
+            description="Peak fit",
+            layout=widgets.Layout(width="220px", display="none"),
+        )
+        fit_mode = widgets.Dropdown(
+            options=[("Auto", "auto"), ("Manual", "manual")],
+            value="auto",
+            description="Fit mode",
+            layout=widgets.Layout(width="220px", display="none"),
+        )
+        fit_xmin = widgets.Text(value="", description="xmin", layout=widgets.Layout(width="170px"))
+        fit_xmax = widgets.Text(value="", description="xmax", layout=widgets.Layout(width="170px"))
+        fit_curve_dropdown = widgets.Dropdown(
+            options=[("All curves", "__all__")],
+            value="__all__",
+            description="Curve",
+            layout=widgets.Layout(width="280px", display="none"),
+        )
+        fit_curve_min = widgets.Text(
+            value="", description="xmin", layout=widgets.Layout(width="170px", display="none")
+        )
+        fit_curve_max = widgets.Text(
+            value="", description="xmax", layout=widgets.Layout(width="170px", display="none")
+        )
+        fit_curve_set = widgets.Button(
+            description="Set range",
+            button_style="info",
+            layout=widgets.Layout(width="110px", display="none"),
+        )
+        fit_curve_ranges_html = widgets.HTML(value="", layout=widgets.Layout(display="none"))
+        remove_btn = widgets.Button(
+            description="Remove", button_style="danger", layout=widgets.Layout(width="100px")
+        )
 
-        with self._stats_out:
-            self._stats_out.clear_output(wait=True)
-            if not col:
-                logger.warning("No column selected for statistics.")
+        row = {
+            "kind": kind,
+            "a": opt_a,
+            "b": opt_b,
+            "c": opt_c,
+            "include_sweep": include_sweep,
+            "legend_table": legend_table,
+            "fit_enabled": fit_enabled,
+            "fit_model": fit_model,
+            "fit_mode": fit_mode,
+            "fit_xmin": fit_xmin,
+            "fit_xmax": fit_xmax,
+            "fit_curve_dropdown": fit_curve_dropdown,
+            "fit_curve_min": fit_curve_min,
+            "fit_curve_max": fit_curve_max,
+            "fit_curve_set": fit_curve_set,
+            "fit_curve_ranges_html": fit_curve_ranges_html,
+            "fit_curve_ranges": {},
+            "remove": remove_btn,
+        }
+
+        def _render_fit_curve_ranges():
+            ranges = row["fit_curve_ranges"]
+            if not ranges:
+                fit_curve_ranges_html.value = "<span style='color:#667085;font-size:12px;'>No per-curve fit ranges set.</span>"
                 return
+            lines = [
+                "<div style='font-size:12px;color:#334155;'><b>Per-curve fit ranges:</b></div>"
+            ]
+            for key in sorted(ranges.keys()):
+                cfg = ranges[key]
+                xmin_text = "-" if cfg.get("fit_min") is None else str(cfg.get("fit_min"))
+                xmax_text = "-" if cfg.get("fit_max") is None else str(cfg.get("fit_max"))
+                lines.append(
+                    f"<div style='font-size:12px;color:#334155;'>{html.escape(str(key))}: xmin={xmin_text}, xmax={xmax_text}</div>"
+                )
+            fit_curve_ranges_html.value = "".join(lines)
 
-            ipydisplay(HTML(f"<h4>Overall statistics for {col}</h4>"))
-            ipydisplay(self.dm.data[col].describe())
+        def _parse_curve_bound(text):
+            s = str(text).strip()
+            if not s:
+                return None
+            try:
+                return float(s)
+            except Exception:
+                return None
 
-            if groupby != "None":
-                ipydisplay(HTML(f"<h4>Statistics for {col} grouped by {groupby}</h4>"))
-                ipydisplay(self.dm.data.groupby(groupby)[col].describe())
-                try:
-                    fig = self.pm.statistics_box(self.dm.data, col, groupby)
-                    ipydisplay(fig)
-                except Exception as e:
-                    ErrorHandler.log_error("generating statistics plot", e)
+        def _set_curve_range(_btn):
+            curve_key = fit_curve_dropdown.value
+            if not curve_key or curve_key == "__all__":
+                return
+            vmin = _parse_curve_bound(fit_curve_min.value)
+            vmax = _parse_curve_bound(fit_curve_max.value)
+            if vmin is None and vmax is None:
+                if curve_key in row["fit_curve_ranges"]:
+                    del row["fit_curve_ranges"][curve_key]
+            else:
+                row["fit_curve_ranges"][curve_key] = {"fit_min": vmin, "fit_max": vmax}
+            _render_fit_curve_ranges()
 
-    @property
-    def widget(self):
-        return self._container
+        fit_curve_set.on_click(_set_curve_range)
+        _render_fit_curve_ranges()
+
+        def refresh_options(*_args):
+            if kind.value in ["PL (only)", "PL + PL (sweep ~1 sun)"]:
+                include_sweep.layout.display = "none"
+                fit_enabled.description = "Peak fit"
+                fit_enabled.layout.display = "flex"
+                fit_model.layout.display = "flex"
+                fit_mode.layout.display = "flex"
+                fit_xmin.layout.display = "none"
+                fit_xmax.layout.display = "none"
+                fit_curve_dropdown.layout.display = "flex"
+                fit_curve_min.layout.display = "flex"
+                fit_curve_max.layout.display = "flex"
+                fit_curve_set.layout.display = "flex"
+                fit_curve_ranges_html.layout.display = "flex"
+                opt_a.description = "Color by"
+                opt_b.description = "Source"
+                opt_c.description = "-"
+                opt_a.options = [
+                    ("Sample", "sample_id"),
+                    ("Condition", "condition"),
+                    ("Batch", "batch"),
+                    ("Spot size", "laser_spot_size"),
+                ]
+                opt_a.value = "sample_id"
+                opt_b.options = [
+                    ("Auto", "auto"),
+                    ("Flux density", "luminescence_flux_density"),
+                    ("Raw counts", "raw_spectrum_counts"),
+                ]
+                opt_c.options = [("-", "-")]
+                opt_c.value = "-"
+            elif kind.value == "Sweep":
+                include_sweep.layout.display = "none"
+                fit_enabled.description = "Peak fit"
+                fit_enabled.layout.display = "flex"
+                fit_model.layout.display = "flex"
+                fit_mode.layout.display = "flex"
+                fit_xmin.layout.display = "none"
+                fit_xmax.layout.display = "none"
+                fit_curve_dropdown.layout.display = "flex"
+                fit_curve_min.layout.display = "flex"
+                fit_curve_max.layout.display = "flex"
+                fit_curve_set.layout.display = "flex"
+                fit_curve_ranges_html.layout.display = "flex"
+                opt_a.description = "Mode"
+                opt_b.description = "Color by"
+                opt_c.description = "Source"
+                opt_a.options = [
+                    ("Combined", "combined"),
+                    ("Separate substrates", "separate_substrates"),
+                ]
+                opt_a.value = "combined"
+                opt_b.options = [
+                    ("Sample", "sample_id"),
+                    ("Condition", "condition"),
+                    ("Batch", "batch"),
+                    ("Spot size", "laser_spot_size"),
+                ]
+                opt_b.value = "condition"
+                opt_c.options = [("Flux density", "luminescence_flux_density")]
+                opt_c.value = "luminescence_flux_density"
+            elif kind.value in [
+                "LuQY vs Laser Intensity",
+                "QFLS vs Laser Intensity",
+                "PLQY + QFLS vs Laser Intensity",
+            ]:
+                include_sweep.layout.display = "none"
+                fit_enabled.description = "Linear fit"
+                fit_enabled.layout.display = "flex"
+                fit_model.layout.display = "none"
+                fit_mode.layout.display = "none"
+                fit_xmin.layout.display = "flex"
+                fit_xmax.layout.display = "flex"
+                fit_curve_dropdown.layout.display = "none"
+                fit_curve_min.layout.display = "none"
+                fit_curve_max.layout.display = "none"
+                fit_curve_set.layout.display = "none"
+                fit_curve_ranges_html.layout.display = "none"
+                opt_a.description = "Mode"
+                opt_b.description = "Color by"
+                opt_c.description = "X scale"
+                opt_a.options = [("Combined (all files)", "combined"), ("Per sample", "per_sample")]
+                opt_a.value = "combined"
+                opt_b.options = [
+                    ("Sample", "sample_id"),
+                    ("Condition", "condition"),
+                    ("Batch", "batch"),
+                    ("Measurement type", "measurement_type"),
+                ]
+                opt_b.value = "sample_id"
+                opt_c.options = [("Linear", "linear"), ("Log", "log")]
+                opt_c.value = "linear"
+                if kind.value == "LuQY vs Laser Intensity":
+                    fit_enabled.value = False
+                    fit_enabled.disabled = True
+                else:
+                    fit_enabled.disabled = False
+
+        kind.observe(refresh_options, names="value")
+
+        def remove_row(_btn):
+            self.plot_rows = [r for r in self.plot_rows if r is not row]
+            self._render_plot_rows()
+
+        remove_btn.on_click(remove_row)
+
+        self.plot_rows.append(row)
+        refresh_options()
+        self._render_plot_rows()
+
+    def _clear_plot_rows(self, _):
+        self.plot_rows = []
+        self._render_plot_rows()
+
+    def _load_preset(self, _):
+        """Load selected preset"""
+        selected_preset = self.preset_dropdown.value
+        self.plot_rows = []
+
+        if selected_preset in self.plot_presets:
+            for plot_type, option_a, option_b in self.plot_presets[selected_preset]:
+                self._add_plot_row(None)
+                # Set the values for the new row
+                if self.plot_rows:
+                    row = self.plot_rows[-1]
+                    row["kind"].value = plot_type
+                    if option_a and any(val == option_a for _, val in row["a"].options):
+                        row["a"].value = option_a
+                    if option_b and any(val == option_b for _, val in row["b"].options):
+                        row["b"].value = option_b
+        else:
+            self._add_plot_row(None)
+
+        self._render_plot_rows()
+
+    def _render_plot_rows(self):
+        widget_rows = []
+        for row in self.plot_rows:
+            top_row = widgets.HBox(
+                [
+                    row["kind"],
+                    row["a"],
+                    row["b"],
+                    row["c"],
+                    row["remove"],
+                ]
+            )
+            bottom_row = widgets.HBox(
+                [
+                    row["include_sweep"],
+                    row["legend_table"],
+                    row["fit_enabled"],
+                    row["fit_model"],
+                    row["fit_mode"],
+                    row["fit_xmin"],
+                    row["fit_xmax"],
+                ]
+            )
+            per_curve_row = widgets.HBox(
+                [
+                    row["fit_curve_dropdown"],
+                    row["fit_curve_min"],
+                    row["fit_curve_max"],
+                    row["fit_curve_set"],
+                ]
+            )
+            widget_rows.append(
+                widgets.VBox(
+                    [
+                        top_row,
+                        bottom_row,
+                        per_curve_row,
+                        row["fit_curve_ranges_html"],
+                    ],
+                    layout=widgets.Layout(
+                        border="1px solid #d0d5dd",
+                        padding="10px",
+                        margin="8px 0",
+                        border_radius="6px",
+                        background_color="#fcfcfd",
+                    ),
+                )
+            )
+        self.plot_rows_container.children = tuple(widget_rows)
+
+    def update_filter_options(self, options):
+        self._suspend_auto_apply = True
+        self.filter_options = options
+        self._filter_rows = options.get("filter_rows", [])
+
+        for row in self.selection_rows:
+            sample_values = self.filter_options.get("samples", [])
+            sample_options = self._with_all_option(sample_values)
+            current_sample = row["sample"].value
+            row["sample"].options = sample_options
+            row["sample"].value = (
+                current_sample if any(v == current_sample for _, v in sample_options) else "__all__"
+            )
+            self._update_row_options(row, source="sample")
+
+        if not self.selection_rows:
+            self._add_selection_row(None)
+
+        self._update_trace_order_widget(options.get("samples", []))
+        max_required_colors = int(options.get("max_required_colors", 8) or 8)
+        self.color_selector.set_num_colors(max_required_colors)
+
+        curve_options = self._fit_curve_options()
+        for row in self.plot_rows:
+            current_curve = row["fit_curve_dropdown"].value
+            row["fit_curve_dropdown"].options = curve_options
+            row["fit_curve_dropdown"].value = (
+                current_curve if any(v == current_curve for _, v in curve_options) else "__all__"
+            )
+
+        for row in self.plot_rows:
+            try:
+                row["kind"].value = row["kind"].value
+            except Exception:
+                pass
+        self._suspend_auto_apply = False
+
+    def get_filter_config(self):
+        row_filters = []
+        for row in self.selection_rows:
+            row_filters.append(
+                {
+                    "sample": row["sample"].value,
+                    "measurement_type": row["type"].value,
+                    "laser_spot_size": row["spot"].value,
+                    "cycle": row["cycle"].value,
+                }
+            )
+
+        return {
+            "row_filters": row_filters,
+        }
+
+    def get_plot_specs(self):
+        def _parse_optional_float(value):
+            text = str(value).strip() if value is not None else ""
+            if not text:
+                return None
+            try:
+                return float(text)
+            except Exception:
+                return None
+
+        specs = []
+        trace_order = []
+        try:
+            parsed = json.loads(self.trace_order_state.value or "[]")
+            if isinstance(parsed, list):
+                trace_order = [str(v) for v in parsed]
+        except Exception:
+            trace_order = []
+
+        for row in self.plot_rows:
+            plot_type_value = row["kind"].value
+            include_sweep_pl = plot_type_value == "PL + PL (sweep ~1 sun)"
+
+            normalized_plot_type = plot_type_value
+            if plot_type_value in ["PL (only)", "PL + PL (sweep ~1 sun)"]:
+                normalized_plot_type = "PL"
+
+            specs.append(
+                {
+                    "plot_type": normalized_plot_type,
+                    "option_a": row["a"].value,
+                    "option_b": row["b"].value,
+                    "option_c": row["c"].value,
+                    "include_sweep_pl": include_sweep_pl,
+                    "plot_type_ui": plot_type_value,
+                    "legend_table_below": bool(row["legend_table"].value),
+                    "fit_enabled": bool(row["fit_enabled"].value)
+                    and (plot_type_value != "LuQY vs Laser Intensity"),
+                    "fit_model": row["fit_model"].value,
+                    "fit_mode": row["fit_mode"].value,
+                    "fit_min": _parse_optional_float(row["fit_xmin"].value),
+                    "fit_max": _parse_optional_float(row["fit_xmax"].value),
+                    "fit_curve_ranges": row.get("fit_curve_ranges", {}),
+                    "color_scheme": self.color_selector.selected_scheme,
+                    "color_sampling": "sequential",
+                    "color_count": int(self.color_selector.num_colors),
+                    "trace_order": trace_order,
+                }
+            )
+        return specs
+
+    def _fit_curve_options(self):
+        option_rows = self.filter_options.get("fit_curve_options", []) or []
+        options = [("All curves", "__all__")]
+        for item in option_rows:
+            label = str(item.get("label", "")).strip()
+            value = str(item.get("value", "")).strip()
+            if label and value:
+                options.append((label, value))
+        return options
 
 
-# ---------------------------------------------------------------------------
-# AdvancedPanel  (tab container with toggle)
-# ---------------------------------------------------------------------------
+class ColorSchemeSelector:
+    """Color scheme selector with preview"""
 
+    def __init__(self):
+        self.color_schemes = {
+            "Viridis": px.colors.sequential.Viridis,
+            "Plasma": px.colors.sequential.Plasma,
+            "Inferno": px.colors.sequential.Inferno,
+            "Magma": px.colors.sequential.Magma,
+            "Blues": px.colors.sequential.Blues,
+            "Reds": px.colors.sequential.Reds,
+            "Greens": px.colors.sequential.Greens,
+            "Plotly": px.colors.qualitative.Plotly,
+            "D3": px.colors.qualitative.D3,
+            "Set1": px.colors.qualitative.Set1,
+            "Set2": px.colors.qualitative.Set2,
+            "Default (old)": [
+                "rgba(93, 164, 214, 0.7)",
+                "rgba(255, 144, 14, 0.7)",
+                "rgba(44, 160, 101, 0.7)",
+                "rgba(255, 65, 54, 0.7)",
+                "rgba(207, 114, 255, 0.7)",
+                "rgba(127, 96, 0, 0.7)",
+                "rgba(255, 140, 184, 0.7)",
+                "rgba(79, 90, 117, 0.7)",
+            ],
+        }
 
-class AdvancedPanel:
-    """Tab container for DataTablePanel and StatisticsPanel, revealed on demand."""
+        self.selected_scheme = "Viridis"
+        self.num_colors = 8
+        self._create_widgets()
 
-    def __init__(self, data_manager, plot_manager):
-        table_panel = DataTablePanel(data_manager)
-        stats_panel = StatisticsPanel(data_manager, plot_manager)
-
-        tabs = widgets.Tab()
-        tabs.children = [table_panel.widget, stats_panel.widget]
-        tabs.set_title(0, "Data Table")
-        tabs.set_title(1, "Statistics")
-
-        toggle_btn = WidgetFactory.create_button(
-            "Show / Hide Advanced Features", button_style="primary"
+    def _create_widgets(self):
+        """Create color scheme selector widgets"""
+        self.color_dropdown = widgets.Dropdown(
+            options=list(self.color_schemes.keys()),
+            value=self.selected_scheme,
+            description="Color Scheme:",
+            style={"description_width": "initial"},
+            layout=widgets.Layout(width="420px"),
         )
-        self._content_out = widgets.Output()
-        self._visible = False
 
-        def _toggle(b):
-            self._visible = not self._visible
-            self._content_out.clear_output()
-            if self._visible:
-                with self._content_out:
-                    ipydisplay(tabs)
+        self.color_dropdown.observe(self._on_color_change, names="value")
 
-        toggle_btn.on_click(_toggle)
-        self._container = widgets.VBox([toggle_btn, self._content_out])
+        self.widget = widgets.VBox(
+            [
+                self.color_dropdown,
+            ],
+            layout=widgets.Layout(width="100%"),
+        )
 
-    @property
-    def widget(self):
-        return self._container
+    def _on_color_change(self, change):
+        self.selected_scheme = change["new"]
+        self._update_preview()
+
+    def _on_num_colors_change(self, change):
+        """Compatibility no-op: color count control removed from UI."""
+        self.num_colors = (
+            change.get("new", self.num_colors) if isinstance(change, dict) else self.num_colors
+        )
+
+    def _interpolate_color(self, hex_color1, hex_color2, factor):
+        """Interpolate between two colors"""
+
+        def hex_to_rgb(color):
+            if isinstance(color, str):
+                if color.startswith("rgba"):
+                    import re
+
+                    match = re.match(
+                        r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)", color
+                    )
+                    if match:
+                        r, g, b, a = match.groups()
+                        return (int(r) / 255.0, int(g) / 255.0, int(b) / 255.0)
+
+                color = color.lstrip("#")
+                if len(color) >= 6:
+                    return tuple(int(color[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+            return (0.5, 0.5, 0.5)
+
+        def rgb_to_hex(r, g, b):
+            return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
+
+        rgb1 = hex_to_rgb(hex_color1)
+        rgb2 = hex_to_rgb(hex_color2)
+
+        r = rgb1[0] + (rgb2[0] - rgb1[0]) * factor
+        g = rgb1[1] + (rgb2[1] - rgb1[1]) * factor
+        b = rgb1[2] + (rgb2[2] - rgb1[2]) * factor
+
+        return rgb_to_hex(r, g, b)
+
+    def _ensure_hex_format(self, color):
+        """Convert color to hex format"""
+        if isinstance(color, str):
+            if color.startswith("#"):
+                return color
+
+            if color.startswith("rgba"):
+                import re
+
+                match = re.match(
+                    r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)", color
+                )
+                if match:
+                    r, g, b, a = match.groups()
+                    return "#{:02x}{:02x}{:02x}".format(int(r), int(g), int(b))
+
+        return "#808080"
+
+    def _generate_continuous_colors(self, num_colors):
+        """Generate smooth color gradient from continuous palette"""
+        base_palette = self.color_schemes[self.selected_scheme]
+
+        if num_colors <= len(base_palette):
+            step = (len(base_palette) - 1) / (num_colors - 1) if num_colors > 1 else 0
+            selected_colors = [base_palette[int(i * step)] for i in range(num_colors)]
+            return [self._ensure_hex_format(color) for color in selected_colors]
+        else:
+            colors = []
+
+            for i in range(num_colors):
+                position = i / (num_colors - 1) if num_colors > 1 else 0
+                palette_index = position * (len(base_palette) - 1)
+                lower_index = int(palette_index)
+                upper_index = min(lower_index + 1, len(base_palette) - 1)
+                factor = palette_index - lower_index
+
+                color1 = base_palette[lower_index]
+                color2 = base_palette[upper_index]
+
+                if factor == 0 or lower_index == upper_index:
+                    interpolated = self._ensure_hex_format(color1)
+                else:
+                    interpolated = self._interpolate_color(color1, color2, factor)
+
+                colors.append(interpolated)
+
+            return colors
+
+    def get_colors(self, num_colors=None, sampling="sequential"):
+        """Get colors from selected scheme"""
+        if num_colors is None:
+            num_colors = self.num_colors
+
+        colors = self.color_schemes[self.selected_scheme]
+
+        if sampling == "even" and len(colors) > num_colors:
+            if num_colors == 1:
+                return [colors[len(colors) // 2]]
+
+            indices = []
+            for i in range(num_colors):
+                index = int(round(i * (len(colors) - 1) / (num_colors - 1)))
+                indices.append(index)
+
+            return [colors[i] for i in indices]
+        else:
+            return self._generate_continuous_colors(num_colors)
+
+    def set_num_colors(self, num_colors):
+        """Set the number of colors to generate"""
+        num_colors = max(2, min(120, num_colors))
+        self.num_colors = num_colors
+
+    def get_widget(self):
+        """Get the color scheme selector widget"""
+        return self.widget

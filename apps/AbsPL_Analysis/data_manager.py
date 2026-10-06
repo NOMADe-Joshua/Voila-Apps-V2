@@ -1,237 +1,462 @@
 """
-data_manager.py
-Handles all data loading, filtering, and transformation logic.
-No widget dependencies -- safe to reuse with any GUI framework.
+Data manager for AbsPL/PLQY analysis.
 """
 
-import io
-import logging
+import re
 
+import numpy as np
 import pandas as pd
-from pydantic import ValidationError, field_validator
+from diagnostic_helper import debug_logger_abspl
 
-from hysprint_utils.api_calls import (
-    get_all_eqe as _get_all_abspl,
-)
-from hysprint_utils.api_calls import (
-    get_ids_in_batch,
-    get_sample_description,
-)
-from hysprint_utils.config import ENTRY_TYPES
-from hysprint_utils.error_handler import ErrorHandler
-from hysprint_utils.schemas import SampleMeta
-
-logger = logging.getLogger(__name__)
-MEASUREMENT_TYPE = ENTRY_TYPES["abspl"]
-CATEGORY_COLUMNS = ["sample_id", "variation", "name"]
+from perotf_utils.api_calls import get_all_eqe, get_ids_in_batch, get_sample_description
+from perotf_utils.config import ENTRY_TYPES
 
 
-# ---------------------------------------------------------------------------
-# Pydantic model
-# ---------------------------------------------------------------------------
+def extract_cycle_info(*texts):
+    """Extract cycle identifier from description/filename text.
 
-
-class AbsPlRow(SampleMeta):
+    Supports: Cycle_M, pxNCycle_M, or standalone cycle number.
+    Returns: cycle_number (int or None)
     """
-    One row of AbsPL data as returned by the NOMAD API.
+    combined_pattern = re.compile(r"px(?:\d+)?Cycle_(?P<cycle>\d+)", re.IGNORECASE)
+    cycle_pattern = re.compile(r"Cycle_(?P<cycle>\d+)", re.IGNORECASE)
 
-    Scalar fields are optional floats -- None means the measurement was not
-    recorded, which is different from zero.
-    Array fields (wavelength, spectra) coerce numpy arrays and other
-    iterables to plain Python lists so they serialise cleanly to a DataFrame.
-    """
+    cycle_number = None
 
-    # scalar measurement results
-    luminescence_quantum_yield: float | None = None
-    quasi_fermi_level_splitting: float | None = None
-    quasi_fermi_level_splitting_het: float | None = None
-    i_voc: float | None = None
-    bandgap: float | None = None
-    derived_jsc: float | None = None
+    for text in texts:
+        if not text:
+            continue
 
-    # array measurement results
-    wavelength: list[float] | None = None
-    luminescence_flux_density: list[float] | None = None
-    raw_spectrum_counts: list[float] | None = None
+        text_str = str(text)
 
-    @field_validator(
-        "wavelength",
-        "luminescence_flux_density",
-        "raw_spectrum_counts",
-        mode="before",
-    )
-    @classmethod
-    def coerce_to_list(cls, v):
-        """Accept numpy arrays, tuples, or any iterable; pass None through."""
-        if v is None:
-            return None
-        if isinstance(v, list):
-            return v
-        try:
-            return list(v)
-        except TypeError:
-            return None
+        # Try combined pattern first
+        combined_match = combined_pattern.search(text_str)
+        if combined_match and cycle_number is None:
+            cycle_number = int(combined_match.group("cycle"))
+            continue
+
+        # Try standalone cycle pattern
+        if cycle_number is None:
+            cycle_match = cycle_pattern.search(text_str)
+            if cycle_match:
+                cycle_number = int(cycle_match.group("cycle"))
+
+    return cycle_number
 
 
-class AbsPlDataManager:
-    """Manages AbsPL data: loading, filtering, and export."""
+def extract_description_notes(data_dict, metadata):
+    """Extract description notes/comment text from entry payload and metadata."""
+    candidates = [
+        (metadata or {}).get("description_notes", ""),
+        (metadata or {}).get("comment", ""),
+        (metadata or {}).get("comments", ""),
+        (metadata or {}).get("description", ""),
+        (data_dict or {}).get("description_notes", ""),
+        (data_dict or {}).get("comment", ""),
+        (data_dict or {}).get("comments", ""),
+        (data_dict or {}).get("notes", ""),
+    ]
 
-    def __init__(self, url: str, token: str):
-        self.url = url
-        self.token = token
-        self.data: pd.DataFrame | None = None
-        self.original_data: pd.DataFrame | None = None
-        self._filter_log: list[str] = []
+    for candidate in candidates:
+        if candidate not in (None, ""):
+            return str(candidate)
+    return ""
 
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
 
-    @property
-    def is_loaded(self) -> bool:
-        return self.data is not None
+class AbsPLDataManager:
+    """Load, classify (PL vs sweep), and filter AbsPL data."""
 
-    @property
-    def numeric_columns(self) -> list[str]:
-        if not self.is_loaded:
+    def __init__(self, auth_manager):
+        self.auth_manager = auth_manager
+        self.data = {
+            "summary": pd.DataFrame(),
+            "spectra": pd.DataFrame(),
+            "filtered_summary": pd.DataFrame(),
+            "filtered_spectra": pd.DataFrame(),
+        }
+
+    def _as_list(self, value):
+        if value is None:
             return []
-        return self.data.select_dtypes(include=["float64", "int64"]).columns.tolist()
+        if isinstance(value, list):
+            return value
+        return []
 
-    @property
-    def category_columns(self) -> list[str]:
-        return CATEGORY_COLUMNS
+    def _safe_float(self, value):
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except Exception:
+            return None
 
-    @property
-    def all_columns(self) -> list[str]:
-        return self.numeric_columns + self.category_columns
+    def _detect_measurement_type(self, results):
+        # Rule from sweep_vs_PL.md:
+        # - len(results) > 1 likely sweep
+        # - single result with missing luminescence_flux_density treated as sweep fallback
+        if len(results) > 1:
+            return "sweep"
+        if len(results) == 1:
+            first = results[0]
+            flux = first.get("luminescence_flux_density")
+            raw = first.get("raw_spectrum_counts")
+            if flux is None and raw is not None:
+                return "sweep"
+        return "pl"
 
-    @property
-    def filter_summary(self) -> str:
-        if not self.is_loaded:
-            return ""
-        pct = 100 * len(self.data) / len(self.original_data)
-        return f"{len(self.data)} rows remaining ({pct:.1f}% of {len(self.original_data)} original)"
+    def _extract_spot_size(self, data_dict):
+        settings = data_dict.get("settings", {}) if isinstance(data_dict, dict) else {}
+        candidates = [
+            settings.get("laser_spot_size"),
+            data_dict.get("laser_spot_size") if isinstance(data_dict, dict) else None,
+            settings.get("spot_size"),
+            data_dict.get("spot_size") if isinstance(data_dict, dict) else None,
+        ]
+        for c in candidates:
+            if c not in (None, "", "nan"):
+                return str(c)
+        return "Unknown"
 
-    # ------------------------------------------------------------------
-    # Data loading
-    # ------------------------------------------------------------------
+    def load_batch_data(self, batch_ids):
+        self.data = {
+            "summary": pd.DataFrame(),
+            "spectra": pd.DataFrame(),
+            "filtered_summary": pd.DataFrame(),
+            "filtered_spectra": pd.DataFrame(),
+        }
 
-    def load(self, batch_ids: list[str]) -> bool:
-        """Load AbsPL data for the given batch IDs. Returns True on success."""
-        sample_ids = get_ids_in_batch(self.url, self.token, list(batch_ids))
-        descriptions = get_sample_description(self.url, self.token, list(sample_ids))
-        raw = _get_all_abspl(self.url, self.token, sample_ids, eqe_type=MEASUREMENT_TYPE)
-        if not raw:
+        if not self.auth_manager.is_authenticated():
+            raise RuntimeError("Not authenticated")
+
+        if not batch_ids:
+            raise ValueError("No batch selected")
+
+        url = self.auth_manager.url
+        token = self.auth_manager.current_token
+
+        debug_logger_abspl.add("LOAD", f"Start loading {len(batch_ids)} batch(es)", level="INFO")
+
+        sample_ids = get_ids_in_batch(url, token, batch_ids)
+        if not sample_ids:
+            debug_logger_abspl.add(
+                "LOAD", "No sample IDs found in selected batches", level="WARNING"
+            )
             return False
-        return self._build_from_raw(raw, descriptions)
 
-    def load_offline(self, fixture_path) -> bool:
-        """Load from a local fixture JSON file (offline / demo mode)."""
-        import json
+        descriptions = get_sample_description(url, token, list(sample_ids))
+        abspl_entries = get_all_eqe(url, token, sample_ids, eqe_type=ENTRY_TYPES["abspl"])
 
-        with open(fixture_path) as f:
-            fx = json.load(f)
-        return self._build_from_raw(fx["measurements"], fx["descriptions"])
+        summary_rows = []
+        spectra_rows = []
 
-    def _build_from_raw(self, raw: dict, descriptions: dict) -> bool:
-        rows = []
-        for sample_id, entries in raw.items():
-            for entry in entries:
-                for result in entry[0].get("results", []):
-                    try:
-                        validated = AbsPlRow(
-                            **result,
-                            sample_id=sample_id,
-                            variation=descriptions.get(sample_id, ""),
-                            name=entry[0].get("name", ""),
-                        )
-                        rows.append(validated.model_dump())
-                    except ValidationError as e:
-                        ErrorHandler.log_error("Validation failed for sample %s" % sample_id, e)
+        for sample_id, entries in abspl_entries.items():
+            sample_desc = descriptions.get(sample_id, "")
+            for entry_idx, (data_dict, metadata) in enumerate(entries):
+                results = data_dict.get("results", []) if isinstance(data_dict, dict) else []
+                if not isinstance(results, list):
+                    continue
 
-        if not rows:
+                measurement_type = self._detect_measurement_type(results)
+                entry_name = data_dict.get("name", metadata.get("entry_name", f"entry_{entry_idx}"))
+                upload_name = metadata.get("upload_name", "unknown_upload")
+                spot_size = self._extract_spot_size(data_dict)
+                description_notes = extract_description_notes(data_dict, metadata)
+                cycle_from_notes = extract_cycle_info(description_notes)
+
+                settings = data_dict.get("settings", {}) if isinstance(data_dict, dict) else {}
+                laser_intensity_default = settings.get("laser_intensity_suns", None)
+
+                for i, result in enumerate(results):
+                    # Cycle comes from Description Notes (e.g. "Cycle_N"), not from sweep sub-measurement index.
+                    cycle_number = cycle_from_notes
+
+                    wavelength = self._as_list(result.get("wavelength"))
+                    lum_flux = self._as_list(result.get("luminescence_flux_density"))
+                    raw_spec = self._as_list(result.get("raw_spectrum_counts"))
+
+                    # Sweep data is stored in raw counts by source, but we expose it as flux-density channel
+                    # to keep one unified plotting source for sweep traces.
+                    if measurement_type == "sweep" and len(lum_flux) == 0 and len(raw_spec) > 0:
+                        lum_flux = raw_spec
+
+                    intensity = lum_flux if len(lum_flux) > 0 else raw_spec
+                    y_source = (
+                        "luminescence_flux_density" if len(lum_flux) > 0 else "raw_spectrum_counts"
+                    )
+
+                    if len(wavelength) == 0 or len(intensity) == 0:
+                        continue
+
+                    measurement_uid = (
+                        f"{sample_id}|{metadata.get('entry_id', entry_idx)}|{entry_idx}|{i}"
+                    )
+                    cycle_int = int(cycle_number) if str(cycle_number).isdigit() else cycle_number
+
+                    summary_rows.append(
+                        {
+                            "measurement_uid": measurement_uid,
+                            "sample_id": sample_id,
+                            "sample_description": sample_desc,
+                            "batch": upload_name,
+                            "condition": sample_desc if sample_desc else sample_id,
+                            "entry_name": entry_name,
+                            "description_notes": description_notes,
+                            "measurement_type": measurement_type,
+                            "cycle_number": cycle_int,
+                            "laser_spot_size": spot_size,
+                            "laser_intensity_suns": self._safe_float(
+                                result.get("laser_intensity_suns", laser_intensity_default)
+                            ),
+                            "luminescence_quantum_yield": self._safe_float(
+                                result.get("luminescence_quantum_yield")
+                            ),
+                            "quasi_fermi_level_splitting": self._safe_float(
+                                result.get("quasi_fermi_level_splitting")
+                            ),
+                            "quasi_fermi_level_splitting_het": self._safe_float(
+                                result.get("quasi_fermi_level_splitting_het")
+                            ),
+                            "i_voc": self._safe_float(result.get("i_voc")),
+                            "bandgap": self._safe_float(result.get("bandgap")),
+                            "derived_jsc": self._safe_float(result.get("derived_jsc")),
+                            "spectrum_points": min(len(wavelength), len(intensity)),
+                            "spectrum_source": y_source,
+                        }
+                    )
+
+                    spectra_rows.append(
+                        {
+                            "measurement_uid": measurement_uid,
+                            "sample_id": sample_id,
+                            "condition": sample_desc if sample_desc else sample_id,
+                            "batch": upload_name,
+                            "entry_name": entry_name,
+                            "description_notes": description_notes,
+                            "measurement_type": measurement_type,
+                            "cycle_number": cycle_int,
+                            "laser_spot_size": spot_size,
+                            "laser_intensity_suns": self._safe_float(
+                                result.get("laser_intensity_suns", laser_intensity_default)
+                            ),
+                            "wavelength": wavelength,
+                            "luminescence_flux_density": lum_flux,
+                            "raw_spectrum_counts": raw_spec,
+                            "intensity": intensity,
+                            "spectrum_source": y_source,
+                        }
+                    )
+
+        summary_df = pd.DataFrame(summary_rows)
+        spectra_df = pd.DataFrame(spectra_rows)
+
+        if summary_df.empty or spectra_df.empty:
+            debug_logger_abspl.add(
+                "LOAD", "No AbsPL results found for selected batches", level="WARNING"
+            )
             return False
 
-        self.data = pd.DataFrame(rows)
-        self.original_data = self.data.copy()
-        self._filter_log = []
+        self.data["summary"] = summary_df
+        self.data["spectra"] = spectra_df
+        self.data["filtered_summary"] = summary_df.copy()
+        self.data["filtered_spectra"] = spectra_df.copy()
+
+        n_pl = int((summary_df["measurement_type"] == "pl").sum())
+        n_sweep = int((summary_df["measurement_type"] == "sweep").sum())
+        debug_logger_abspl.add(
+            "LOAD",
+            f"Loaded {len(summary_df)} measurements ({n_pl} PL, {n_sweep} Sweep) from {summary_df['sample_id'].nunique()} samples",
+            level="SUCCESS",
+        )
         return True
 
-    # ------------------------------------------------------------------
-    # Filtering
-    # ------------------------------------------------------------------
+    def apply_filters(self, filter_config):
+        summary_df = self.data.get("summary", pd.DataFrame()).copy()
+        spectra_df = self.data.get("spectra", pd.DataFrame()).copy()
 
-    def apply_filter(self, column: str, min_val: float, max_val: float) -> tuple[bool, str]:
-        """
-        Apply a range filter on a numeric column.
-        Returns (success, message).
-        """
-        if not self.is_loaded:
-            return False, "No data loaded."
-        if column not in self.data.columns:
-            return False, f"Column '{column}' not found."
-        if min_val > max_val:
-            return (
-                False,
-                f"Min ({min_val:.4g}) cannot be greater than max ({max_val:.4g}).",
+        if summary_df.empty:
+            self.data["filtered_summary"] = pd.DataFrame()
+            self.data["filtered_spectra"] = pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame()
+
+        row_filters = filter_config.get("row_filters", [])
+
+        def _is_all(value):
+            return value in (None, "", "__all__")
+
+        effective_filters = []
+        for row in row_filters:
+            sample = row.get("sample")
+            mtype = row.get("measurement_type")
+            spot = row.get("laser_spot_size")
+            cycle = row.get("cycle")
+            if _is_all(sample) and _is_all(mtype) and _is_all(spot) and _is_all(cycle):
+                continue
+            effective_filters.append(row)
+
+        if effective_filters:
+            summary_df = summary_df.copy()
+            cycle_series = pd.to_numeric(summary_df["cycle_number"], errors="coerce")
+            mask = pd.Series(False, index=summary_df.index)
+
+            for row in effective_filters:
+                row_mask = pd.Series(True, index=summary_df.index)
+
+                sample = row.get("sample")
+                if not _is_all(sample):
+                    row_mask &= summary_df["sample_id"].astype(str) == str(sample)
+
+                mtype = row.get("measurement_type")
+                if not _is_all(mtype):
+                    row_mask &= summary_df["measurement_type"].astype(str) == str(mtype)
+
+                spot = row.get("laser_spot_size")
+                if not _is_all(spot):
+                    row_mask &= summary_df["laser_spot_size"].astype(str) == str(spot)
+
+                cycle = row.get("cycle")
+                if not _is_all(cycle):
+                    try:
+                        cycle_int = int(cycle)
+                        row_mask &= cycle_series == cycle_int
+                    except Exception:
+                        row_mask &= False
+
+                mask |= row_mask
+
+            summary_df = summary_df[mask]
+
+        allowed = set(summary_df["measurement_uid"].tolist())
+        spectra_df = spectra_df[spectra_df["measurement_uid"].isin(allowed)].copy()
+
+        self.data["filtered_summary"] = summary_df
+        self.data["filtered_spectra"] = spectra_df
+
+        debug_logger_abspl.add(
+            "FILTER",
+            f"Filtered to {len(summary_df)} measurements ({summary_df['sample_id'].nunique() if not summary_df.empty else 0} samples)",
+            level="SUCCESS" if len(summary_df) else "WARNING",
+        )
+        return summary_df, spectra_df
+
+    def get_data(self):
+        return self.data
+
+    def get_filtered_data(self):
+        return self.data.get("filtered_summary", pd.DataFrame()), self.data.get(
+            "filtered_spectra", pd.DataFrame()
+        )
+
+    def get_filter_options(self):
+        summary = self.data.get("summary", pd.DataFrame())
+        spectra_all = self.data.get("spectra", pd.DataFrame())
+        if summary.empty:
+            return {
+                "measurement_types": [],
+                "samples": [],
+                "laser_spot_sizes": [],
+                "cycles": [],
+                "filter_rows": [],
+                "numeric_columns": [],
+                "fit_curve_options": [],
+            }
+
+        numeric_columns = [
+            c
+            for c in [
+                "luminescence_quantum_yield",
+                "quasi_fermi_level_splitting",
+                "quasi_fermi_level_splitting_het",
+                "i_voc",
+                "bandgap",
+                "derived_jsc",
+                "laser_intensity_suns",
+                "cycle_number",
+            ]
+            if c in summary.columns
+        ]
+
+        filter_rows = summary[
+            ["sample_id", "measurement_type", "laser_spot_size", "cycle_number"]
+        ].copy()
+        filter_rows["cycle_number"] = pd.to_numeric(filter_rows["cycle_number"], errors="coerce")
+        filter_rows = (
+            filter_rows.dropna(
+                subset=["sample_id", "measurement_type", "laser_spot_size", "cycle_number"]
             )
+            .assign(cycle_number=lambda df: df["cycle_number"].astype(int))
+            .drop_duplicates()
+        )
 
-        prev_len = len(self.data)
-        self.data = self.data[(self.data[column] >= min_val) & (self.data[column] <= max_val)]
-        removed = prev_len - len(self.data)
-        self._filter_log.append(f"{column} in [{min_val:.4g}, {max_val:.4g}]")
-        return True, f"Removed {removed} rows. {self.filter_summary}"
+        cycles = (
+            pd.to_numeric(summary["cycle_number"], errors="coerce")
+            .dropna()
+            .astype(int)
+            .unique()
+            .tolist()
+        )
 
-    def reset_filters(self) -> None:
-        """Restore original data, clearing all filters."""
-        if not self.is_loaded:
-            return
-        self.data = self.original_data.copy()
-        self._filter_log = []
+        n_samples = int(summary["sample_id"].nunique()) if "sample_id" in summary.columns else 0
+        sweep_rows = summary[summary["measurement_type"].astype(str) == "sweep"].copy()
+        if sweep_rows.empty:
+            max_sweep_points_per_file = 0
+            n_sweep_measurements = 0
+        else:
+            key_cols = [
+                c
+                for c in ["sample_id", "batch", "entry_name", "cycle_number"]
+                if c in sweep_rows.columns
+            ]
+            grouped_sizes = (
+                sweep_rows.groupby(key_cols).size() if key_cols else pd.Series([len(sweep_rows)])
+            )
+            max_sweep_points_per_file = int(grouped_sizes.max()) if len(grouped_sizes) else 0
+            n_sweep_measurements = int(len(grouped_sizes)) if len(grouped_sizes) else 0
 
-    # ------------------------------------------------------------------
-    # Column helpers
-    # ------------------------------------------------------------------
+        max_required_colors = max(2, n_samples, max_sweep_points_per_file, n_sweep_measurements)
 
-    def get_column_range(self, column: str) -> tuple[float, float]:
-        """Return (min, max) for a column in current data."""
-        return float(self.data[column].min()), float(self.data[column].max())
+        fit_curve_options = []
+        spectra_for_options = (
+            spectra_all if isinstance(spectra_all, pd.DataFrame) else pd.DataFrame()
+        )
+        if not spectra_for_options.empty and "measurement_uid" in spectra_for_options.columns:
+            cols = [
+                c
+                for c in [
+                    "measurement_uid",
+                    "measurement_type",
+                    "sample_id",
+                    "cycle_number",
+                    "laser_intensity_suns",
+                ]
+                if c in spectra_for_options.columns
+            ]
+            curves_df = (
+                spectra_for_options[cols]
+                .dropna(subset=["measurement_uid"])
+                .drop_duplicates(subset=["measurement_uid"])
+            )
+            for _, row in curves_df.iterrows():
+                uid = str(row.get("measurement_uid"))
+                mtype = str(row.get("measurement_type", "")).strip()
+                sample = str(row.get("sample_id", "")).strip()
+                cycle_val = pd.to_numeric(row.get("cycle_number"), errors="coerce")
+                cycle_text = f"C{int(cycle_val)}" if np.isfinite(cycle_val) else "C?"
+                suns_val = pd.to_numeric(row.get("laser_intensity_suns"), errors="coerce")
+                suns_text = f"{suns_val:.4g} sun" if np.isfinite(suns_val) else "n/a sun"
+                label = f"{mtype} | {sample} | {cycle_text} | {suns_text}"
+                fit_curve_options.append({"label": label, "value": uid})
 
-    def get_variations(self) -> list:
-        if not self.is_loaded:
-            return []
-        return self.data["variation"].unique().tolist()
-
-    def get_available_spectral_columns(self) -> list[str]:
-        """Return spectral data columns that have at least some non-null data."""
-        if not self.is_loaded:
-            return []
-        result = []
-        for col in ["luminescence_flux_density", "raw_spectrum_counts"]:
-            if col in self.data.columns and self.data[col].notna().any():
-                result.append(col)
-        return result
-
-    # ------------------------------------------------------------------
-    # Export
-    # ------------------------------------------------------------------
-
-    def to_csv_string(self) -> str:
-        """Return current data as a CSV string."""
-        buf = io.StringIO()
-        self.data.to_csv(buf)
-        return buf.getvalue()
-
-    def get_pivot_table(self, value_col: str, group_by_col: str) -> pd.DataFrame:
-        """Return a pivot DataFrame with group_by_col values as columns."""
-        pivot = pd.DataFrame()
-        for group_val in self.data[group_by_col].unique():
-            subset = self.data[self.data[group_by_col] == group_val]
-            pivot[group_val] = subset[value_col].reset_index(drop=True)
-        return pivot
-
-    def pivot_to_csv_string(self, value_col: str, group_by_col: str) -> str:
-        """Return pivot table as a CSV string."""
-        buf = io.StringIO()
-        self.get_pivot_table(value_col, group_by_col).to_csv(buf)
-        return buf.getvalue()
+        return {
+            "measurement_types": sorted(
+                summary["measurement_type"].dropna().astype(str).unique().tolist()
+            ),
+            "samples": sorted(summary["sample_id"].dropna().astype(str).unique().tolist()),
+            "laser_spot_sizes": sorted(
+                summary["laser_spot_size"].dropna().astype(str).unique().tolist()
+            ),
+            "cycles": sorted(cycles),
+            "filter_rows": filter_rows.to_dict("records"),
+            "numeric_columns": numeric_columns,
+            "max_required_colors": max_required_colors,
+            "fit_curve_options": fit_curve_options,
+        }

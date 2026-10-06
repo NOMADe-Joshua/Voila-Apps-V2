@@ -1,22 +1,21 @@
 import base64
 import io
 import json
-import logging
 from datetime import datetime
 from pathlib import Path
 
 import ipywidgets as widgets
-from IPython.display import display
-from openpyxl import Workbook
-from openpyxl.styles import Font
+from IPython.display import HTML, display
 
-from hysprint_utils.process_specs import (
-    AVAILABLE_PROCESSES,
-    PROCESSES,
-    build_default_config_by_process_type,
-)
+# DEBUG FLAG - Set to False to suppress all debug output
+DEBUG = False
 
-logger = logging.getLogger(__name__)
+
+def _debug_print(msg):
+    """Helper function to conditionally print debug messages"""
+    if DEBUG:
+        print(msg)
+
 
 try:
     from experiment_excel_builder import ExperimentExcelBuilder
@@ -24,20 +23,36 @@ try:
     EXCEL_BUILDER_AVAILABLE = True
 except ImportError:
     EXCEL_BUILDER_AVAILABLE = False
-    logger.warning("ExperimentExcelBuilder not found. Install it or check the import path.")
+    _debug_print("ExperimentExcelBuilder not found. Install it or check the import path.")
 
 
 class MinimalistExperimentBuilder:
-    def __init__(self, templates_file="templates/process_templates.json"):
+    def __init__(self, templates_file="process_templates.json"):
         self.templates_file = Path(templates_file)
         self.current_sequence = []
         self.templates = {}
 
-        # Available process types - shared/hysprint_utils/process_specs.py is the single
-        # source of truth (also used by smart_databaser's data_manager.py), so this list
-        # and the config controls below can't silently drift out of sync the way they
-        # once did (see process_specs.py's docstring for the history).
-        self.available_processes = AVAILABLE_PROCESSES
+        # Available process types - updated to include Seq-Evaporation
+        processes = [
+            "Spin Coating",
+            "Evaporation",
+            "Co-Evaporation",
+            "Seq-Evaporation",
+            "Sputtering",
+            "ALD",
+            "Cleaning O2-Plasma",
+            "Cleaning UV-Ozone",
+            "Inkjet Printing",
+            "Slot Die Coating",
+            "Dip Coating",
+            "Laser Scribing",
+            "Close Space Sublimation",
+            "Lamination",
+            "Annealing",
+            "Generic Process",
+            "Multijunction Info",
+        ]
+        self.available_processes = ["Experiment Info"] + processes
 
         self.setup_widgets()
         self.load_templates()
@@ -49,24 +64,57 @@ class MinimalistExperimentBuilder:
     def load_templates(self):
         """Load templates from JSON file"""
         try:
-            if self.templates_file.exists():
-                with open(self.templates_file, "r") as f:
+            # Get the directory where this script is located
+            try:
+                script_dir = Path(__file__).parent
+            except NameError:
+                # __file__ not available in Jupyter, use current directory
+                script_dir = Path.cwd()
+
+            # Try multiple possible paths - prioritize script directory
+            possible_paths = [
+                script_dir / "process_templates.json",  # Same directory as script
+                script_dir / "templates" / "process_templates.json",  # Subfolder
+                Path.cwd() / "process_templates.json",  # Current working directory
+                Path.cwd() / "Excel_creator" / "process_templates.json",
+                Path.cwd() / "Excel_creator" / "templates" / "process_templates.json",
+                self.templates_file,  # Original path
+            ]
+
+            template_file = None
+            for path in possible_paths:
+                if path.exists():
+                    template_file = path
+                    break
+
+            if template_file:
+                with open(template_file, "r") as f:
                     data = json.load(f)
                     self.templates = data.get("templates", {})
 
-                logger.info("Loaded %d templates.", len(self.templates))
+                _debug_print(f"✅ Loaded {len(self.templates)} templates from {template_file}")
+                for key in self.templates.keys():
+                    _debug_print(f"   - {self.templates[key].get('name', key)}")
             else:
-                logger.info("Creating default template file...")
+                _debug_print("⚠️ Template file not found in expected locations:")
+                for path in possible_paths:
+                    _debug_print(f"   Tried: {path}")
+                _debug_print("Creating default template file...")
                 self.create_default_template()
+                return
 
             self._update_template_dropdown()
 
         except Exception as e:
-            logger.error("Error loading templates: %s", e)
+            _debug_print(f"❌ Error loading templates: {e}")
+            if DEBUG:
+                import traceback
+
+                traceback.print_exc()
             self.create_default_template()
 
     def create_default_template(self):
-        """Create a default template file"""
+        """Create a minimal default template file as fallback"""
         default_data = {
             "metadata": {
                 "version": "1.0",
@@ -79,49 +127,25 @@ class MinimalistExperimentBuilder:
                     "description": "Start with just Experiment Info",
                     "category": "Basic",
                     "process_sequence": [{"process": "Experiment Info"}],
-                },
-                "test_process": {
-                    "name": "Test Process",
-                    "description": "Simple test process",
-                    "category": "Test Processes",
-                    "process_sequence": [
-                        {"process": "Experiment Info"},
-                        {
-                            "process": "Spin Coating",
-                            "config": {
-                                "solvents": 2,
-                                "solutes": 3,
-                                "spinsteps": 1,
-                                "antisolvent": True,
-                            },
-                        },
-                        {"process": "Evaporation"},
-                    ],
-                },
-                "simple_coating": {
-                    "name": "Simple Coating",
-                    "description": "Basic coating process",
-                    "category": "Coating Processes",
-                    "process_sequence": [
-                        {"process": "Experiment Info"},
-                        {"process": "Cleaning O2-Plasma", "config": {"solvents": 2}},
-                        {
-                            "process": "Spin Coating",
-                            "config": {"solvents": 1, "solutes": 1, "spinsteps": 1},
-                        },
-                        {"process": "Evaporation"},
-                    ],
-                },
+                }
             },
         }
 
-        self.templates_file.parent.mkdir(parents=True, exist_ok=True)
+        # Try to create in script directory first
+        try:
+            script_dir = Path(__file__).parent
+        except NameError:
+            script_dir = Path.cwd()
 
-        with open(self.templates_file, "w") as f:
+        target_file = script_dir / "process_templates.json"
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(target_file, "w") as f:
             json.dump(default_data, f, indent=2)
 
         self.templates = default_data["templates"]
-        logger.info("Created default template file with %d templates.", len(self.templates))
+        _debug_print(f"✅ Created minimal template file at {target_file}")
+        _debug_print(f"   Please load proper templates from {target_file}")
         self._update_template_dropdown()
 
     def setup_widgets(self):
@@ -163,12 +187,6 @@ class MinimalistExperimentBuilder:
             style={"description_width": "initial"},
         )
 
-        self.include_readme_checkbox = widgets.Checkbox(
-            value=False,
-            description="Create README.md for annotations",
-            style={"description_width": "initial"},
-        )
-
         self.generate_button = widgets.Button(
             description="Generate Excel",
             button_style="success",
@@ -193,13 +211,13 @@ class MinimalistExperimentBuilder:
             else:
                 # Fallback content if file doesn't exist
                 return """
-                <div style="padding: 15px; background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; margin: 10px 0;">  # noqa: E501
+                <div style="padding: 15px; background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; margin: 10px 0;">
                     <p>Guide file not found. Create 'guide.html' in your project directory.</p>
                 </div>
                 """
         except Exception as e:
             return f"""
-            <div style="padding: 15px; background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; margin: 10px 0;">  # noqa: E501
+            <div style="padding: 15px; background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; margin: 10px 0;">
                 <h4 style="color: #495057;">📖 Guide Error</h4>
                 <p>Error loading guide: {e}</p>
             </div>
@@ -214,8 +232,9 @@ class MinimalistExperimentBuilder:
         """Apply selected template"""
         template_name = self.template_dropdown.value
         if template_name == "Select template...":
-            self.status_output.clear_output()
-            logger.warning("Please select a template.")
+            with self.status_output:
+                self.status_output.clear_output()
+                _debug_print("❌ Please select a template")
             return
 
         # Find template
@@ -234,11 +253,38 @@ class MinimalistExperimentBuilder:
                     new_process["config"] = process["config"].copy()
                 self.current_sequence.append(new_process)
 
+            # Debug: Check if Seq-Evaporation is in available processes
+            with self.status_output:
+                self.status_output.clear_output()
+                seq_evap_processes = [
+                    p for p in self.current_sequence if p["process"] == "Seq-Evaporation"
+                ]
+                if seq_evap_processes:
+                    _debug_print(f"🔍 Found {len(seq_evap_processes)} Seq-Evaporation processes")
+                    _debug_print(f"🔍 Available processes: {self.available_processes}")
+                    if "Seq-Evaporation" in self.available_processes:
+                        _debug_print("✅ Seq-Evaporation is in available processes")
+                    else:
+                        _debug_print("❌ Seq-Evaporation NOT in available processes")
+
             self._update_process_display()
 
             with self.status_output:
                 self.status_output.clear_output()
-                # print(f"✅ Applied: {template_name} ({len(self.current_sequence)} processes)")
+                # _debug_print(f"✅ Applied: {template_name} ({len(self.current_sequence)} processes)")
+
+    def _toggle_guide(self, button):
+        """Toggle guide visibility"""
+        self.guide_visible = not self.guide_visible
+
+        if self.guide_visible:
+            self.guide_content.layout.display = "block"
+            self.guide_toggle.description = "Hide Guide"
+            self.guide_toggle.icon = "times"
+        else:
+            self.guide_content.layout.display = "none"
+            self.guide_toggle.description = "Show Guide"
+            self.guide_toggle.icon = "question"
 
     def _update_process_display(self):
         """Update the process sequence display"""
@@ -254,19 +300,6 @@ class MinimalistExperimentBuilder:
 
         self.process_sequence_area.children = process_rows
 
-    def _toggle_guide(self, button):
-        """Toggle guide visibility"""
-        self.guide_visible = not self.guide_visible
-
-        if self.guide_visible:
-            self.guide_content.layout.display = "block"
-            self.guide_toggle.description = "Hide Guide"
-            self.guide_toggle.icon = "times"
-        else:
-            self.guide_content.layout.display = "none"
-            self.guide_toggle.description = "Show Guide"
-            self.guide_toggle.icon = "question"
-
     def _create_process_row(self, index, process_data):
         """Create a single row for a process"""
         process_name = process_data["process"]
@@ -274,7 +307,7 @@ class MinimalistExperimentBuilder:
 
         # Index label
         index_label = widgets.HTML(
-            value=f"<span style='font-weight: bold; color: #666; min-width: 25px; display: inline-block;'>{index + 1}.</span>",  # noqa: E501
+            value=f"<span style='font-weight: bold; color: #666; min-width: 25px; display: inline-block;'>{index + 1}.</span>",
             layout=widgets.Layout(width="30px"),
         )
 
@@ -342,64 +375,189 @@ class MinimalistExperimentBuilder:
             return main_row
 
     def _create_inline_config_controls(self, index, process_name, config):
-        """Create inline configuration controls - returns (numeric_controls, checkbox_controls)
-
-        Numeric/checkbox controls are rendered generically from
-        PROCESSES[process_name]["meta"]["numeric_config"/"boolean_config"] in
-        shared/hysprint_utils/process_specs.py, instead of one hand-written
-        if/elif block per process type - the exact pattern gui_components.py's
-        own _sync_config_controls already used, now shared by both apps' GUIs
-        so a new process type's controls can't be added to one and missed in
-        the other."""
+        """Create inline configuration controls - returns (numeric_controls, checkbox_controls)"""
         numeric_controls = []
         checkbox_controls = []
 
-        # Add Atmospheric Values checkbox for all processes except Experiment Info
-        # This must be added BEFORE the early return for non-configurable processes
-        if process_name != "Experiment Info":
-            atmospheric_checkbox = widgets.Checkbox(
-                value=config.get("add_atmospheric", False),
-                description="Add Atmospheric Values",
-                style={"description_width": "initial"},
-                layout=widgets.Layout(width="190px"),
+        # Check if process has configuration options - updated list
+        configurable_processes = [
+            "Spin Coating",
+            "Cleaning O2-Plasma",
+            "Cleaning UV-Ozone",
+            "Inkjet Printing",
+            "Co-Evaporation",
+            "Seq-Evaporation",
+            "Close Space Sublimation",
+            "Slot Die Coating",
+            "Dip Coating",
+        ]
+
+        if process_name not in configurable_processes:
+            return numeric_controls, checkbox_controls
+
+        # Solvents
+        if process_name in [
+            "Spin Coating",
+            "Cleaning O2-Plasma",
+            "Cleaning UV-Ozone",
+            "Inkjet Printing",
+            "Slot Die Coating",
+            "Dip Coating",
+        ]:
+            solvents_widget = widgets.BoundedIntText(
+                value=config.get("solvents", 1),
+                min=0,
+                max=20,
+                description="Solvents:",
+                style={"description_width": "55px"},
+                layout=widgets.Layout(width="120px"),
             )
-            atmospheric_checkbox.observe(
+            solvents_widget.observe(
+                lambda change, idx=index: self._update_config(idx, "solvents", change["new"]),
+                names="value",
+            )
+            numeric_controls.append(solvents_widget)
+
+        # Solutes
+        if process_name in ["Spin Coating", "Inkjet Printing", "Slot Die Coating", "Dip Coating"]:
+            solutes_widget = widgets.BoundedIntText(
+                value=config.get("solutes", 1),
+                min=0,
+                max=20,
+                description="Solutes:",
+                style={"description_width": "50px"},
+                layout=widgets.Layout(width="115px"),
+            )
+            solutes_widget.observe(
+                lambda change, idx=index: self._update_config(idx, "solutes", change["new"]),
+                names="value",
+            )
+            numeric_controls.append(solutes_widget)
+
+        # Spin Steps
+        if process_name == "Spin Coating":
+            spinsteps_widget = widgets.BoundedIntText(
+                value=config.get("spinsteps", 1),
+                min=1,
+                max=5,
+                description="Steps:",
+                style={"description_width": "40px"},
+                layout=widgets.Layout(width="100px"),
+            )
+            spinsteps_widget.observe(
+                lambda change, idx=index: self._update_config(idx, "spinsteps", change["new"]),
+                names="value",
+            )
+            numeric_controls.append(spinsteps_widget)
+
+        # Materials (for co/seq evaporation and CSS)
+        if process_name in ["Co-Evaporation", "Seq-Evaporation", "Close Space Sublimation"]:
+            materials_widget = widgets.BoundedIntText(
+                value=config.get(
+                    "materials", 2 if process_name in ["Co-Evaporation", "Seq-Evaporation"] else 1
+                ),
+                min=1,
+                max=5,
+                description="Materials:",
+                style={"description_width": "65px"},
+                layout=widgets.Layout(width="130px"),
+            )
+            materials_widget.observe(
+                lambda change, idx=index: self._update_config(idx, "materials", change["new"]),
+                names="value",
+            )
+            numeric_controls.append(materials_widget)
+
+        # Optional milling preparation for CSS
+        if process_name == "Close Space Sublimation":
+            milling_checkbox = widgets.Checkbox(
+                value=config.get("milling", False),
+                description="Milling",
+                style={"description_width": "initial"},
+                layout=widgets.Layout(width="120px"),
+            )
+            milling_checkbox.observe(
+                lambda change, idx=index: self._update_config(idx, "milling", change["new"]),
+                names="value",
+            )
+            checkbox_controls.append(milling_checkbox)
+
+        # Wf Number of Pulses (for Inkjet Printing)
+        if process_name == "Inkjet Printing":
+            pulses_widget = widgets.BoundedIntText(
+                value=config.get("Wf Number of Pulses", 1),
+                min=1,
+                max=10,
+                description="Pulses:",
+                style={"description_width": "50px"},
+                layout=widgets.Layout(width="115px"),
+            )
+            pulses_widget.observe(
                 lambda change, idx=index: self._update_config(
-                    idx, "add_atmospheric", change["new"]
+                    idx, "Wf Number of Pulses", change["new"]
                 ),
                 names="value",
             )
-            checkbox_controls.append(atmospheric_checkbox)
+            numeric_controls.append(pulses_widget)
 
-        meta = PROCESSES.get(process_name, {}).get("meta", {})
+        # Checkboxes for Spin Coating
+        if process_name == "Spin Coating":
+            checkbox_options = [
+                ("antisolvent", "Antisolvent"),
+                ("gasquenching", "Gas Quenching"),
+                ("vacuumquenching", "Vacuum Quenching"),
+            ]
 
-        for key, label, min_val, max_val in meta.get("numeric_config", []):
-            widget = widgets.BoundedIntText(
-                value=config.get(key, min_val),
-                min=min_val,
-                max=max_val,
-                description=f"{label}:",
-                style={"description_width": "initial"},
-                layout=widgets.Layout(width="130px"),
+            for option_key, option_label in checkbox_options:
+                checkbox = widgets.Checkbox(
+                    value=config.get(option_key, False),
+                    description=option_label,
+                    style={"description_width": "initial"},
+                    layout=widgets.Layout(width="140px"),
+                )
+                checkbox.observe(
+                    lambda change, idx=index, key=option_key: self._update_config(
+                        idx, key, change["new"]
+                    ),
+                    names="value",
+                )
+                checkbox_controls.append(checkbox)
+
+        # Checkboxes for Inkjet Printing
+        if process_name == "Inkjet Printing":
+            checkbox_options = [
+                ("gasquenching", "Gas Quenching"),
+                ("vacuumquenching", "Vacuum Quenching"),
+            ]
+
+            # pixORnotion dropdown
+            pixor_dropdown = widgets.Dropdown(
+                options=["Pixdro", "Notion"],
+                value=config.get("pixORnotion", "Pixdro"),
+                description="Type:",
+                style={"description_width": "40px"},
+                layout=widgets.Layout(width="120px"),
             )
-            widget.observe(
-                lambda change, idx=index, k=key: self._update_config(idx, k, change["new"]),
+            pixor_dropdown.observe(
+                lambda change, idx=index: self._update_config(idx, "pixORnotion", change["new"]),
                 names="value",
             )
-            numeric_controls.append(widget)
+            numeric_controls.append(pixor_dropdown)
 
-        for key, label in meta.get("boolean_config", []):
-            checkbox = widgets.Checkbox(
-                value=config.get(key, False),
-                description=label,
-                style={"description_width": "initial"},
-                layout=widgets.Layout(width="150px"),
-            )
-            checkbox.observe(
-                lambda change, idx=index, k=key: self._update_config(idx, k, change["new"]),
-                names="value",
-            )
-            checkbox_controls.append(checkbox)
+            for option_key, option_label in checkbox_options:
+                checkbox = widgets.Checkbox(
+                    value=config.get(option_key, False),
+                    description=option_label,
+                    style={"description_width": "initial"},
+                    layout=widgets.Layout(width="140px"),
+                )
+                checkbox.observe(
+                    lambda change, idx=index, key=option_key: self._update_config(
+                        idx, key, change["new"]
+                    ),
+                    names="value",
+                )
+                checkbox_controls.append(checkbox)
 
         return numeric_controls, checkbox_controls
 
@@ -439,22 +597,20 @@ class MinimalistExperimentBuilder:
         if index < len(self.current_sequence):
             self.current_sequence[index]["process"] = new_process_type
 
-            # Reset config when changing process type. Deliberately NOT every process
-            # type with a config_defaults entry (Co-Evaporation/Ink Recycling are also
-            # configurable but were never in this reset list either, even before this
-            # migration) - preserved exactly as it already was, not generalized, since
-            # each numeric control's own value=config.get(key, min_val) fallback already
-            # covers the "config missing" case, so widening this list isn't required for
-            # correctness and isn't this migration's call to make.
-            if new_process_type in [
+            # Reset config when changing process type
+            configurable_processes = [
                 "Spin Coating",
                 "Cleaning O2-Plasma",
                 "Cleaning UV-Ozone",
                 "Inkjet Printing",
                 "Slot Die Coating",
-                "Blade Coating",
-                "Screen Printing",
-            ]:
+                "Dip Coating",
+                "Co-Evaporation",
+                "Seq-Evaporation",
+                "Close Space Sublimation",
+            ]
+
+            if new_process_type in configurable_processes:
                 self.current_sequence[index]["config"] = self._get_default_config(new_process_type)
             else:
                 self.current_sequence[index].pop("config", None)
@@ -462,10 +618,33 @@ class MinimalistExperimentBuilder:
             self._update_process_display()
 
     def _get_default_config(self, process_name):
-        """Get default configuration for a process - shared/hysprint_utils/
-        process_specs.py is the single source of truth (see also data_manager.py's
-        DEFAULT_CONFIG_BY_PROCESS_TYPE, derived from the same function)."""
-        return build_default_config_by_process_type().get(process_name, {})
+        """Get default configuration for a process"""
+        defaults = {
+            "Spin Coating": {
+                "solvents": 1,
+                "solutes": 1,
+                "spinsteps": 1,
+                "antisolvent": False,
+                "gasquenching": False,
+                "vacuumquenching": False,
+            },
+            "Cleaning O2-Plasma": {"solvents": 1},
+            "Cleaning UV-Ozone": {"solvents": 1},
+            "Inkjet Printing": {
+                "solvents": 1,
+                "solutes": 1,
+                "pixORnotion": "Pixdro",
+                "Wf Number of Pulses": 1,
+                "gasquenching": False,
+                "vacuumquenching": False,
+            },
+            "Slot Die Coating": {"solvents": 1, "solutes": 1},
+            "Dip Coating": {"solvents": 1, "solutes": 1},
+            "Co-Evaporation": {"materials": 2},
+            "Seq-Evaporation": {"materials": 2},
+            "Close Space Sublimation": {"materials": 1, "milling": False, "mixing_ratio": False},
+        }
+        return defaults.get(process_name, {})
 
     def _update_config(self, process_index, key, value):
         """Update configuration for a process"""
@@ -475,72 +654,270 @@ class MinimalistExperimentBuilder:
 
             self.current_sequence[process_index]["config"][key] = value
 
+            # CSS: automatically enable mix ratio only when multiple materials are selected.
+            process_name = self.current_sequence[process_index].get("process")
+            if process_name == "Close Space Sublimation" and key == "materials":
+                materials_count = self.current_sequence[process_index]["config"].get("materials", 1)
+                self.current_sequence[process_index]["config"]["mixing_ratio"] = materials_count > 1
+
     def _add_process_below(self, index):
         """Add a new process below the current one"""
         new_process = {"process": "Generic Process"}
         self.current_sequence.insert(index + 1, new_process)
         self._update_process_display()
-        self.status_output.clear_output()
-        logger.info("Added process at position %d.", index + 2)
+
+        with self.status_output:
+            self.status_output.clear_output()
+            _debug_print(f"➕ Added process at position {index + 2}")
 
     def _remove_process(self, index):
         """Remove a process (can't remove Experiment Info)"""
         if index > 0 and index < len(self.current_sequence):
             removed_process = self.current_sequence.pop(index)
             self._update_process_display()
-            self.status_output.clear_output()
-            logger.info("Removed: %s", removed_process["process"])
+
+            with self.status_output:
+                self.status_output.clear_output()
+                _debug_print(f"🗑️ Removed: {removed_process['process']}")
 
     def _on_generate_excel(self, button):
         """Generate Excel file"""
         if not self.current_sequence:
-            self.status_output.clear_output()
-            logger.warning("No processes configured.")
+            with self.status_output:
+                self.status_output.clear_output()
+                _debug_print("❌ No processes configured")
             return
 
         try:
-            self.status_output.clear_output()
-            logger.info("Generating Excel...")
+            with self.status_output:
+                self.status_output.clear_output()
+                _debug_print("🔄 Generating Excel...")
+                _debug_print("🔍 Using openpyxl directly...")
 
             excel_data = self._generate_excel_data()
 
-            logger.info("Final Excel data size: %d bytes", len(excel_data))
+            with self.status_output:
+                _debug_print(f"📏 Final Excel data size: {len(excel_data)} bytes")
 
-            if len(excel_data) > 0:
-                if excel_data.startswith(b"PK"):
-                    logger.info("Excel file signature is correct.")
+                # Check if it's really Excel data
+                if len(excel_data) > 0:
+                    if excel_data.startswith(b"PK"):
+                        _debug_print("✅ Excel file signature is correct")
+                    else:
+                        _debug_print("❌ Not a valid Excel file!")
+                        _debug_print(f"First 50 chars: {excel_data[:50]}")
                 else:
-                    logger.error("Not a valid Excel file! First bytes: %s", excel_data[:50])
-            else:
-                logger.error("Excel data is empty!")
+                    _debug_print("❌ Excel data is empty!")
 
             filename = f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             download_html = self._create_download_link(excel_data, filename)
 
             self.download_area.value = download_html
-            logger.info("Download link created for: %s", filename)
 
-            if self.include_readme_checkbox.value:
-                readme_content = self._generate_readme()
-                readme_filename = "README.md"
-                readme_html = self._create_readme_download_link(readme_content, readme_filename)
-                self.download_area.value += readme_html
-                logger.info("README file created: %s", readme_filename)
+            with self.status_output:
+                _debug_print(f"🎯 Download link created for: {filename}")
 
         except Exception as e:
-            self.status_output.clear_output()
-            logger.exception("Error in _on_generate_excel: %s", e)
+            with self.status_output:
+                self.status_output.clear_output()
+                _debug_print(f"❌ Error in _on_generate_excel: {e}")
+                if DEBUG:
+                    import traceback
+
+                    traceback.print_exc()
+
+    def process_config_function(self):
+        # Define the base process configuration
+        process_config = {
+            "Experiment Info": {
+                "steps": [
+                    "Date",
+                    "Project_Name",
+                    "Batch",
+                    "Subbatch",
+                    "Sample",
+                    "Nomad ID",
+                    "Variation",
+                    "Sample dimension",
+                    "Sample area [cm^2]",
+                    "Number of pixels",
+                    "Pixel area",
+                    "Number of junctions",
+                    "Substrate material",
+                    "Substrate conductive layer",
+                    "Bottom Cell Name",
+                    "Notes",
+                ]
+            },
+            "Multijunction Info": {"steps": ["Recombination Layer", "Notes"]},
+            "Cleaning O2-Plasma": {"solvents": 1},
+            "Cleaning UV-Ozone": {"solvents": 1},
+            "Dip Coating": {"solvents": 1, "solutes": 1},
+            "Spin Coating": {
+                "solvents": 1,
+                "solutes": 1,
+                "spinsteps": 1,
+                "antisolvent": False,
+                "gasquenching": 0,
+                "vacuumquenching": 0,
+            },
+            "Slot Die Coating": {"solvents": 1, "solutes": 1},
+            "Inkjet Printing": {
+                "solvents": 1,
+                "solutes": 1,
+                "pixORnotion": "Pixdro",
+                "Wf Number of Pulses": 1,
+                "vacuumquenching": 0,
+                "gasquenching": 0,
+            },  # ToDo Extend Pulse variations
+            "Evaporation": {
+                "steps": [
+                    "Material name",
+                    "Layer type",
+                    "Tool/GB name",
+                    "Organic",
+                    "Base pressure [bar]",
+                    "Pressure start [bar]",
+                    "Pressure end [bar]",
+                    "Source temperature start[°C]",
+                    "Source temperature end[°C]",
+                    "Substrate temperature [°C]",
+                    "Thickness [nm]",
+                    "Rate [angstrom/s]",
+                    "Power [%]",
+                    "Tooling factor",
+                    "Notes",
+                ]
+            },
+            # Added DB 2024-11-29  multiple materials #Could also be called Co-Sublimation instead of Co-Evaporation
+            "Co-Evaporation": {"materials": 2},
+            # Added DB 2024-11-29  multiple materials #Could also be called Seq-Sublimation instead of Seq-Evaporation
+            "Seq-Evaporation": {"materials": 2},
+            "Close Space Sublimation": {
+                "materials": 1,
+                "milling": False,
+                "mixing_ratio": False,
+                "steps": [
+                    "Material name",
+                    "Layer type",
+                    "Tool/GB name",
+                    "Organic",
+                    "Material name 1",
+                    "Process pressure [mbar]",
+                    "Source temperature [°C]",
+                    "Substrate temperature [°C]",
+                    "Material state",
+                    "Substrate source distance [mm]",
+                    "Thickness [nm]",
+                    "Deposition Time [s]",
+                    "Carrier gas",
+                    "Material ratio 1",
+                    "Material wt% 1",
+                    "Milling rotation speed [rpm]",
+                    "Milling rotation time [min]",
+                    "Milling rest time [min]",
+                    "Notes",
+                ],
+            },
+            "Lamination": {
+                "steps": [
+                    "Interface",
+                    "Tool/GB name",
+                    "Temperature during process[°C]",
+                    "Temperature at pressure relief [°C]",
+                    "Pressure [MPa]",
+                    "Force [N]",
+                    "Time lamination [s]",
+                    "Heat up time [s]",
+                    "Cool down time [s]",
+                    "Total time [s]",
+                    "Athmosphere in chamber",
+                    "Humidity [%%rel]",
+                    "Stamp 1 Material",
+                    "Stamp 1 Thickness [mm]",
+                    "Stamp 1 Area [mm^2]",
+                    "Stamp 2 Material",
+                    "Stamp 2 Thickness [mm]",
+                    "Stamp 2 Area [mm^2]",
+                    "Homogeniously pressed [1/0]",
+                    "Sucessful adhesion [1/0]",
+                    "Notes",
+                ]
+            },
+            "Sputtering": {
+                "steps": [
+                    "Material name",
+                    "Layer type",
+                    "Tool/GB name",
+                    "Gas",
+                    "Temperature [°C]",
+                    "Pressure [mbar]",
+                    "Deposition time [s]",
+                    "Burn in time [s]",
+                    "Power [W]",
+                    "Rotation rate [rpm]",
+                    "Thickness [nm]",
+                    "Gas flow rate [cm^3/min]",
+                    "Notes",
+                ]
+            },
+            "Laser Scribing": {
+                "steps": [
+                    "Laser wavelength [nm]",
+                    "Laser pulse time [ps]",
+                    "Laser pulse frequency [kHz]",
+                    "Speed [mm/s]",
+                    "Fluence [J/cm2]",
+                    "Power [%]",
+                    "Recipe file",
+                ]
+            },
+            "ALD": {
+                "steps": [
+                    "Material name",
+                    "Layer type",
+                    "Tool/GB name",
+                    "Source",
+                    "Thickness [nm]",
+                    "Temperature [°C]",
+                    "Rate [A/s]",
+                    "Time [s]",
+                    "Number of cycles",
+                    "Precursor 1",
+                    "Pulse duration 1 [s]",
+                    "Manifold temperature 1 [°C]",
+                    "Bottle temperature 1 [°C]",
+                    "Precursor 2 (Oxidizer/Reducer)",
+                    "Pulse duration 2 [s]",
+                    "Manifold temperature 2 [°C]",
+                ]
+            },
+            "Annealing": {
+                "steps": [
+                    "Annealing time [min]",
+                    "Annealing temperature [°C]",
+                    "Annealing athmosphere",
+                    "Relative humidity [%]",
+                    "Notes",
+                ]
+            },  # Added DB 2024-11-29 Annealing
+            "Generic Process": {"steps": ["Name", "Notes"]},
+        }
+        return process_config
 
     def _generate_excel_data(self):
         """Generate Excel file using ExperimentExcelBuilder first, then openpyxl fallback"""
 
+        # Try ExperimentExcelBuilder FIRST (this gives you the full detailed format)
         if EXCEL_BUILDER_AVAILABLE:
             try:
-                logger.info("Using ExperimentExcelBuilder (full detailed format)...")
+                with self.status_output:
+                    _debug_print("🔄 Using ExperimentExcelBuilder (full detailed format)...")
 
-                builder = ExperimentExcelBuilder(
-                    self.current_sequence, self.is_testing_checkbox.value
-                )
+                # Import the process config from Create_Excel_Script_1.py
+                process_config = self.process_config_function()
+
+                builder = ExperimentExcelBuilder(self.current_sequence, process_config)
                 builder.build_excel()
 
                 buffer = io.BytesIO()
@@ -548,28 +925,40 @@ class MinimalistExperimentBuilder:
                 buffer.seek(0)
                 excel_data = buffer.getvalue()
 
-                logger.info("ExperimentExcelBuilder created file: %d bytes", len(excel_data))
-                logger.info("Multiple sheets: %d worksheets", len(builder.workbook.worksheets))
-                logger.info("Sheet names: %s", [ws.title for ws in builder.workbook.worksheets])
+                with self.status_output:
+                    _debug_print(f"✅ ExperimentExcelBuilder created file: {len(excel_data)} bytes")
+                    _debug_print(
+                        f"🔍 Multiple sheets: {len(builder.workbook.worksheets)} worksheets"
+                    )
+                    _debug_print(
+                        f"🔍 Sheet names: {[ws.title for ws in builder.workbook.worksheets]}"
+                    )
 
                 if (
                     excel_data and len(excel_data) > 1000
                 ):  # Should be much larger with detailed format
                     return excel_data
                 else:
-                    logger.warning(
-                        "ExperimentExcelBuilder file seems too small, trying fallback..."
-                    )
+                    with self.status_output:
+                        _debug_print(
+                            "❌ ExperimentExcelBuilder file seems too small, trying fallback..."
+                        )
 
             except Exception as e:
-                logger.error("ExperimentExcelBuilder failed: %s", e)
-                logger.info("Falling back to basic openpyxl...")
+                with self.status_output:
+                    _debug_print(f"❌ ExperimentExcelBuilder failed: {e}")
+                    _debug_print("🔄 Falling back to basic openpyxl...")
         else:
-            logger.warning("ExperimentExcelBuilder not available, using basic openpyxl...")
+            with self.status_output:
+                _debug_print("❌ ExperimentExcelBuilder not available, using basic openpyxl...")
 
         # Fallback: Basic openpyxl (simple format)
         try:
-            logger.info("Using basic openpyxl (simple format)...")
+            from openpyxl import Workbook
+            from openpyxl.styles import Font
+
+            with self.status_output:
+                _debug_print("🔄 Using basic openpyxl (simple format)...")
 
             # Create workbook
             wb = Workbook()
@@ -597,7 +986,8 @@ class MinimalistExperimentBuilder:
                         col += 1
                 row += 1
 
-            logger.info("Basic Excel created: %d processes", len(self.current_sequence))
+            with self.status_output:
+                _debug_print(f"✅ Basic Excel created: {len(self.current_sequence)} processes")
 
             # Save to buffer
             buffer = io.BytesIO()
@@ -605,12 +995,18 @@ class MinimalistExperimentBuilder:
             buffer.seek(0)
             excel_data = buffer.getvalue()
 
-            logger.info("Basic Excel file: %d bytes", len(excel_data))
+            with self.status_output:
+                _debug_print(f"💾 Basic Excel file: {len(excel_data)} bytes")
 
             return excel_data
 
         except Exception as e:
-            logger.exception("All Excel generation methods failed: %s", e)
+            with self.status_output:
+                _debug_print(f"❌ All Excel generation methods failed: {e}")
+                if DEBUG:
+                    import traceback
+
+                    traceback.print_exc()
 
             # Return error as text file
             error_content = f"""Excel Generation Error
@@ -631,108 +1027,23 @@ Process Sequence:
 
             return error_content.encode("utf-8")
 
-    def _generate_readme(self):
-        """Generate README.md template"""
-        readme_template = """# Scientific Question
-(What specific hypothesis or question does this experiment address?)
-
-> Example: Does annealing temperature affect the VOC of triple-cation perovskite devices?
-
----
-
-# Approach
-(Briefly describe the experimental design, key parameters, and any deviations from standard protocol.)  # noqa: E501
-
-## Conditions
-| Parameter | Value |
-|-----------|-------|
-| ... | ... |
-
-## Method
-"""
-
-        # Add process sequence
-        for i, process in enumerate(self.current_sequence, 1):
-            readme_template += f"{i}. {process['process']}"
-            if "config" in process and process["config"]:
-                config_str = ", ".join([f"{k}={v}" for k, v in process["config"].items()])
-                readme_template += f" ({config_str})"
-            readme_template += "\n"
-
-        readme_template += """
----
-
-# Results
-(Summarize the key outputs. Link to data files or NOMAD entries where relevant.)
-
-- **Key finding:** ...
-- **Data location:** `path/to/data` or [NOMAD entry](#)
-
----
-
-# Learnings
-(What do the results tell you? What was surprising or confirmed?)
-
-## Interpretation
-...
-
-## Caveats / Limitations
-- ...
-
----
-
-# Next Steps
-(Concrete follow-up actions, not just observations.)
-- [ ] Task one (owner, deadline)
-- [ ] Task two
-
----
-
-# References
-- Related experiments: [link]
-- Protocol used: [link]
-"""
-
-        return readme_template
-
     def _create_download_link(self, excel_data, filename):
         """Create download link"""
         b64_data = base64.b64encode(excel_data).decode()
 
         return f"""
-        <div style="padding: 12px; background-color: #d4edda; border: 1px solid #c3e6cb; border-radius: 6px; margin: 10px 0;">  # noqa: E501
+        <div style="padding: 12px; background-color: #d4edda; border: 1px solid #c3e6cb; border-radius: 6px; margin: 10px 0;">
             <div style="display: flex; align-items: center; margin-bottom: 8px;">
                 <span style="font-size: 18px; margin-right: 8px;">📊</span>
                 <strong style="color: #155724;">Excel Ready</strong>
             </div>
             <div style="font-size: 14px; color: #155724; margin-bottom: 10px;">
-                {filename} • {len(self.current_sequence)} processes • Testing: {"On" if self.is_testing_checkbox.value else "Off"}  # noqa: E501
+                {filename} • {len(self.current_sequence)} processes • Testing: {"On" if self.is_testing_checkbox.value else "Off"}
             </div>
-            <a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64_data}"   # noqa: E501
+            <a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64_data}" 
                download="{filename}" 
-               style="display: inline-block; padding: 8px 16px; background-color: #28a745; color: white; text-decoration: none; border-radius: 4px; font-weight: bold; font-size: 14px;">  # noqa: E501
+               style="display: inline-block; padding: 8px 16px; background-color: #28a745; color: white; text-decoration: none; border-radius: 4px; font-weight: bold; font-size: 14px;">
                 📥 Download
-            </a>
-        </div>
-        """
-
-    def _create_readme_download_link(self, readme_content, filename):
-        """Create download link for README file"""
-        b64_data = base64.b64encode(readme_content.encode("utf-8")).decode()
-
-        return f"""
-        <div style="padding: 12px; background-color: #e7f3ff; border: 1px solid #b3d9ff; border-radius: 6px; margin: 10px 0;">  # noqa: E501
-            <div style="display: flex; align-items: center; margin-bottom: 8px;">
-                <span style="font-size: 18px; margin-right: 8px;">📝</span>
-                <strong style="color: #004085;">README Template</strong>
-            </div>
-            <div style="font-size: 14px; color: #004085; margin-bottom: 10px;">
-                {filename} • Experiment documentation template
-            </div>
-            <a href="data:text/markdown;base64,{b64_data}" 
-               download="{filename}" 
-               style="display: inline-block; padding: 8px 16px; background-color: #007bff; color: white; text-decoration: none; border-radius: 4px; font-weight: bold; font-size: 14px;">  # noqa: E501
-                📥 Download README
             </a>
         </div>
         """
@@ -743,9 +1054,9 @@ Process Sequence:
         # Compact header
         header = widgets.HTML(
             value="""
-            <div style="padding: 15px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 8px; margin-bottom: 20px;">  # noqa: E501
+            <div style="padding: 15px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 8px; margin-bottom: 20px;">
                 <h2 style="margin: 0 0 5px 0; font-size: 1.8em;">🧪 Experiment Builder</h2>
-                <p style="margin: 0; font-size: 0.95em; opacity: 0.9;">Configure processes and generate Excel files</p>  # noqa: E501
+                <p style="margin: 0; font-size: 0.95em; opacity: 0.9;">Configure processes and generate Excel files</p>
             </div>
             """
         )
@@ -768,7 +1079,7 @@ Process Sequence:
         sequence_section = widgets.VBox(
             [
                 widgets.HTML(
-                    value="<h4 style='margin: 15px 0 8px 0; color: #2c3e50;'>⚙️ Process Sequence</h4>"  # noqa: E501
+                    value="<h4 style='margin: 15px 0 8px 0; color: #2c3e50;'>⚙️ Process Sequence</h4>"
                 ),
                 self.process_sequence_area,
             ]
@@ -780,11 +1091,10 @@ Process Sequence:
                 widgets.HTML(
                     value="<h4 style='margin: 15px 0 8px 0; color: #2c3e50;'>📊 Generate</h4>"
                 ),
-                widgets.VBox(
-                    [self.is_testing_checkbox, self.include_readme_checkbox],
+                widgets.HBox(
+                    [self.is_testing_checkbox, self.generate_button],
                     layout=widgets.Layout(margin="0 0 10px 0"),
                 ),
-                widgets.HBox([self.generate_button], layout=widgets.Layout(margin="0 0 10px 0")),
                 self.download_area,
             ]
         )

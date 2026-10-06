@@ -3,22 +3,31 @@ Plot Manager for the Design of Experiments application.
 All visualization functions and plot generation using plotly and matplotlib.
 """
 
-import logging
 import warnings
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from data_manager import Variable, VariableType
-from plotly.subplots import make_subplots
-from scipy.spatial.distance import pdist
-from utils import ValidationUtils
 
 warnings.filterwarnings("ignore")
 
-logger = logging.getLogger(__name__)
+# Plotting libraries
+import plotly.express as px
+import plotly.figure_factory as ff
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+# Optional matplotlib for some plots
+try:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
+from data_manager import Variable, VariableType
+from utils import ValidationUtils
 
 
 class PlotManager:
@@ -90,11 +99,11 @@ class PlotManager:
                     plot_data, variables, algorithm=algorithm, **kwargs
                 )
             else:
-                logger.warning("Unknown plot type: %s", plot_type)
+                print(f"Unknown plot type: {plot_type}")
                 return None
 
         except Exception as e:
-            logger.error("Error creating plot: %s", e)
+            print(f"Error creating plot: {str(e)}")
             return None
 
     def create_scatter_matrix(
@@ -102,6 +111,7 @@ class PlotManager:
     ) -> go.Figure:
         """Create a scatter plot matrix (SPLOM) for all variable pairs."""
         algorithm = kwargs.get("algorithm", "")
+        color_by = kwargs.get("color_by", None)
         numeric_vars = [
             var for var in variables if var.type in [VariableType.CONTINUOUS, VariableType.DISCRETE]
         ]
@@ -116,6 +126,11 @@ class PlotManager:
         # Convert to numeric
         for col in numeric_columns:
             splom_data[col] = pd.to_numeric(splom_data[col], errors="coerce")
+
+        # Color mapping
+        color_col = None
+        if color_by and color_by in data.columns:
+            color_col = data[color_by]
 
         # Create SPLOM
         fig = go.Figure(
@@ -545,6 +560,8 @@ class PlotManager:
 
     def _calculate_pairwise_distances(self, points: np.ndarray) -> np.ndarray:
         """Calculate all pairwise distances between points."""
+        from scipy.spatial.distance import pdist
+
         if len(points) < 2:
             return np.array([])
 

@@ -1,12 +1,9 @@
-import logging
 from datetime import datetime
 
 from openpyxl import Workbook
 from sheet_data_entry_guide import add_guide_sheet
 from sheet_experiment import add_experiment_sheet
 from sheet_how_to_cite import add_citation_sheet
-
-logger = logging.getLogger(__name__)
 
 
 class ExperimentExcelBuilder:
@@ -25,4 +22,4 @@ class ExperimentExcelBuilder:
             current_date = datetime.now().strftime("%Y%m%d")
             filename = f"{current_date}_experiment_file.xlsx"
         self.workbook.save(filename)
-        logger.info("File saved as: %s", filename)
+        print(f"File saved as: {filename}")

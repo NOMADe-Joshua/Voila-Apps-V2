@@ -1,18 +1,17 @@
 """Bootstrap run at the top of every app notebook, before any app import.
 
 Applies this deployment's environment (Oasis URL, outbound proxy, per-app
-overrides), then installs hysprint_utils from shared/. The ordering is not
-cosmetic: hysprint_utils.config reads HYSPRINT_URL_BASE at import time, and
+overrides), then installs perotf_utils from shared/. The ordering is not
+cosmetic: perotf_utils.config reads PEROTF_URL_BASE at import time, and
 pip reaches PyPI for build dependencies, so both need the environment in
 place before they run.
 
-Overrides are opt-in. The one built-in default is the HZB outbound proxy for
-the HZB SE Oasis (see HZB_SE_PROXY); every other deployment gets nothing it
-did not ask for. A deployment that needs overrides creates
-oasis_local_config.py next to this file (gitignored, same pattern as
-secrets.py) assigning plain uppercase strings:
+Overrides are opt-in; without them every app talks to the server configured
+in shared/perotf_utils/config.py and no proxy is applied. A deployment that
+needs overrides creates oasis_local_config.py next to this file (gitignored,
+same pattern as secrets.py) assigning plain uppercase strings:
 
-    HYSPRINT_URL_BASE = "https://nomad-ce-ame.helmholtz-berlin.de"
+    PEROTF_URL_BASE = "https://nomad.example.org"
     HTTP_PROXY = "http://proxy.example.org:3128"
 
 Every uppercase string it defines is exported as an environment variable of
@@ -48,14 +47,6 @@ REPO_ROOT = Path(__file__).resolve().parent
 
 PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
 
-# The HZB SE Oasis sits behind the HZB outbound proxy, so its containers cannot
-# reach PyPI, GitHub or the Oasis itself without it. Applied only while the
-# configured Oasis is the HZB SE one and nothing else has set a proxy; any
-# other deployment is left alone. Opt out with `HTTP_PROXY = ""` and
-# `HTTPS_PROXY = ""` in oasis_local_config.py.
-HZB_SE_URL_BASE = "https://nomad-hzb-se.helmholtz-berlin.de"
-HZB_SE_PROXY = "http://proxy.csn29.bessy.de:3128"
-
 
 def _load_local_config() -> dict[str, str]:
     """Return the uppercase string assignments in oasis_local_config.py, if any."""
@@ -75,9 +66,8 @@ def _load_local_config() -> dict[str, str]:
 def _apply_config_env(config: dict[str, str]) -> None:
     """Export every non-proxy override that the container has not already set.
 
-    Membership, not truthiness: an override deliberately set to "" (the way
-    App_dashboard's Projects cards are opted out of) has to survive as an
-    empty string rather than being skipped as falsy.
+    Membership, not truthiness: an override deliberately set to "" has to
+    survive as an empty string rather than being skipped as falsy.
     """
     for key, value in config.items():
         if key in PROXY_KEYS or key in os.environ:
@@ -86,13 +76,9 @@ def _apply_config_env(config: dict[str, str]) -> None:
 
 
 def _apply_proxy_env(config: dict[str, str]) -> None:
+    """Apply HTTP_PROXY/HTTPS_PROXY/NO_PROXY from oasis_local_config.py, if it sets any."""
     if os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY"):
         return
-
-    # _apply_config_env has already exported any HYSPRINT_URL_BASE override.
-    uses_hzb_se = os.environ.get("HYSPRINT_URL_BASE", HZB_SE_URL_BASE) == HZB_SE_URL_BASE
-    if uses_hzb_se and "HTTP_PROXY" not in config and "HTTPS_PROXY" not in config:
-        config = {**config, "HTTP_PROXY": HZB_SE_PROXY, "HTTPS_PROXY": HZB_SE_PROXY}
 
     http_proxy = config.get("HTTP_PROXY")
     https_proxy = config.get("HTTPS_PROXY")
@@ -108,13 +94,12 @@ def _apply_proxy_env(config: dict[str, str]) -> None:
     if no_proxy is None:
         # Loopback only. The Oasis host is deliberately NOT excluded: a
         # container that needs a proxy at all usually has no direct route to
-        # anything, in-house hosts included - CE-AME answers a direct call to
-        # its own Oasis with "Errno 113 No route to host". A deployment whose
-        # Oasis really is directly reachable sets NO_PROXY explicitly.
+        # anything, in-house hosts included. A deployment whose Oasis really
+        # is directly reachable sets NO_PROXY explicitly.
         no_proxy = "localhost,127.0.0.1"
     os.environ["NO_PROXY"] = no_proxy
 
-    logger.info("Applied local proxy configuration: %s", os.environ["HTTPS_PROXY"])
+    logger.info("Applied local proxy configuration: %s", https_proxy or http_proxy)
 
 
 def _build_isolation_args() -> list[str]:
@@ -124,8 +109,7 @@ def _build_isolation_args() -> list[str]:
     throwaway environment on every install, even when the kernel already has
     it. A container with no route to PyPI then fails to build shared/ at all
     ("Network is unreachable ... No matching distribution found for
-    hatchling"), which is how an Oasis update that cut outbound access took
-    every app down. Building against the local hatchling needs no network as
+    hatchling"). Building against the local hatchling needs no network as
     long as the runtime dependencies are already present.
     """
     if importlib.util.find_spec("hatchling") is not None:
@@ -160,10 +144,10 @@ def _pip_install(target: Path) -> tuple[int, str]:
     return result.returncode, output
 
 
-# hysprint-utils' own runtime dependencies (shared/pyproject.toml). If pip
+# perotf-utils' own runtime dependencies (shared/pyproject.toml). If pip
 # could not install shared/, these must already be in the image for the
 # sys.path fallback below to be usable.
-SHARED_RUNTIME_MODULES = ("hysprint_utils", "requests", "pandas", "plotly")
+SHARED_RUNTIME_MODULES = ("perotf_utils", "requests", "pandas", "plotly")
 
 
 def _install_shared() -> None:
@@ -172,10 +156,9 @@ def _install_shared() -> None:
 
     # A fresh kernel already ran site.py before this install happened, so it
     # won't pick up the newly installed package on its own until restarted.
-    # Adding shared/ to sys.path directly makes THIS kernel see hysprint_utils
-    # immediately, without needing a second run. Confirmed necessary in
-    # App_dashboard (issue with Voila needing "to be run twice"); a deliberate
-    # exception to CLAUDE.md rule 8, not a violation to clean up.
+    # Adding shared/ to sys.path directly makes THIS kernel see perotf_utils
+    # immediately, without needing a second run. A deliberate exception to
+    # CLAUDE.md rule 8, not a violation to clean up.
     shared_str = str(shared)
     if shared_str not in sys.path:
         sys.path.insert(0, shared_str)
@@ -187,7 +170,7 @@ def _install_shared() -> None:
 
     # The sys.path entry above is what this kernel actually imports from, so a
     # failed install (typically no route to PyPI) only matters if something
-    # hysprint_utils needs is genuinely missing. Fatal only in that case.
+    # perotf_utils needs is genuinely missing. Fatal only in that case.
     missing = [name for name in SHARED_RUNTIME_MODULES if importlib.util.find_spec(name) is None]
     if not missing:
         logger.warning(
@@ -212,10 +195,10 @@ def _install_shared() -> None:
 def _silence_import_banners() -> None:
     """Keep what libraries print while being imported out of the app's UI.
 
-    Several third-party packages greet stdout at import time - insitu_analyser
-    pulls in INSIGHT, which prints a multi-line banner (version, licence
-    status, plot style, backend). Under Voila that lands above the app itself,
-    where it reads as an error to anyone who does not recognise it.
+    Some third-party packages greet stdout at import time with a multi-line
+    banner (version, licence status, plot style, backend). Under Voila that
+    lands above the app itself, where it reads as an error to anyone who does
+    not recognise it.
 
     Cell 0 has returned by the time an app's imports run, so this cannot be a
     `with` block: it replaces builtins.__import__ for the rest of the kernel's
@@ -224,10 +207,10 @@ def _silence_import_banners() -> None:
 
     Deliberately narrow: stderr is untouched (warnings still surface), runtime
     output is untouched, and an import of an already-imported module takes a
-    fast path. Set HYSPRINT_KEEP_IMPORT_OUTPUT=1 to turn the whole thing off
+    fast path. Set PEROTF_KEEP_IMPORT_OUTPUT=1 to turn the whole thing off
     when debugging an import.
     """
-    if os.environ.get("HYSPRINT_KEEP_IMPORT_OUTPUT"):
+    if os.environ.get("PEROTF_KEEP_IMPORT_OUTPUT"):
         return
 
     real_import = builtins.__import__
@@ -261,7 +244,7 @@ def _app_install_marker(app_dir: Path, pyproject: Path) -> Path:
     reinstalls, while an unchanged app never pays for pip twice.
     """
     digest = hashlib.sha256(str(app_dir).encode() + pyproject.read_bytes()).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / f"hysprint-bootstrap-{digest}.done"
+    return Path(tempfile.gettempdir()) / f"perotf-bootstrap-{digest}.done"
 
 
 def _install_app() -> None:
@@ -269,14 +252,14 @@ def _install_app() -> None:
 
     The cwd is the notebook's own directory, so this installs the app the
     notebook belongs to. Without it an app's pyproject.toml is inert at
-    runtime: nothing on the Oasis ever installs it, which is why ISA_Previewer
-    failed with ModuleNotFoundError for insitu_analyser on a fresh container
-    while the pin sat in its dependency list all along.
+    runtime: nothing on the Oasis ever installs it, so a dependency missing
+    from the NORTH image would fail with ModuleNotFoundError although it sits
+    in the app's dependency list.
 
     Deliberately non-fatal, unlike the shared install. Most apps need nothing
-    beyond what the NORTH image already provides, and until now none of them
-    were installed at all - so a pip failure here (no network, an unreachable
-    git host) must not take down an app that would otherwise have run fine.
+    beyond what the NORTH image already provides, so a pip failure here (no
+    network, an unreachable git host) must not take down an app that would
+    otherwise have run fine.
     """
     app_dir = Path.cwd()
     pyproject = app_dir / "pyproject.toml"

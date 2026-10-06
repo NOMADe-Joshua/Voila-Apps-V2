@@ -177,7 +177,6 @@ cython_debug/
 *.csv
 #*.txt
 !apps/Hansen_green_calculator/db.csv
-!uploads/analysis-tools-mr60amaQRZ-Ta21fXdf64Q/Excel_creator/templates/process_templates.json
 secrets.py
 # The active per-deployment config, plus any parked variants
 # (oasis_local_config.<oasis>.py). Only the exact name is read by
@@ -198,3 +197,20 @@ output/**/*.json
 *.npz
 *.mat
 *.nc
+
+# graphify: only the report is tracked, the graph itself is rebuilt locally
+graphify-out/cache/
+graphify-out/graph.html
+graphify-out/graph.json
+graphify-out/manifest.json
+graphify-out/.graphify_labels.json
+graphify-out/*/*.json
+graphify-out/.graphify_python
+graphify-out/.graphify_root
+graphify-out/cost.json
+
+# Written at runtime by apps/JV-Analysis (cached pptxgenjs bundle)
+.pptxgen_cache.js
+
+# Machine-specific Claude Code settings (graphify hooks with local paths)
+.claude/settings.local.json

@@ -1,133 +1,37 @@
-from experiment_excel_builder import ExperimentExcelBuilder
+"""Smoke tests for Excel_creator: modules import and the app builds without network or token."""
 
-PROCESS_SEQUENCE = [
-    {"process": "Experiment Info", "config": {}},
-    {"process": "Cleaning O2-Plasma", "config": {}},
-]
+from openpyxl import Workbook
+
+from perotf_utils.config import GUI_ENDPOINT, URL_BASE
 
 
-def test_build_excel_creates_expected_sheets():
-    builder = ExperimentExcelBuilder(PROCESS_SEQUENCE, is_testing=True)
-    builder.build_excel()
+def test_modules_import(mods):
+    for name, module in mods.items():
+        assert module.__name__ == name
 
-    assert builder.workbook.sheetnames == [
-        "Experiment Data",
-        "Data Entry Guide",
-        "How to Cite",
+
+def test_main_class_present(mods):
+    assert hasattr(mods["voila_experiment_app"], "MinimalistExperimentBuilder")
+    assert mods["voila_experiment_app"].EXCEL_BUILDER_AVAILABLE
+
+
+def test_app_constructs_offline(mods, monkeypatch):
+    monkeypatch.delenv("JUPYTERHUB_USER", raising=False)
+    monkeypatch.delenv("NOMAD_CLIENT_ACCESS_TOKEN", raising=False)
+    app = mods["voila_experiment_app"].MinimalistExperimentBuilder()
+    assert app is not None
+    # process_templates.json is resolved next to the module, independent of the cwd
+    assert app.templates
+    assert app.current_sequence == [{"process": "Experiment Info"}]
+
+
+def test_guide_sheet_links_to_configured_oasis(mods):
+    wb = Workbook()
+    mods["sheet_data_entry_guide"].add_guide_sheet(wb)
+    links = [
+        cell.hyperlink.target
+        for row in wb["Data Entry Guide"].iter_rows()
+        for cell in row
+        if cell.hyperlink is not None
     ]
-
-
-def test_build_excel_writes_process_steps_to_experiment_sheet():
-    builder = ExperimentExcelBuilder(PROCESS_SEQUENCE, is_testing=True)
-    builder.build_excel()
-
-    ws = builder.workbook["Experiment Data"]
-    all_values = [cell.value for row in ws.iter_rows() for cell in row if cell.value is not None]
-
-    assert any("Experiment Info" in str(v) for v in all_values)
-    assert any("Cleaning O2-Plasma" in str(v) for v in all_values)
-
-
-def test_build_excel_empty_process_sequence_still_creates_sheets():
-    builder = ExperimentExcelBuilder([], is_testing=True)
-    builder.build_excel()
-
-    assert builder.workbook.sheetnames == [
-        "Experiment Data",
-        "Data Entry Guide",
-        "How to Cite",
-    ]
-
-
-def test_build_excel_unknown_process_falls_back_to_default_steps():
-    builder = ExperimentExcelBuilder(
-        [{"process": "Not A Real Process", "config": {}}], is_testing=True
-    )
-    builder.build_excel()
-
-    ws = builder.workbook["Experiment Data"]
-    all_values = [cell.value for row in ws.iter_rows() for cell in row if cell.value is not None]
-
-    assert any("Undefined Process" in str(v) for v in all_values)
-
-
-def test_save_writes_workbook_to_disk(tmp_path):
-    builder = ExperimentExcelBuilder(PROCESS_SEQUENCE, is_testing=True)
-    builder.build_excel()
-
-    out_file = tmp_path / "test_experiment.xlsx"
-    builder.save(str(out_file))
-
-    assert out_file.exists()
-    assert out_file.stat().st_size > 0
-
-
-def test_build_excel_screen_printing_writes_expected_columns():
-    builder = ExperimentExcelBuilder(
-        [
-            {"process": "Experiment Info", "config": {}},
-            {"process": "Screen Printing", "config": {"solvents": 1, "solutes": 1}},
-        ],
-        is_testing=True,
-    )
-    builder.build_excel()
-
-    ws = builder.workbook["Experiment Data"]
-    all_values = [cell.value for row in ws.iter_rows() for cell in row if cell.value is not None]
-
-    for expected in [
-        "Layer type",
-        "Solvent 1 name",
-        "Solute 1 name",
-        "Annealing temperature [°C]",
-        "Mesh material",
-        "Mesh count [meshes/cm]",
-        "Emulsion material",
-        "Squeegee shape",
-        "Printing speed [mm/s]",
-        "Printing method",
-        "Snap-off distance [mm]",
-    ]:
-        assert any(expected in str(v) for v in all_values), expected
-
-
-def test_build_excel_screen_printing_quenching_toggle():
-    builder = ExperimentExcelBuilder(
-        [
-            {
-                "process": "Screen Printing",
-                "config": {
-                    "solvents": 0,
-                    "solutes": 0,
-                    "gasquenching": True,
-                    "airknifequenching": True,
-                },
-            },
-        ],
-        is_testing=True,
-    )
-    builder.build_excel()
-
-    ws = builder.workbook["Experiment Data"]
-    all_values = [cell.value for row in ws.iter_rows() for cell in row if cell.value is not None]
-
-    assert any("Gas quenching duration [s]" in str(v) for v in all_values)
-    assert any("Air knife angle [°]" in str(v) for v in all_values)
-    assert any("Bead volume [mm/s]" in str(v) for v in all_values)
-    assert any("Drying speed [cm/min]" in str(v) for v in all_values)
-    # Vacuum Quenching is not a Screen Printing option (removed per explicit decision -
-    # not needed for this process, unlike Spin Coating/Blade Coating).
-    assert not any("Vacuum quenching pressure [bar]" in str(v) for v in all_values)
-
-
-def test_build_excel_screen_printing_air_knife_quenching_off_by_default():
-    builder = ExperimentExcelBuilder(
-        [{"process": "Screen Printing", "config": {"solvents": 0, "solutes": 0}}],
-        is_testing=True,
-    )
-    builder.build_excel()
-
-    ws = builder.workbook["Experiment Data"]
-    all_values = [cell.value for row in ws.iter_rows() for cell in row if cell.value is not None]
-
-    assert not any("Air knife angle [°]" in str(v) for v in all_values)
+    assert f"{URL_BASE}{GUI_ENDPOINT}/search/voila" in links

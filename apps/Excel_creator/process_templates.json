@@ -1,0 +1,202 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "description": "Process templates for laboratory automation",
+    "last_updated": "2025-06-16"
+  },
+  "templates": {
+    "empty_template": {
+      "name": "Empty Template",
+      "description": "Start with just Experiment Info",
+      "category": "Basic",
+      "process_sequence": [
+        {"process": "Experiment Info"}
+      ]
+    },
+    "Spinbot": {
+      "name": "Spinbot",
+      "description": "Joshua E and Daniel B Spinbot process",
+      "category": "Spin Coating",
+      "researcher": "Joshua Esteves",
+      "process_sequence": [
+        {"process": "Experiment Info"},
+        {"process": "Cleaning UV-Ozone", "config": {"solvents": 2}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 2, "solutes": 5, "spinsteps": 1, "antisolvent": true}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 2, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"},
+        {"process": "ALD"},
+        {"process": "Evaporation"}
+      ]
+    },
+    "CSS1": {
+      "name": "CSS Organic",
+      "description": "Standard Organic CSS",
+      "category": "Close Space Sublimation Organic",
+      "researcher": "Joshua Damm",
+      "process_sequence": [
+        {"process": "Experiment Info"},
+        {"process": "Cleaning O2-Plasma", "config": {"solvents": 2}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 0, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Seq-Evaporation", "config": {"materials": 2}},
+        {"process": "Close Space Sublimation", "config": {"materials": 1, "milling": true, "mixing_ratio": false}},
+        {"process": "Annealing"},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 0, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Seq-Evaporation", "config": {"materials": 2}},
+        {"process": "Evaporation"}
+      ]
+    },
+    "Lamination": {
+      "name": "Lamination",
+      "description": "Standard Lamination Process",
+      "category": "Lamination",
+      "researcher": "Hendrik Leutz",
+      "process_sequence": [
+        {"process": "Experiment Info"},
+        {"process": "Cleaning UV-Ozone", "config": {"solvents": 2}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 2, "solutes": 5, "spinsteps": 2, "antisolvent": true}},
+        {"process": "Lamination"},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"}
+      ]
+    },
+    "PixdroSJ": {
+      "name": "Pixdro SJ",
+      "description": "Standard Pixdro Process",
+      "category": "Inkjet Printing",
+      "researcher": "Theresa Küchle",
+      "process_sequence": [
+        {"process": "Experiment Info"},
+        {"process": "Cleaning UV-Ozone", "config": {"solvents": 3}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 0, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Seq-Evaporation", "config": {"materials": 2}},
+        {"process": "Inkjet Printing", "config": {"solvents": 2, "solutes": 3, "pixORnotion": "Pixdro", "Wf Number of Pulses": 1}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 2, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Seq-Evaporation", "config": {"materials": 2}},
+        {"process": "Evaporation"}
+      ] 
+    },
+    "PixdroTandem": {
+      "name": "Pixdro Tandem",
+      "description": "Standard Pixdro Tandem Process",
+      "category": "Inkjet Printing",
+      "researcher": "Theresa Küchle",
+      "process_sequence": [
+        {"process": "Experiment Info"},
+        {"process": "Evaporation"},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 0, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 0, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Cleaning O2-Plasma", "config": {"solvents": 0}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 0, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Seq-Evaporation", "config": {"materials": 2}},
+        {"process": "Inkjet Printing", "config": {"solvents": 2, "solutes": 3, "pixORnotion": "Pixdro", "Wf Number of Pulses": 1}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 2, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Evaporation"},
+        {"process": "ALD"},
+        {"process": "Sputtering"},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"}
+      ]
+    },
+    "2TTandem": {
+      "name": "sol 2step Tandem",
+      "description": "2T Tandem Hybrid",
+      "category": "Hybrid Tandem",
+      "researcher": "Ronja Pappenberger",
+      "process_sequence": [
+        {"process": "Experiment Info"},
+        {"process": "Multijunction Info"},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Evaporation"},
+        {"process": "Sputtering"},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 2, "solutes": 4, "spinsteps": 2, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 5, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 0, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 2, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"},
+        {"process": "ALD"},
+        {"process": "Sputtering"},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"}
+      ]
+    },
+    "Hybrid": {
+      "name": "Hybrid SJ",
+      "description": "Hybrid Process",
+      "category": "Hybrid",
+      "researcher": "Ronja Pappenberger",
+      "process_sequence": [
+        {"process": "Experiment Info"},
+        {"process": "Cleaning O2-Plasma", "config": {"solvents": 3}},
+        {"process": "Sputtering"},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 0, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Co-Evaporation", "config": {"materials": 2}},
+        {"process": "Seq-Evaporation", "config": {"materials": 2}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 3, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 2, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"}
+      ]
+    },
+    "HybridTandem": {
+      "name": "Hybrid Tandem",
+      "description": "Hybrid Tandem Process",
+      "category": "Multijunction Tandem",
+      "researcher": "Ronja Pappenberger",
+      "process_sequence": [
+        {"process": "Experiment Info"},
+        {"process": "Multijunction Info"},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Evaporation"},
+        {"process": "Sputtering"},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 0, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Seq-Evaporation", "config": {"materials": 2}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 3, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 2, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"},
+        {"process": "ALD"},
+        {"process": "Sputtering"},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"}
+      ]
+    },
+    "SJ2StepStandard": {
+      "name": "sol 2step SJ",
+      "description": "Single Junction 2-Step Standard process - 12 steps",
+      "category": "Single Junction",
+      "researcher": "Ronja Pappenberger",
+      "process_sequence": [
+        {"process": "Experiment Info"},
+        {"process": "Cleaning O2-Plasma", "config": {"solvents": 3}},
+        {"process": "Sputtering"},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 2, "solutes": 4, "spinsteps": 2, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 5, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 0, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 2, "spinsteps": 1, "antisolvent": false}},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"},
+        {"process": "Evaporation"}
+      ]
+    }
+  }
+}

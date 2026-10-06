@@ -1,29 +1,27 @@
+[project]
+name = "jv-analysis"
+version = "6.0.0"
+description = "Interactive JV curve analysis dashboard for NOMAD Oasis measurement batches"
+requires-python = ">=3.10"
+dependencies = [
+    "perotf-utils",
+    "ipython>=8.0",
+    "ipywidgets>=8.0",
+    "kaleido>=0.2.1",
+    "matplotlib>=3.6",
+    "numpy>=1.23",
+    "openpyxl>=3.1",
+    "pandas>=1.5",
+    "plotly>=5.0",
+    "requests>=2.28",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[project]
-name = "jv-analysis"
-version = "5.3.1"
-description = "JV Analysis app for HySPRINT NOMAD Oasis"
-requires-python = ">=3.10"
-dependencies = [
-    "hysprint-utils",
-    "pydantic>=2.0",
-    "pandas",
-    "numpy",
-    "plotly",
-    "ipywidgets",
-    "ipython",
-    "notebook",
-    "voila",
-    "natsort",
-    "requests",
-    "openpyxl",
-]
+[tool.hatch.build.targets.wheel]
+packages = ["."]
 
 [tool.hatch.metadata]
 allow-direct-references = true
-
-[tool.hatch.build.targets.wheel]
-packages = ["."]

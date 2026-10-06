@@ -1,14 +1,14 @@
 [project]
 name = "wetting-envelope"
-version = "0.1.0"
-description = "Interactive wetting envelope plotter (Owens-Wendt model)"
+version = "1.0.0"
+description = "Wetting envelope plots from surface energy components (Owens-Wendt)"
 requires-python = ">=3.10"
 dependencies = [
+    "perotf-utils",
+    "ipython>=8.0",
     "ipywidgets>=8.0",
-    "plotly>=5.0",
+    "matplotlib>=3.5",
     "numpy>=1.24",
-    "pydantic>=2.0",
-    "hysprint-utils",
 ]
 
 [build-system]

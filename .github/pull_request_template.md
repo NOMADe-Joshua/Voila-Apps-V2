@@ -9,6 +9,6 @@ Fixes #
 - [ ] `ruff check` and `ruff format` are clean on touched files
 - [ ] Tests updated/added under `tests/<app_name>/` if behavior changed
 - [ ] If this is a user-visible change to an app, its `pyproject.toml`
-      `version` was bumped (patch/minor/major per SemVer) — see
+      `version` was bumped (patch/minor/major per SemVer), see
       `CONTRIBUTING.md`
-- [ ] No `hysprint_utils` code was duplicated or modified without prior sign-off
+- [ ] No `perotf_utils` code was duplicated, and changes to `shared/` were agreed beforehand

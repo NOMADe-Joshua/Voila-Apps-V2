@@ -22,7 +22,7 @@ cd "$REPO_ROOT"
 git config core.hooksPath scripts/git-hooks
 
 PROFILE="$HOME/.bashrc"
-MARKER="# nomad_voila: keep Learning/ pristine on git pull"
+MARKER="# perotf_voila: keep Learning/ pristine on git pull"
 SOURCE_LINE=". \"$REPO_ROOT/scripts/git-pull-safe.sh\""
 
 if [ -f "$PROFILE" ] && grep -qF "$MARKER" "$PROFILE"; then

@@ -1,14 +1,18 @@
 """
-Generate test fixtures by fetching real data from NOMAD Oasis.
+Generate test fixtures by fetching real data from the NOMAD Oasis.
 
 Usage:
     python scripts/generate_fixtures.py \\
-        --url https://nomad-hzb-se.helmholtz-berlin.de/nomad-oasis/api/v1 \\
         --token YOUR_TOKEN \\
         --batch BATCH_ID \\
-        --app TRPL_Analysis
+        --app JV-Analysis
 
-Writes: tests/<app>/fixtures/api_responses.json
+--url defaults to URL_BASE + API_ENDPOINT from perotf_utils.config, i.e. the Oasis this
+repo is configured for; pass it only to fetch from a different server. The NOMAD entry
+type queried for each app comes from perotf_utils.config.ENTRY_TYPES.
+
+Writes: tests/<app>/fixtures/api_responses.json, shaped
+    {"sample_ids": [...], "descriptions": {lab_id: text}, "measurements": {lab_id: [...]}}
 """
 
 import argparse
@@ -18,74 +22,60 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
 
-
-def _fetch_trpl(url, token, batch_ids):
-    from hysprint_utils.api_calls import get_all_eqe, get_ids_in_batch, get_sample_description
-
-    sample_ids = list(get_ids_in_batch(url, token, batch_ids))
-    descriptions = get_sample_description(url, token, sample_ids)
-    raw = get_all_eqe(url, token, sample_ids, "HySprint_TimeResolvedPhotoluminescence")
-    return {"sample_ids": sample_ids, "descriptions": descriptions, "measurements": raw}
+from perotf_utils.config import API_ENDPOINT, ENTRY_TYPES, URL_BASE  # noqa: E402
 
 
 def _fetch_xrd(url, token, batch_ids):
-    from hysprint_utils.api_calls import get_all_eqe, get_ids_in_batch, get_sample_description
+    from perotf_utils.api_calls import get_all_xrd, get_ids_in_batch, get_sample_description
 
     sample_ids = list(get_ids_in_batch(url, token, batch_ids))
     descriptions = get_sample_description(url, token, sample_ids)
-    raw = get_all_eqe(url, token, sample_ids, "HySprint_XRD_XY")
-    return {"sample_ids": sample_ids, "descriptions": descriptions, "measurements": raw}
-
-
-def _fetch_nmr(url, token, batch_ids):
-    from hysprint_utils.api_calls import get_all_eqe, get_ids_in_batch, get_sample_description
-
-    sample_ids = list(get_ids_in_batch(url, token, batch_ids))
-    descriptions = get_sample_description(url, token, sample_ids)
-    raw = get_all_eqe(url, token, sample_ids, "HySprint_Simple_NMR")
+    raw = get_all_xrd(url, token, sample_ids, ENTRY_TYPES["xrd"])
     return {"sample_ids": sample_ids, "descriptions": descriptions, "measurements": raw}
 
 
 def _fetch_eqe(url, token, batch_ids):
-    from hysprint_utils.api_calls import get_all_eqe, get_ids_in_batch, get_sample_description
+    from perotf_utils.api_calls import get_all_eqe, get_ids_in_batch, get_sample_description
 
     sample_ids = list(get_ids_in_batch(url, token, batch_ids))
     descriptions = get_sample_description(url, token, sample_ids)
-    raw = get_all_eqe(url, token, sample_ids, "HySprint_EQEmeasurement")
+    # EQE_Analysis reads both EQE entry types, so the fixture holds both.
+    raw = get_all_eqe(url, token, sample_ids, ENTRY_TYPES["eqe"])
+    gamma = get_all_eqe(url, token, sample_ids, ENTRY_TYPES["eqe_tfl_gammabox"])
+    for lab_id, entries in gamma.items():
+        raw.setdefault(lab_id, []).extend(entries)
     return {"sample_ids": sample_ids, "descriptions": descriptions, "measurements": raw}
 
 
 def _fetch_abspl(url, token, batch_ids):
-    from hysprint_utils.api_calls import get_all_eqe, get_ids_in_batch, get_sample_description
+    from perotf_utils.api_calls import get_all_eqe, get_ids_in_batch, get_sample_description
 
     sample_ids = list(get_ids_in_batch(url, token, batch_ids))
     descriptions = get_sample_description(url, token, sample_ids)
-    raw = get_all_eqe(url, token, sample_ids, "HySprint_AbsPLMeasurement")
+    raw = get_all_eqe(url, token, sample_ids, ENTRY_TYPES["abspl"])
     return {"sample_ids": sample_ids, "descriptions": descriptions, "measurements": raw}
 
 
 def _fetch_jv(url, token, batch_ids):
-    from hysprint_utils.api_calls import get_all_JV, get_ids_in_batch, get_sample_description
+    from perotf_utils.api_calls import get_all_JV, get_ids_in_batch, get_sample_description
 
     sample_ids = list(get_ids_in_batch(url, token, batch_ids))
     descriptions = get_sample_description(url, token, sample_ids)
-    raw = get_all_JV(url, token, sample_ids)
+    raw = get_all_JV(url, token, sample_ids, ENTRY_TYPES["jv"])
     return {"sample_ids": sample_ids, "descriptions": descriptions, "measurements": raw}
 
 
 def _fetch_mppt(url, token, batch_ids):
-    from hysprint_utils.api_calls import get_all_mppt, get_ids_in_batch, get_sample_description
+    from perotf_utils.api_calls import get_all_mppt, get_ids_in_batch, get_sample_description
 
     sample_ids = list(get_ids_in_batch(url, token, batch_ids))
     descriptions = get_sample_description(url, token, sample_ids)
-    raw = get_all_mppt(url, token, sample_ids)
+    raw = get_all_mppt(url, token, sample_ids, ENTRY_TYPES["mppt"])
     return {"sample_ids": sample_ids, "descriptions": descriptions, "measurements": raw}
 
 
 FETCHERS = {
-    "TRPL_Analysis": _fetch_trpl,
-    "XRD_peak_finder": _fetch_xrd,
-    "NMR_Analysis": _fetch_nmr,
+    "XRD_PF": _fetch_xrd,
     "EQE_Analysis": _fetch_eqe,
     "AbsPL_Analysis": _fetch_abspl,
     "JV-Analysis": _fetch_jv,
@@ -115,7 +105,11 @@ def _make_serialisable(obj):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate NOMAD test fixtures")
-    parser.add_argument("--url", required=True, help="NOMAD Oasis API URL")
+    parser.add_argument(
+        "--url",
+        default=f"{URL_BASE}{API_ENDPOINT}",
+        help="NOMAD Oasis API URL (default: URL_BASE + API_ENDPOINT from perotf_utils.config)",
+    )
     parser.add_argument("--token", required=True, help="NOMAD API token")
     parser.add_argument("--batch", required=True, nargs="+", help="Batch ID(s) to fetch data for")
     parser.add_argument(
