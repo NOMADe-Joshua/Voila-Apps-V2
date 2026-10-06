@@ -6,10 +6,11 @@ cosmetic: hysprint_utils.config reads HYSPRINT_URL_BASE at import time, and
 pip reaches PyPI for build dependencies, so both need the environment in
 place before they run.
 
-All of it is opt-in and off by default - the HZB Oasis needs none of it,
-and this file must never hardcode a deployment-specific value. A deployment
-that needs overrides creates oasis_local_config.py next to this file
-(gitignored, same pattern as secrets.py) assigning plain uppercase strings:
+Overrides are opt-in. The one built-in default is the HZB outbound proxy for
+the HZB SE Oasis (see HZB_SE_PROXY); every other deployment gets nothing it
+did not ask for. A deployment that needs overrides creates
+oasis_local_config.py next to this file (gitignored, same pattern as
+secrets.py) assigning plain uppercase strings:
 
     HYSPRINT_URL_BASE = "https://nomad-ce-ame.helmholtz-berlin.de"
     HTTP_PROXY = "http://proxy.example.org:3128"
@@ -47,6 +48,14 @@ REPO_ROOT = Path(__file__).resolve().parent
 
 PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
 
+# The HZB SE Oasis sits behind the HZB outbound proxy, so its containers cannot
+# reach PyPI, GitHub or the Oasis itself without it. Applied only while the
+# configured Oasis is the HZB SE one and nothing else has set a proxy; any
+# other deployment is left alone. Opt out with `HTTP_PROXY = ""` and
+# `HTTPS_PROXY = ""` in oasis_local_config.py.
+HZB_SE_URL_BASE = "https://nomad-hzb-se.helmholtz-berlin.de"
+HZB_SE_PROXY = "http://proxy.csn29.bessy.de:3128"
+
 
 def _load_local_config() -> dict[str, str]:
     """Return the uppercase string assignments in oasis_local_config.py, if any."""
@@ -79,6 +88,11 @@ def _apply_config_env(config: dict[str, str]) -> None:
 def _apply_proxy_env(config: dict[str, str]) -> None:
     if os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY"):
         return
+
+    # _apply_config_env has already exported any HYSPRINT_URL_BASE override.
+    uses_hzb_se = os.environ.get("HYSPRINT_URL_BASE", HZB_SE_URL_BASE) == HZB_SE_URL_BASE
+    if uses_hzb_se and "HTTP_PROXY" not in config and "HTTPS_PROXY" not in config:
+        config = {**config, "HTTP_PROXY": HZB_SE_PROXY, "HTTPS_PROXY": HZB_SE_PROXY}
 
     http_proxy = config.get("HTTP_PROXY")
     https_proxy = config.get("HTTPS_PROXY")

@@ -4,7 +4,7 @@ A suite of web-based analysis and visualization tools for perovskite solar cell
 research, developed by the SE-ALM group at
 [Helmholtz-Zentrum Berlin (HZB)](https://www.helmholtz-berlin.de).
 
-The apps are built around the [NOMAD Oasis](https://nomad-hzb-se.de/nomad-oasis/gui/)
+The apps are built around the [NOMAD Oasis](https://nomad-hzb-se.helmholtz-berlin.de/nomad-oasis/gui/)
 infrastructure and follow FAIR data principles. They cover the full characterization
 workflow: from JV curve analysis and MPPT tracking to EQE, TRPL, XRD, XPS, and more.
 
@@ -42,7 +42,7 @@ workflow: from JV curve analysis and MPPT tracking to EQE, TRPL, XRD, XPS, and m
 
 - Python 3.10 or higher
 - A NOMAD account on the Oasis you point these apps at — defaults to the
-  [HZB SE Oasis](https://nomad-hzb-se.de/nomad-oasis/gui/), see Configuration
+  [HZB SE Oasis](https://nomad-hzb-se.helmholtz-berlin.de/nomad-oasis/gui/), see Configuration
   below to target a different one — (required for any app that reads from or
   writes to NOMAD)
 
