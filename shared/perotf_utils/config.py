@@ -32,6 +32,12 @@ NORTH_ENDPOINT = os.environ.get("PEROTF_NORTH_ENDPOINT", "/nomad-oasis/north")
 ENTRY_TYPES = {
     "batch": "peroTF_Batch",
     "sample": "peroTF_Sample",
+    "substrate": "peroTF_Substrate",
+    # Process classes whose archive steps carry no 'method' value; smart_databaser
+    # recognises them by their m_def suffix instead (nomad_perotf perotf_package.py).
+    "process": "peroTF_Process",
+    "thermal_annealing": "peroTF_ThermalAnnealing",
+    "lamination": "peroTF_Lamination",
     "jv": "peroTF_JVmeasurement",
     "eqe": "peroTF_EQEmeasurement",
     "eqe_tfl_gammabox": "peroTF_TFL_GammaBox_EQEmeasurement",
@@ -45,3 +51,8 @@ ENTRY_TYPES = {
     "layer_deposition": "baseclasses.LayerDeposition",
     "jv_baseclass": "baseclasses.solar_energy.jvmeasurement.JVMeasurement",
 }
+
+# First segment of every sample lab id (Nomad ID) this lab writes, e.g.
+# KIT_<Project_Name>_<Date>_<Batch>_<Subbatch>_<Sample>; the same prefix Excel_creator's
+# example Nomad ID formula uses.
+LAB_ID_PREFIX = "KIT"

@@ -23,6 +23,7 @@ shared/perotf_utils/        # DO NOT DUPLICATE ANYTHING FROM HERE
     config.py               # URL_BASE, API_ENDPOINT, GUI_ENDPOINT, NORTH_ENDPOINT, ENTRY_TYPES: the ONLY place
     api_calls.py, access_token.py, auth_manager.py, auth_ui.py,
     batch_selection.py, error_handler.py, plotting_utils.py, process_handling.py
+    process_specs.py        # smart_databaser's process catalog, see below
 shared/utils.ipynb, shared/log_view.ipynb   # admin notebooks (usage log), not apps
 tests/<AppName>/            # ONE folder per app, at repo root, never inside apps/
     conftest.py
@@ -37,7 +38,8 @@ Two app shapes exist after the migration from the old flat repo
 (`nomad-perotf-jupyter-voila-scripts`):
 
 - **Modular apps** (JV-Analysis, Process_JV_Overview, EQE_Analysis,
-  AbsPL_Analysis, UVVis_Analyzer, XRD_PF, DesignOfExperiments, Excel_creator):
+  AbsPL_Analysis, UVVis_Analyzer, XRD_PF, DesignOfExperiments, Excel_creator,
+  smart_databaser):
   `app.py` plus modules, and a notebook with exactly 3 code cells (bootstrap,
   `log_notebook_usage()`, start the app).
 - **Notebook apps** (all others): the analysis code still lives in the
@@ -91,6 +93,17 @@ Two app shapes exist after the migration from the old flat repo
 8. **Notebooks start with the bootstrap cell** (see gotcha below). Modular
    apps' notebooks have exactly 3 code cells. No `sys.path.append`/`insert`
    anywhere in an app file or notebook; `bootstrap.py` is the one exception.
+   An app that builds on another app's modules (smart_databaser uses
+   Excel_creator's `sheet_experiment`/`experiment_excel_builder`) declares it
+   in its `pyproject.toml` instead:
+   ```toml
+   [tool.perotf]
+   uses-apps = ["Excel_creator"]
+   ```
+   `bootstrap.py` then appends `apps/Excel_creator/` to `sys.path` (after the
+   app's own folder, so same-named modules of the calling app win), and the
+   `app_loader` test fixture does the same. A change to such a shared app module
+   can break the dependent app: run both apps' tests.
 9. **Tests live at `tests/<AppName>/test_<app_name>.py`**, never inside
    `apps/`. A per-app `conftest.py` gets the app's modules through the root
    `app_loader` fixture (`app_loader("JV-Analysis", ["app", "data_manager"])`),
@@ -102,6 +115,24 @@ Two app shapes exist after the migration from the old flat repo
 11. **No regressions.** If making a checklist item pass would break an app's
     currently-working behavior or an already-passing test, stop and flag it;
     don't force the fix through.
+
+## Smart Databaser, Excel_creator and `process_specs.py`
+
+`apps/smart_databaser` (ported from HZB) reads the processing steps of earlier
+NOMAD batches and autofills a new experiment Excel, which it writes through
+Excel_creator's own `sheet_experiment.add_experiment_sheet` /
+`ExperimentExcelBuilder` (declared via `[tool.perotf] uses-apps`). Its process
+catalog is `shared/perotf_utils/process_specs.py`: per process type the Excel
+column labels, test values and the archive path each label is autofilled from
+(paths follow the nomad-baseclasses `map_*` functions that nomad_perotf's
+experiment parser calls). Unlike at HZB, our Excel_creator does NOT read
+`process_specs.py`; the catalog has to mirror the labels `sheet_experiment.py`
+writes. `tests/smart_databaser` checks that for every process type, so a label
+change in Excel_creator fails there: update the catalog in the same change.
+Process classes whose archive steps carry no `method` (generic process, thermal
+annealing incl. CR_/TFL_ variants, lamination) are recognised by their m_def,
+taken from `ENTRY_TYPES`. Only confirm a path against the real `map_<type>`
+function, never guess; mark unconfirmed units `unit_verified: False`.
 
 ## Change management: issues, PRs, versions
 
@@ -201,6 +232,8 @@ binding cell 0 dumps every bootstrap global into the app's UI under Voila.
 - installs **the app's own directory** when the cwd has a `pyproject.toml`
   (once per container, keyed on path + `pyproject.toml` contents; a failure
   only warns).
+- appends the folders of sibling apps listed under `[tool.perotf] uses-apps`
+  in that `pyproject.toml` to `sys.path` (see rule 8).
 - silences import-time stdout banners for the rest of the kernel's life
   (stderr untouched; `PEROTF_KEEP_IMPORT_OUTPUT=1` disables it).
 
@@ -209,10 +242,9 @@ side.
 
 ## Known gaps (tracked, not silently fixed)
 
-- **Notebook apps are still monolithic** (MPPT_Analysis, Data_Overview_Machines,
-  Data_Tools, Diode_Analyzer, Hansen_green_calculator, Peak_Explorer,
-  Perovskite_calculator, SEM_crystal_counter, UVVis_Simulator,
-  Wetting_envelope, XPS-Automated). Next step per app: move the code into
+- **Notebook apps are still monolithic** (MPPT_Analysis,
+  Data_Tools, SEM_crystal_counter, UVVis_Simulator). Next step per app: move
+  the code into
   `app.py` + modules and reduce the notebook to 3 cells, following
   `UNIFICATION_PROMPT.md`.
 - **No app has gone through the full checklist yet**: no Pydantic row models,
@@ -241,15 +273,29 @@ side.
   `shared/perotf_utils/notebook_usage.log` inside the upload; the log contains
   user names and is gitignored. `shared/log_view.ipynb` and `shared/utils.ipynb`
   read it from there.
-- `Learning/04_HandlingJVdata.ipynb` contains a placeholder batch id
-  (`KIT_XXX_YYYYMMDD_BATCH`) that needs a real peroTF batch before it runs.
-- `apps/Wetting_envelope/Untitled.ipynb` is a generator that writes
-  `wetting_envelope_app.ipynb` from a template without the bootstrap cell;
-  re-running it would undo the migration of that notebook.
-- Not migrated from the old repo on purpose (they targeted the HZB server):
-  `File_Uploader`, `Ink_Jet_Absorber_Analysis`, `NMR_Analysis`,
-  `Diode_Analyzer/Osails_version.ipynb`, `Diode_Analyzer/advanced_fitting.ipynb`.
-  They remain in `nomad-perotf-jupyter-voila-scripts`.
+- Not in this repo on purpose; all remain in `nomad-perotf-jupyter-voila-scripts`:
+  - targeted the HZB server: `File_Uploader`, `Ink_Jet_Absorber_Analysis`,
+    `NMR_Analysis`;
+  - never used by the group and never adapted to it (removed after the
+    migration): `Diode_Analyzer`, `XPS-Automated`, `Wetting_envelope`,
+    `Perovskite_calculator` (the latter came with the original HZB scripts and
+    is no longer in HZB's repo either), `Peak_Explorer` (TRPL, not in the
+    ELN), `Data_Overview_Machines`, `Hansen_green_calculator`, and `SEM_crystal_counter`'s crystal counter
+    notebooks (`SEM_Analyzer*.ipynb`, `SEM_bad.ipynb`; only the grain size
+    analysis `image_analysis.ipynb` is kept).
+  - HZB extras dropped from this fork: the `Learning/` tutorials, the
+    `NOMAD_DATA_ACCESS_PROMPT.md` LLM reference with its dashboard section
+    "Build Your Own", and the git hooks that reset `Learning/` on pull.
+- **Smart Databaser is untested against live peroTF data** (no token was
+  available during the port; HZB's live tests were not ported). Most numeric
+  catalog paths are `unit_verified: False`; solvent volume is probably off by
+  1000 (schema ml vs. column uL) and needs checking in the NOMAD GUI before a
+  multiplier is added. Not autofillable because nomad_perotf's parser does not
+  store the data: Laser Scribing (parser branch commented out), Seq-Evaporation
+  (stored as plain evaporation), Multijunction Info, most Lamination columns,
+  Inkjet waveform and gas/vacuum quenching columns. HZB's child-sample `_C-n`
+  ids were dropped (peroTF ids have no such suffix), so the GUI no longer
+  creates child rows.
 - Still open, as at HZB: whether this repo should become an installable NOMAD
   plugin (NORTH tool entry points, Docker images). Nothing of that exists; don't
   scaffold it without explicit sign-off.

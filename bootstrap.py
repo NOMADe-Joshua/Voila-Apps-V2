@@ -35,6 +35,7 @@ import importlib.util
 import io
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -291,10 +292,54 @@ def _install_app() -> None:
         logger.info("could not write the install marker %s", marker)
 
 
+def _sibling_apps(pyproject: Path) -> list[str]:
+    """App folders listed under [tool.perotf] uses-apps in the calling app's pyproject.toml."""
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10
+        tomllib = None
+    text = pyproject.read_text(encoding="utf-8")
+    if tomllib is not None:
+        return list(tomllib.loads(text).get("tool", {}).get("perotf", {}).get("uses-apps", []))
+    match = re.search(r"uses-apps\s*=\s*\[([^\]]*)\]", text)
+    return re.findall(r"[\"']([^\"']+)[\"']", match.group(1)) if match else []
+
+
+def _add_sibling_apps() -> None:
+    """Make modules of sibling apps importable, for apps that build on another app.
+
+    An app declares them in its pyproject.toml:
+
+        [tool.perotf]
+        uses-apps = ["Excel_creator"]
+
+    Each listed apps/<name>/ goes on sys.path right behind the calling app's own folder
+    (the kernel's cwd entry), so the calling app's same-named modules (data_manager,
+    app, ...) still win, but ahead of site-packages: _install_app installs every
+    launched app into site-packages, and a stale installed copy of the sibling must not
+    shadow the repo's current files. Like the shared/ insert above, this is a sanctioned
+    exception to CLAUDE.md rule 8: apps themselves never touch sys.path.
+    """
+    pyproject = Path.cwd() / "pyproject.toml"
+    if not pyproject.exists():
+        return
+    cwd_entries = {"", str(Path.cwd())}
+    position = 1 if sys.path and sys.path[0] in cwd_entries else 0
+    for name in _sibling_apps(pyproject):
+        sibling = REPO_ROOT / "apps" / name
+        if not sibling.is_dir():
+            logger.warning("uses-apps entry %s not found at %s", name, sibling)
+            continue
+        if str(sibling) not in sys.path:
+            sys.path.insert(position, str(sibling))
+            position += 1
+
+
 _local_config = _load_local_config()
 _apply_config_env(_local_config)
 _apply_proxy_env(_local_config)
 _install_shared()
 _install_app()
+_add_sibling_apps()
 _silence_import_banners()
 importlib.invalidate_caches()

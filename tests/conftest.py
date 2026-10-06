@@ -47,6 +47,16 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 _LOADED: dict[tuple[str, tuple[str, ...]], dict] = {}
 
 
+def _sibling_apps(pyproject: Path) -> list[str]:
+    """App folders listed under [tool.perotf] uses-apps (same rule as bootstrap.py)."""
+    if not pyproject.exists():
+        return []
+    import tomllib
+
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    return list(data.get("tool", {}).get("perotf", {}).get("uses-apps", []))
+
+
 def load_app_modules(app_folder: str, module_names: list[str]) -> dict:
     """Import ``module_names`` from ``apps/<app_folder>`` and return them by name.
 
@@ -59,13 +69,18 @@ def load_app_modules(app_folder: str, module_names: list[str]) -> dict:
         return _LOADED[key]
 
     app_dir = APPS_DIR / app_folder
-    local_names = [p.stem for p in app_dir.glob("*.py")]
+    # Sibling apps declared under [tool.perotf] uses-apps go right behind the app's own
+    # folder and ahead of site-packages, like bootstrap.py does, so a stale installed
+    # copy of the sibling app cannot shadow the repo's files.
+    sibling_dirs = [APPS_DIR / name for name in _sibling_apps(app_dir / "pyproject.toml")]
+    local_names = [p.stem for d in [app_dir, *sibling_dirs] for p in d.glob("*.py")]
     displaced = {name: sys.modules.pop(name) for name in local_names if name in sys.modules}
-    sys.path.insert(0, str(app_dir))
+    sys.path[0:0] = [str(app_dir), *(str(d) for d in sibling_dirs)]
     try:
         modules = {name: importlib.import_module(name) for name in module_names}
     finally:
-        sys.path.remove(str(app_dir))
+        for d in [app_dir, *sibling_dirs]:
+            sys.path.remove(str(d))
         for name in local_names:
             sys.modules.pop(name, None)
         sys.modules.update(displaced)

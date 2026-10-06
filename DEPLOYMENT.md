@@ -208,6 +208,12 @@ from cell 0, in this order:
 Step 2 is why `apps/<App>/pyproject.toml` is worth keeping accurate: it is the
 only thing that installs an app's third-party requirements.
 
+An app that reuses another app's modules lists it under `[tool.perotf]
+uses-apps` (the Smart Databaser lists `Excel_creator`). Bootstrap makes that
+folder importable but does not install the other app's dependencies, so the
+calling app's own `dependencies` must cover them (e.g. `openpyxl`). Both apps
+must be in the same upload, which is automatic when the whole repo is uploaded.
+
 **It runs once per container, not once per launch.** On success bootstrap
 writes a marker into the temp directory, keyed on the app's path and the
 contents of its `pyproject.toml`. Editing the dependency list changes the key,

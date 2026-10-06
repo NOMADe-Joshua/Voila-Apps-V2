@@ -176,7 +176,6 @@ cython_debug/
 .pypirc
 *.csv
 #*.txt
-!apps/Hansen_green_calculator/db.csv
 secrets.py
 # The active per-deployment config, plus any parked variants
 # (oasis_local_config.<oasis>.py). Only the exact name is read by
@@ -208,6 +207,8 @@ graphify-out/*/*.json
 graphify-out/.graphify_python
 graphify-out/.graphify_root
 graphify-out/cost.json
+graphify-out/.graphify_labels.json.sig
+graphify-out/20*/
 
 # Written at runtime by apps/JV-Analysis (cached pptxgenjs bundle)
 .pptxgen_cache.js

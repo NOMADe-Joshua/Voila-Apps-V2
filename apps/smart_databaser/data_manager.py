@@ -1,0 +1,2010 @@
+# data_manager.py
+# Zero widget imports. Experiment state model, no-clobber write path, NOMAD live queries +
+# session cache, and (in later implementation steps) Excel build/upload logic.
+
+import io
+import json
+import logging
+import re
+import statistics
+import time
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal
+
+import requests
+from alias_config import resolve_progress_units
+from experiment_excel_builder import ExperimentExcelBuilder
+from openpyxl import Workbook
+from openpyxl.worksheet.worksheet import Worksheet
+from pydantic import BaseModel, Field
+from sheet_experiment import add_experiment_sheet
+
+from perotf_utils.api_calls import (
+    get_all_uploads,
+    get_batch_ids,
+    get_entry_data,
+    get_entryid,
+    get_ids_in_batch,
+    get_processing_steps,
+)
+from perotf_utils.config import ENTRY_TYPES, LAB_ID_PREFIX
+from perotf_utils.process_specs import (
+    ATMOSPHERIC_CONFIG_KEY,  # noqa: F401 (re-exported for gui_components)
+    AVAILABLE_PROCESSES,
+    build_boolean_config_fields,
+    build_configurable_process_types,
+    build_default_config_by_process_type,
+    build_field_paths,
+    build_field_value_multipliers,
+    build_indexed_config_keys,
+    build_material_gated_process_types,
+    build_numeric_config_fields,
+)
+
+logger = logging.getLogger(__name__)
+
+# Process types whose step the experiment parser skips when "Material name" is empty
+# (see perotf_utils.process_specs, "material_gated").
+MATERIAL_GATED_PROCESS_TYPES: set[str] = build_material_gated_process_types()
+
+MATERIAL_FIELD_KEY = "Material name"
+
+# Experiment Info fields that are always derived/computed, never directly edited via
+# ExperimentInfoPanel - "Variation" (matrix-computed), "Nomad ID"/"Sample" (derived at
+# Excel-generation time from sample_number/child_index, see generate_full_workbook),
+# "Subbatch" (derived from each sample's variation Subbatch/variation_group_index, see
+# subbatch_for_sample - product decision: Subbatch is never manually typed, it always
+# matches which variation Subbatch (Sample Setup) a sample belongs to, 1-based).
+EXPERIMENT_INFO_COMPUTED_KEYS = {"Variation", "Nomad ID", "Sample", "Subbatch"}
+
+# Experiment Info fields never sourced from a batch template, even though "Experiment
+# Info" has other autofillable fields (Substrate material, Sample area, ...) - see
+# autofill_experiment_info_from_batch. Date/Project_Name/Batch are per-upload identifiers
+# the user must set fresh for a NEW experiment (copying them would silently mislabel the
+# new experiment as the source one); Subbatch is fully computed (see
+# EXPERIMENT_INFO_COMPUTED_KEYS above), never a field_specs value sourced from anywhere.
+EXPERIMENT_INFO_NEVER_AUTOFILLED = {"Date", "Project_Name", "Batch", "Subbatch"}
+
+# Field keys that get a quick-fill "Today"/"Me" button in gui_components (single source
+# of truth for both the per-field row button and the bulk fill_all_date_and_operator_
+# fields action below - format matches sheet_experiment.py's own make_label examples for
+# each key).
+# "Date" is YYYYMMDD because it is a segment of every sample's Nomad ID (see
+# compute_nomad_id). Excel_creator writes no Datetime column; the entry only matters for a
+# field of that name.
+DATE_FIELD_FORMATS = {"Date": "%Y%m%d", "Datetime": "%d.%m.%Y %H:%M:%S"}
+
+# Batch/Project_Name/Date are baked directly into every sample's Nomad ID (see
+# compute_nomad_id) - if any is empty, the ID scheme embedded in every row of the
+# exported Excel is already broken, whether the file is downloaded or uploaded. See
+# missing_critical_fields / gui_components.create_finish_section's hard gate.
+CRITICAL_EXPERIMENT_INFO_KEYS = ("Batch", "Project_Name", "Date")
+
+# Process catalog - the process types, their config controls and defaults mirror
+# Excel_creator's voila_experiment_app.py and are derived from perotf_utils.process_specs
+# (AVAILABLE_PROCESSES is imported from there directly). The actual field-generation logic
+# (generate_steps_for_process) is NOT duplicated - see generate_header_workbook() below,
+# which calls Excel_creator's own sheet_experiment.py.
+CONFIGURABLE_PROCESS_TYPES: set[str] = build_configurable_process_types()
+
+DEFAULT_CONFIG_BY_PROCESS_TYPE: dict[str, dict] = build_default_config_by_process_type()
+
+# Declarative config-field catalog for the GUI layer: (config_key, label, applicable process
+# types, min, max). Kept as data here so gui_components.py only has to render, not decide.
+NUMERIC_CONFIG_FIELDS = build_numeric_config_fields()
+
+# (config_key, label, applicable process types).
+BOOLEAN_CONFIG_FIELDS = build_boolean_config_fields()
+
+# config_key -> Excel field key(s) whose presence on a source archive step implies that
+# optional block was actually used there - probed by infer_config_from_source_step so a
+# boolean config gets widened to True the same way NUMERIC_CONFIG_FIELDS counts already
+# are (see INDEXED_CONFIG_KEYS). Without this, a source step with real Anti solvent/Gas
+# quenching/Vacuum quenching/Milling data was silently dropped on
+# adopt/replicate, since the target process's config stayed at its all-False default and
+# never gained a field_spec
+# slot for autofill_process_from_batch to write into. Not every BOOLEAN_CONFIG_FIELDS key
+# has a probe yet - those simply never get inferred, same as before this change.
+#
+# IMPORTANT: per process_specs.py, Gas quenching and Vacuum quenching share the same
+# archive "quenching" sub-object and even overlap on some field names ("duration" backs
+# both "Gas quenching duration [s]" AND "Vacuum quenching duration [s]"; same for
+# "pressure") - probing those would set BOTH booleans whenever either one has data. Only
+# each block's own EXCLUSIVE field is used here (confirmed against process_specs.py,
+# not guessed): "Gas" (quenching.gas) for gas quenching, "Vacuum quenching start time [s]"
+# (quenching.start_time) for vacuum quenching.
+BOOLEAN_CONFIG_PROBE_FIELDS: dict[str, tuple[str, ...]] = {
+    "antisolvent": ("Anti solvent name", "Anti solvent volume [ml]"),
+    "gasquenching": ("Gas", "Gas quenching flow rate [ml/s]", "Gas quenching velocity [m/s]"),
+    "vacuumquenching": ("Vacuum quenching start time [s]",),
+    "milling": (
+        "Milling rotation speed [rpm]",
+        "Milling rotation time [min]",
+        "Milling rest time [min]",
+    ),
+}
+
+# ATMOSPHERIC_CONFIG_KEY itself is imported directly above from process_specs (None for
+# peroTF: Excel_creator has no atmospheric block, so there is no checkbox for it).
+
+# Classic Windows-filename-reserved characters. This app derives Nomad IDs
+# (compute_nomad_id) and the output Excel filename (build_experiment_filename) directly
+# from field values, and a stray one of these has caused real problems in the past.
+# Deliberately NOT included: "." (legitimate in decimal values like "1.42"), "@" and
+# accented/umlaut letters (ö/ä/ü/ß, ...) - none of those cause problems anywhere in this
+# app's pipeline (Excel cells, JSON config, the NOMAD HTTP API) since everything already
+# reads/writes UTF-8 throughout. Exempt from this check: the Variation template pattern
+# (VariationTemplatePanel) - "\1"/"\2" syntax legitimately needs a backslash.
+FORBIDDEN_VALUE_CHARACTERS = set('\\/:*?"<>|')
+
+
+def find_forbidden_characters(value: Any) -> list[str]:
+    """Distinct forbidden characters (see FORBIDDEN_VALUE_CHARACTERS) present in value,
+    in first-seen order - empty list if none or if value isn't a string."""
+    if not isinstance(value, str):
+        return []
+    seen: list[str] = []
+    for char in value:
+        if char in FORBIDDEN_VALUE_CHARACTERS and char not in seen:
+            seen.append(char)
+    return seen
+
+
+def default_config_for(process_type: str) -> dict:
+    return dict(DEFAULT_CONFIG_BY_PROCESS_TYPE.get(process_type, {}))
+
+
+def _is_filled(value: Any) -> bool:
+    return value is not None and value != ""
+
+
+class FieldProvenance(BaseModel):
+    source: Literal["manual", "batch_template", "process_override", "computed"] = "manual"
+    source_batch_id: str | None = None
+    source_sample_id: str | None = None
+
+
+class ProcessFieldSpec(BaseModel):
+    key: str
+    varies: bool = False
+    alias_group: str | None = None
+    value: Any = None
+    provenance: FieldProvenance | None = None
+    is_outlier: bool = False
+    # Per-field opt-out of the completion count/nudge review - distinct from
+    # ProcessInstance.counts_toward_progress() (process-level material-gating). Defaults
+    # to True (today's behavior: every field counts) - the product ask was to let users
+    # exclude fields that "aren't really important" (e.g. Notes, Tool/GB name) from the
+    # completion bar without having to fill them just to make the number look right.
+    required_for_progress: bool = True
+    per_sample_values: dict[int, Any] = Field(default_factory=dict)
+    per_sample_provenance: dict[int, FieldProvenance] = Field(default_factory=dict)
+
+    def is_filled(self) -> bool:
+        if self.varies:
+            return any(_is_filled(v) for v in self.per_sample_values.values())
+        return _is_filled(self.value)
+
+
+class ProcessInstance(BaseModel):
+    process_type: str
+    sequence_index: int
+    config: dict = Field(default_factory=dict)
+    field_specs: dict[str, ProcessFieldSpec] = Field(default_factory=dict)
+    source_override_batch_id: str | None = None
+
+    def is_material_gated(self) -> bool:
+        return self.process_type in MATERIAL_GATED_PROCESS_TYPES
+
+    def counts_toward_progress(self) -> bool:
+        if not self.is_material_gated():
+            return True
+        material_field = self.field_specs.get(MATERIAL_FIELD_KEY)
+        return material_field is not None and material_field.is_filled()
+
+
+class SamplePlan(BaseModel):
+    variation_group_index: int
+    sample_number: int
+    child_count: int = 0
+
+
+class ExperimentState(BaseModel):
+    process_sequence: list[ProcessInstance] = Field(default_factory=list)
+    experiment_info_fields: dict[str, ProcessFieldSpec] = Field(default_factory=dict)
+    samples: list[SamplePlan] = Field(default_factory=list)
+    whole_experiment_template_batch_id: str | None = None
+    # None means "use the automatic field-slug label" (compute_variation_label's
+    # default) - see render_variation_template for the "\1"/"\2"/... syntax when set.
+    variation_template: str | None = None
+
+    def get_process(self, sequence_index: int) -> ProcessInstance:
+        for process in self.process_sequence:
+            if process.sequence_index == sequence_index:
+                return process
+        raise KeyError(f"No process at sequence_index {sequence_index}")
+
+    def renumber_sequence_indices(self) -> None:
+        """Experiment Info always occupies index 0 (implicitly); real processes start at 1,
+        matching sheet_experiment.py's incremental_number numbering."""
+        for position, process in enumerate(self.process_sequence, start=1):
+            process.sequence_index = position
+
+    def add_process(
+        self, process_type: str, config: dict | None = None, at_index: int | None = None
+    ) -> ProcessInstance:
+        process = ProcessInstance(process_type=process_type, sequence_index=0, config=config or {})
+        if at_index is None:
+            self.process_sequence.append(process)
+        else:
+            self.process_sequence.insert(at_index, process)
+        self.renumber_sequence_indices()
+        return process
+
+    def remove_process(self, sequence_index: int) -> None:
+        self.process_sequence = [
+            p for p in self.process_sequence if p.sequence_index != sequence_index
+        ]
+        self.renumber_sequence_indices()
+
+    def sample_numbers(self) -> list[int]:
+        return [s.sample_number for s in self.samples]
+
+    def add_sample(
+        self, variation_group_index: int, sample_number: int | None = None, child_count: int = 0
+    ) -> SamplePlan:
+        """variation_group_index is setup-time grouping only (uneven counts per group are
+        expected, e.g. group A = 3 samples, group B = 5) - distinct from the auto-computed
+        Variation label, which is always derived fresh from checked varying fields."""
+        if sample_number is None:
+            sample_number = max((s.sample_number for s in self.samples), default=0) + 1
+        plan = SamplePlan(
+            variation_group_index=variation_group_index,
+            sample_number=sample_number,
+            child_count=child_count,
+        )
+        self.samples.append(plan)
+        return plan
+
+    def remove_sample(self, sample_number: int) -> None:
+        self.samples = [s for s in self.samples if s.sample_number != sample_number]
+
+
+def compute_sample_set_split(total_samples: int, num_sets: int) -> list[int]:
+    """Divides total_samples as evenly as possible across num_sets, front-loading the
+    remainder (e.g. 15 samples / 4 sets -> [4, 4, 4, 3]) - the 'most natural division'
+    preloaded into SampleSetupPanel's per-set count inputs before the user adjusts them."""
+    if num_sets <= 0:
+        return []
+    base, remainder = divmod(max(total_samples, 0), num_sets)
+    return [base + 1 if i < remainder else base for i in range(num_sets)]
+
+
+def set_field_if_empty(
+    spec: ProcessFieldSpec,
+    value: Any,
+    provenance: FieldProvenance | None = None,
+    sample_number: int | None = None,
+) -> bool:
+    """Write autofilled/derived data. Never overwrites an existing value. Returns True
+    if a write happened."""
+    if spec.varies:
+        if sample_number is None:
+            raise ValueError("sample_number is required when spec.varies is True")
+        if _is_filled(spec.per_sample_values.get(sample_number)):
+            return False
+        spec.per_sample_values[sample_number] = value
+        if provenance is not None:
+            spec.per_sample_provenance[sample_number] = provenance
+        return True
+
+    if _is_filled(spec.value):
+        return False
+    spec.value = value
+    if provenance is not None:
+        spec.provenance = provenance
+    return True
+
+
+def set_field_manual(
+    spec: ProcessFieldSpec,
+    value: Any,
+    sample_number: int | None = None,
+) -> None:
+    """Write a direct user edit. Always overwrites, clears any outlier flag."""
+    if spec.varies:
+        if sample_number is None:
+            raise ValueError("sample_number is required when spec.varies is True")
+        spec.per_sample_values[sample_number] = value
+        spec.per_sample_provenance[sample_number] = FieldProvenance(source="manual")
+    else:
+        spec.value = value
+        spec.provenance = FieldProvenance(source="manual")
+    spec.is_outlier = False
+
+
+def set_field_varies(spec: ProcessFieldSpec, varies: bool, sample_numbers: list[int]) -> None:
+    """Toggle a field's scope. Turning varies on seeds ONLY THE FIRST sample's slot (in
+    sample_numbers order - the matrix's own row order) from the existing constant value,
+    no-clobber - product decision: pre-filling every row read as the matrix having
+    already been filled in behind the user's back, when it was meant to start blank
+    beyond the first row (see VaryingFieldsMatrix's "populate down" button /
+    populate_column_from_first for the deliberate, explicit way to copy that first value
+    into the rest). Turning it off never destroys per_sample_values, so re-enabling later
+    restores prior entries."""
+    if varies and not spec.varies and _is_filled(spec.value) and sample_numbers:
+        first_sample = sample_numbers[0]
+        if not _is_filled(spec.per_sample_values.get(first_sample)):
+            spec.per_sample_values[first_sample] = spec.value
+            if spec.provenance is not None:
+                spec.per_sample_provenance[first_sample] = spec.provenance
+    spec.varies = varies
+
+
+def fill_all_date_and_operator_fields(
+    state: ExperimentState, operator_name: str
+) -> tuple[int, int]:
+    """Bulk quick-fill, one timestamp/name reused everywhere: every Date/Datetime field
+    (Experiment Info and every process in the sequence) gets today's date in that key's
+    own format (DATE_FIELD_FORMATS), every Operator field gets operator_name - including
+    every sample's slot for a field already marked varying. Mirrors the per-field
+    "Today"/"Me" quick-fill buttons' always-overwrite behavior (a deliberate bulk action,
+    not a no-clobber autofill - same reasoning as populate_column_from_first). Returns
+    (date_fields_filled, operator_fields_filled), counting DISTINCT FIELDS touched (not
+    per-sample writes), for a simple status message."""
+    now = datetime.now()
+    date_fields_filled = 0
+    operator_fields_filled = 0
+
+    def _apply(spec: ProcessFieldSpec) -> None:
+        nonlocal date_fields_filled, operator_fields_filled
+        date_format = DATE_FIELD_FORMATS.get(spec.key)
+        if date_format is not None:
+            value = now.strftime(date_format)
+            date_fields_filled += 1
+        elif spec.key == "Operator":
+            value = operator_name
+            operator_fields_filled += 1
+        else:
+            return
+        if spec.varies:
+            for sample_number in state.sample_numbers():
+                set_field_manual(spec, value, sample_number=sample_number)
+        else:
+            set_field_manual(spec, value)
+
+    for spec in state.experiment_info_fields.values():
+        _apply(spec)
+    for process in state.process_sequence:
+        for spec in process.field_specs.values():
+            _apply(spec)
+
+    return date_fields_filled, operator_fields_filled
+
+
+def missing_critical_fields(state: ExperimentState) -> list[str]:
+    """CRITICAL_EXPERIMENT_INFO_KEYS (Batch/Project_Name) that are still empty, in a
+    fixed order - empty list if both are filled. See gui_components.create_finish_
+    section, which hard-blocks Download/Upload/Download+Upload on a non-empty result."""
+    missing = []
+    for key in CRITICAL_EXPERIMENT_INFO_KEYS:
+        spec = state.experiment_info_fields.get(key)
+        if spec is None or not _is_filled(spec.value):
+            missing.append(key)
+    return missing
+
+
+def set_field_required_for_progress(spec: ProcessFieldSpec, required: bool) -> None:
+    """Toggle whether this field counts toward the completion bar / nudge review. Pure
+    display-preference flag - never touches the field's value or provenance, and does
+    not affect Excel generation (a "not required" field is still written to the output
+    file if it has a value, same as any other field)."""
+    spec.required_for_progress = required
+
+
+# ---------------------------------------------------------------------------
+# Excel header generation - reuses Excel_creator's sheet_experiment.py exactly, then
+# reconstructs a column map by reading back the generated header instead of duplicating
+# generate_steps_for_process (which is a nested function, not exported).
+# ---------------------------------------------------------------------------
+
+
+def process_sequence_to_dicts(state: ExperimentState) -> list[dict]:
+    """Build the [{"process": ..., "config": {...}}, ...] shape sheet_experiment.py expects."""
+    sequence = [{"process": "Experiment Info"}]
+    for process in state.process_sequence:
+        entry: dict = {"process": process.process_type}
+        if process.config:
+            entry["config"] = dict(process.config)
+        sequence.append(entry)
+    return sequence
+
+
+def generate_header_workbook(state: ExperimentState) -> Workbook:
+    """Row 1 (process labels) + row 2 (field labels) skeleton only - no sample data rows.
+    Always called with is_testing=False; smart_databaser writes real data rows itself,
+    never Excel_creator's fabricated is_testing row."""
+    workbook = Workbook()
+    add_experiment_sheet(workbook, process_sequence_to_dicts(state), is_testing=False)
+    return workbook
+
+
+def _parse_sequence_index(row1_label: str) -> int:
+    if row1_label == "Experiment Info":
+        return 0
+    prefix = row1_label.split(":", 1)[0]
+    return int(prefix)
+
+
+def build_column_map(worksheet: Worksheet) -> dict[tuple[int, str], int]:
+    """{(sequence_index, field_key): column_index}, read back from row 1 + row 2 rather than
+    reimplementing sheet_experiment.py's column layout. Robust to header quirks such as a
+    process block whose row 1 label wasn't merged across its columns (observed in a real
+    experiment file) since it only depends on cell values, not merged ranges."""
+    column_map: dict[tuple[int, str], int] = {}
+    current_sequence_index: int | None = None
+    for col in range(1, worksheet.max_column + 1):
+        row1_value = worksheet.cell(row=1, column=col).value
+        if row1_value is not None:
+            current_sequence_index = _parse_sequence_index(row1_value)
+        if current_sequence_index is None:
+            continue
+        field_key = worksheet.cell(row=2, column=col).value
+        if field_key is None:
+            continue
+        column_map[(current_sequence_index, field_key)] = col
+    return column_map
+
+
+def sync_field_specs_from_columns(
+    state: ExperimentState, column_map: dict[tuple[int, str], int]
+) -> None:
+    """Additive only: creates a ProcessFieldSpec for every column that doesn't have one
+    yet. Never removes an existing spec (e.g. after reducing a solvent count), so
+    already-filled values are never silently dropped. A newly-created spec's
+    required_for_progress starts from is_field_required_by_default(process_type,
+    field_key) (config/required_fields.json) rather than always True."""
+    for sequence_index, field_key in column_map:
+        if sequence_index == 0:
+            bucket = state.experiment_info_fields
+            process_type = "Experiment Info"
+        else:
+            bucket = state.get_process(sequence_index).field_specs
+            process_type = state.get_process(sequence_index).process_type
+        if field_key not in bucket:
+            bucket[field_key] = ProcessFieldSpec(
+                key=field_key,
+                required_for_progress=is_field_required_by_default(process_type, field_key),
+            )
+
+
+def rebuild_field_specs(state: ExperimentState) -> dict[tuple[int, str], int]:
+    """Regenerate the header workbook from the current process sequence/config, additively
+    sync field_specs, and return the fresh column map. Call after any add/remove/
+    config-change to the process sequence."""
+    workbook = generate_header_workbook(state)
+    worksheet = workbook.active
+    column_map = build_column_map(worksheet)
+    sync_field_specs_from_columns(state, column_map)
+    return column_map
+
+
+# ---------------------------------------------------------------------------
+# NOMAD live value sourcing - session-scoped cache, per-process-type field mapping.
+#
+# The field paths themselves live in shared/perotf_utils/process_specs.py, not here,
+# specifically so unit_verified flags can be flipped and new process types/fields added
+# without touching this module - see that module's docstring for the schema and the
+# unit-verification caveat (the archive query returns no unit metadata, so numeric
+# fields are copied unconverted until confirmed against the NOMAD web GUI).
+# ---------------------------------------------------------------------------
+
+
+def _get_path(data: Any, path: list) -> Any:
+    current = data
+    for key in path:
+        if current is None:
+            return None
+        try:
+            current = current[key] if isinstance(key, int) else current.get(key)
+        except (IndexError, KeyError, TypeError):
+            return None
+    return current
+
+
+def _get_path_any(data: Any, paths: list[list]) -> Any:
+    """Tries each alternative path in order, returns the first non-None hit. Every
+    loaded field entry is normalized to a list of paths (see
+    process_specs.build_field_paths), even when only one applies, so this is the only
+    path-resolution function callers need."""
+    for path in paths:
+        value = _get_path(data, path)
+        if value is not None:
+            return value
+    return None
+
+
+# Process-type -> {excel_field_key: (paths, unit_verified)}, built from
+# shared/perotf_utils/process_specs.py at import time. Extend by editing that module,
+# not this one.
+PROCESS_TYPE_FIELD_PATHS: dict[str, dict[str, tuple[list, bool]]] = build_field_paths()
+
+# Process-type -> {config_key: excel_key_template}, built from process_specs.py
+# alongside PROCESS_TYPE_FIELD_PATHS above - which indexed fields correspond to which
+# process config count (e.g. Spin Coating's "solvents" config maps to the "Solvent {n}
+# name" indexed field's config_key tag), used by infer_config_from_source_step to widen
+# a target process's config to match what a source batch step actually has data for.
+INDEXED_CONFIG_KEYS: dict[str, dict[str, str]] = build_indexed_config_keys()
+
+# Process-type -> {excel_field_key: multiplier}, built from process_specs.py alongside
+# PROCESS_TYPE_FIELD_PATHS above - for fields whose "multiply" entry corrects a
+# confirmed unit mismatch between the archive's stored unit and this app's Excel column
+# label (applied in fetch_process_field_values/preview_value_for_field - the raw
+# archive value is multiplied before it's written or previewed). Example: Cleaning's
+# shared CleaningTechnique.time quantity is declared unit='minute' in nomad-baseclasses
+# (verified against baseclasses/material_processes_misc/cleaning.py), but this app's
+# Excel columns for it ("Time {n} [s]", "UV-Ozone Time [s]", "Gas-Plasma Time [s]") are
+# labeled seconds - so those entries carry "multiply": 60. Only add "multiply" once the
+# unit mismatch is actually confirmed (not guessed) - same discipline as unit_verified.
+FIELD_VALUE_MULTIPLIERS: dict[str, dict[str, float]] = build_field_value_multipliers()
+
+
+REQUIRED_FIELDS_CONFIG_PATH = Path(__file__).parent / "config" / "required_fields.json"
+
+
+def load_required_field_exceptions(
+    config_path: Path | None = None,
+) -> tuple[set[str], dict[str, set[str]]]:
+    """Loads config/required_fields.json: (global_exceptions, by_process_type). Every
+    field is required_for_progress=True by default (see ProcessFieldSpec) - this file
+    lists ONLY the exceptions, per the product ask ('Notes are never required, can this
+    be per schema?'). global_exceptions apply to a field key regardless of process type
+    (e.g. "Notes"); by_process_type[process_type] excepts a field only for that specific
+    process type (e.g. a field that matters everywhere except one schema). Edit this file
+    directly to change what counts toward the completion bar/nudge review - there is no
+    in-app UI for this (the per-row checkbox was removed; required fields are now shown
+    as a '*' next to the label instead, see _build_field_row in gui_components.py)."""
+    path = config_path or REQUIRED_FIELDS_CONFIG_PATH
+    with open(path, encoding="utf-8") as config_file:
+        raw = json.load(config_file)
+    global_exceptions = set(raw.get("global", []))
+    by_process_type = {
+        process_type: set(field_keys)
+        for process_type, field_keys in raw.get("by_process_type", {}).items()
+    }
+    return global_exceptions, by_process_type
+
+
+_REQUIRED_FIELD_GLOBAL_EXCEPTIONS, _REQUIRED_FIELD_EXCEPTIONS_BY_PROCESS_TYPE = (
+    load_required_field_exceptions()
+)
+
+
+def is_field_required_by_default(process_type: str, field_key: str) -> bool:
+    """True unless field_key is listed as an exception in config/required_fields.json,
+    either globally or specifically for process_type - see
+    load_required_field_exceptions. Used to set a newly-created ProcessFieldSpec's
+    initial required_for_progress (sync_field_specs_from_columns) - a later manual change
+    via set_field_required_for_progress always wins over this default."""
+    if field_key in _REQUIRED_FIELD_GLOBAL_EXCEPTIONS:
+        return False
+    return field_key not in _REQUIRED_FIELD_EXCEPTIONS_BY_PROCESS_TYPE.get(process_type, set())
+
+
+def infer_config_from_source_step(process_type: str, step: dict) -> dict:
+    """Best-effort config (solvents/solutes/spinsteps/... counts, plus optional
+    antisolvent/gas-quenching/vacuum-quenching/milling blocks) inferred from what a source
+    step actually has data for, so a target process autofilled from this step gets a
+    field_spec slot for every value the source can supply, instead of silently dropping
+    values beyond whatever the target happened to already be configured for (e.g. a
+    source with 2 solvents but a target still configured for 1, or a source with real
+    Anti solvent data but the target's "Antisolvent" checkbox still unchecked)."""
+    field_paths = PROCESS_TYPE_FIELD_PATHS.get(process_type, {})
+    inferred: dict[str, int] = {}
+    for config_key, excel_key_template in INDEXED_CONFIG_KEYS.get(process_type, {}).items():
+        count = 0
+        for n in range(1, 6):
+            path_info = field_paths.get(excel_key_template.format(n=n))
+            if path_info is not None and _get_path_any(step, path_info[0]) is not None:
+                count = n
+        if count:
+            inferred[config_key] = count
+    for config_key, _label, applicable_types in BOOLEAN_CONFIG_FIELDS:
+        if process_type not in applicable_types:
+            continue
+        probes = BOOLEAN_CONFIG_PROBE_FIELDS.get(config_key, ())
+        for probe_key in probes:
+            path_info = field_paths.get(probe_key)
+            if path_info is not None and _get_path_any(step, path_info[0]) is not None:
+                inferred[config_key] = True
+                break
+    return inferred
+
+
+class NomadSessionCache:
+    """Session-scoped, in-memory-only cache - never persisted to disk, never shared across
+    sessions. A plain-dict cache; deliberately
+    does NOT use perotf_utils.api_calls.init_cache() (a requests_cache disk cache)."""
+
+    def __init__(self) -> None:
+        self._sample_ids_by_batch: dict[str, list[str]] = {}
+        self._processing_steps_by_batch: dict[str, list[dict]] = {}
+        self._experiment_info_source_by_batch: dict[str, dict | None] = {}
+        self._batch_ids: list[str] | None = None
+        self._uploads: list[dict] | None = None
+
+    def clear(self) -> None:
+        self._sample_ids_by_batch.clear()
+        self._processing_steps_by_batch.clear()
+        self._experiment_info_source_by_batch.clear()
+        self._batch_ids = None
+        self._uploads = None
+
+    def get_batch_ids(self, url: str, token: str) -> list[str]:
+        """Shared by every batch picker widget (whole-experiment template, each
+        per-process override) so opening several pickers in one session costs one
+        get_batch_ids() call, not one per picker."""
+        if self._batch_ids is None:
+            self._batch_ids = get_batch_ids(url, token)
+        return self._batch_ids
+
+    def get_uploads(self, url: str, token: str) -> list[dict]:
+        """The user's own already-created NOMAD uploads, for the upload-target picker."""
+        if self._uploads is None:
+            self._uploads = get_all_uploads(url, token)
+        return self._uploads
+
+    def get_sample_ids(self, url: str, token: str, batch_id: str) -> list[str]:
+        if batch_id not in self._sample_ids_by_batch:
+            self._sample_ids_by_batch[batch_id] = get_ids_in_batch(url, token, [batch_id])
+        return self._sample_ids_by_batch[batch_id]
+
+    def get_processing_steps(self, url: str, token: str, batch_id: str) -> list[dict]:
+        if batch_id not in self._processing_steps_by_batch:
+            sample_ids = self.get_sample_ids(url, token, batch_id)
+            self._processing_steps_by_batch[batch_id] = get_processing_steps(url, token, sample_ids)
+        return self._processing_steps_by_batch[batch_id]
+
+    def peek_processing_steps(self, batch_id: str) -> list[dict] | None:
+        """Cache-only lookup (no network call) - returns None if this batch's steps have
+        not been fetched yet this session. Used for live preview placeholders, which must
+        never trigger a fetch merely by rendering a field row."""
+        return self._processing_steps_by_batch.get(batch_id)
+
+    def get_experiment_info_source(self, url: str, token: str, batch_id: str) -> dict | None:
+        """See fetch_experiment_info_source - cached per batch since both the real
+        autofill and the debug panel may ask for the same batch's source in one session."""
+        if batch_id not in self._experiment_info_source_by_batch:
+            self._experiment_info_source_by_batch[batch_id] = fetch_experiment_info_source(
+                url, token, self, batch_id
+            )
+        return self._experiment_info_source_by_batch[batch_id]
+
+
+_ARCHIVE_REFERENCE_RE = re.compile(r"archive/([^#]+)#")
+
+
+def _entry_id_from_reference(reference: str) -> str | None:
+    """Extracts the entry_id from an archive reference string, e.g.
+    '../uploads/{upload_id}/archive/{entry_id}#/data' -> '{entry_id}' - the form of a
+    sample's 'substrate' reference as written by the experiment parser
+    (get_reference)."""
+    match = _ARCHIVE_REFERENCE_RE.search(reference)
+    return match.group(1) if match else None
+
+
+def fetch_experiment_info_source(
+    url: str, token: str, cache: NomadSessionCache, batch_id: str
+) -> dict | None:
+    """{"sample": <sample entry data>, "substrate": <substrate entry data>} for
+    batch_id's first sample (same 'first occurrence wins' convention as
+    fetch_process_field_values) - the archive source for Experiment Info fields that live
+    on the sample/substrate entities rather than a process step (Substrate material,
+    Sample area, Number of junctions, ...; see process_specs.py's "Experiment Info"
+    entry). Two extra network hops beyond get_processing_steps: the sample's own entry
+    data, then following its 'substrate' reference to that entry's own data. Returns None
+    if the batch has no samples. The sample and substrate entries are of the types
+    ENTRY_TYPES['sample'] and ENTRY_TYPES['substrate']."""
+    sample_ids = cache.get_sample_ids(url, token, batch_id)
+    if not sample_ids:
+        return None
+    entry_id = get_entryid(url, token, sample_ids[0])
+    sample_data = get_entry_data(url, token, entry_id)
+    substrate_data: dict = {}
+    substrate_ref = sample_data.get("substrate")
+    if substrate_ref:
+        substrate_entry_id = _entry_id_from_reference(substrate_ref)
+        if substrate_entry_id:
+            substrate_data = get_entry_data(url, token, substrate_entry_id)
+    return {"sample": sample_data, "substrate": substrate_data}
+
+
+def autofill_experiment_info_from_batch(
+    state: ExperimentState, url: str, token: str, cache: NomadSessionCache, batch_id: str
+) -> int:
+    """Writes every mapped "Experiment Info" field found in batch_id's sample/substrate
+    data via set_field_if_empty (no-clobber) - mirrors autofill_process_from_batch but
+    sources from fetch_experiment_info_source instead of a process step. Skips every key
+    in EXPERIMENT_INFO_NEVER_AUTOFILLED even if a mapping exists for it. Returns how many
+    fields were actually written.
+
+    Network/lookup failures here (e.g. a sample with no resolvable substrate reference)
+    are caught and logged rather than raised - this is an incremental enhancement on top
+    of the main per-process autofill loop in apply_whole_experiment_template, and
+    shouldn't turn a working "Replicate Experiment" action into a hard failure just
+    because this one extra sample/substrate fetch had a problem."""
+    field_paths = PROCESS_TYPE_FIELD_PATHS.get("Experiment Info")
+    if not field_paths:
+        return 0
+    try:
+        source = cache.get_experiment_info_source(url, token, batch_id)
+    except Exception:
+        logger.warning(
+            "Could not fetch Experiment Info source for batch %s", batch_id, exc_info=True
+        )
+        return 0
+    if source is None:
+        return 0
+    written = 0
+    for field_key, (paths, _unit_verified) in field_paths.items():
+        if field_key in EXPERIMENT_INFO_NEVER_AUTOFILLED:
+            continue
+        spec = state.experiment_info_fields.get(field_key)
+        if spec is None:
+            continue
+        value = _get_path_any(source, paths)
+        if value is None:
+            continue
+        value = _apply_multiplier("Experiment Info", field_key, value)
+        provenance = FieldProvenance(source="batch_template", source_batch_id=batch_id)
+        if set_field_if_empty(spec, value, provenance):
+            written += 1
+    return written
+
+
+# Real NOMAD archive 'method' strings that don't match this app's AVAILABLE_PROCESSES
+# labels 1:1 (the method each nomad-baseclasses class sets in its normalizer). Extend this
+# (not the resolver function below) when a new mismatch is found.
+_METHOD_ALIASES: dict[str, str] = {
+    "Atomic Layer Deposition": "ALD",
+    "Inkjet printing": "Inkjet Printing",
+}
+
+# The thermal annealing entry type exists in several lab variants (the plain class plus
+# one per lab, e.g. a CR_ and a TFL_ variant) that all end in the same suffix; the suffix is
+# taken from the configured class name so no class name is spelled out here.
+_THERMAL_ANNEALING_SUFFIX = "_" + ENTRY_TYPES["thermal_annealing"].split("_", 1)[1]
+
+# m_def suffix for real archive steps whose 'method' is None (no method concept in that
+# NOMAD schema class): the generic process, thermal annealing and lamination classes all
+# derive from a plain base process, so resolve_process_type's normal method-based lookup
+# can never recognize them. Matched with str.endswith against the step's m_def. Extend this
+# (not resolve_process_type) for future None-method schema classes.
+_M_DEF_PROCESS_TYPES: dict[str, str] = {
+    ENTRY_TYPES["process"]: "Generic Process",
+    _THERMAL_ANNEALING_SUFFIX: "Annealing",
+    ENTRY_TYPES["lamination"]: "Lamination",
+}
+
+
+def _has_any_data(entries: Any) -> bool:
+    return isinstance(entries, list) and any(
+        isinstance(entry, dict) and any(_is_filled(v) for v in entry.values()) for entry in entries
+    )
+
+
+def resolve_process_type(step: dict) -> str | None:
+    """Translates a source step's raw 'method' into this app's own AVAILABLE_PROCESSES
+    label, so autofill/occurrence-listing/sequence-replication all agree on which app
+    process type a given source step maps to. Returns None if unrecognized.
+
+    Known mismatches: (1) simple renames, handled via _METHOD_ALIASES (e.g. the archive's
+    "Atomic Layer Deposition" vs this app's "ALD", or "Inkjet printing" vs this app's
+    "Inkjet Printing"); (2) Evaporation and Co-Evaporation both store method "Evaporation" -
+    a step with co_evaporation set (or perovskite_evaporation data) is a Co-Evaporation.
+    Seq-Evaporation steps are stored as plain evaporations and resolve to "Evaporation";
+    (3) a single real "Cleaning" step covers what this app models as two
+    separate process types ("Cleaning O2-Plasma" / "Cleaning UV-Ozone") - disambiguated
+    by which of cleaning_uv/cleaning_plasma actually has data on that step (both empty
+    defaults to "Cleaning UV-Ozone", an arbitrary but documented choice; if both have
+    data, UV-Ozone also wins, since Excel_creator can't represent 'both' as one process
+    instance either); (4) a None 'method' (no method concept in that step's NOMAD schema
+    class at all: Generic Process, Annealing, Lamination) - resolved via
+    _M_DEF_PROCESS_TYPES matching the step's 'm_def' suffix instead."""
+    method = step.get("method")
+    if method is None:
+        m_def = step.get("m_def", "")
+        for suffix, process_type in _M_DEF_PROCESS_TYPES.items():
+            if m_def.endswith(suffix):
+                return process_type
+        return None
+    if method == "Evaporation":
+        if step.get("co_evaporation") or _has_any_data(step.get("perovskite_evaporation")):
+            return "Co-Evaporation"
+        return "Evaporation"
+    if method in AVAILABLE_PROCESSES:
+        return method
+    if method in _METHOD_ALIASES:
+        return _METHOD_ALIASES[method]
+    if method == "Cleaning":
+        uv_has_data = _has_any_data(step.get("cleaning_uv"))
+        plasma_has_data = _has_any_data(step.get("cleaning_plasma"))
+        if plasma_has_data and not uv_has_data:
+            return "Cleaning O2-Plasma"
+        return "Cleaning UV-Ozone"
+    return None
+
+
+def steps_for_process_type(steps: list[dict], process_type: str) -> list[dict]:
+    """get_processing_steps() is already sorted by positon_in_experimental_plan; matches
+    via resolve_process_type() rather than a raw 'method' comparison, since the archive's
+    method string doesn't always match this app's process type labels 1:1. Returns EVERY
+    matching raw step, including duplicate entries at the same sequence position (one per
+    sample/variation-group sharing that step, e.g. 4 subbatches all annealed at position 3
+    but with per-subbatch values) - correct for compute_field_distribution_for_occurrence's
+    per-position statistics, WRONG for anything that needs to pick a single logical process
+    instance by occurrence number (autofill/preview/config-widening) - see
+    distinct_steps_for_process_type for that."""
+    return [s for s in steps if resolve_process_type(s) == process_type]
+
+
+def distinct_steps_for_process_type(steps: list[dict], process_type: str) -> list[dict]:
+    """One representative raw step per distinct sequence position matching process_type,
+    in position order (see _distinct_positions_in_order) - real bug fix, 2026-07-29:
+    build_process_sequence_from_batch builds the TARGET sequence with exactly one
+    ProcessInstance per distinct position, and occurrence_index_for_process counts how
+    many processes of this type precede a given one IN THAT TARGET SEQUENCE - but every
+    caller that turns that count into "the Nth step of this type in the SOURCE batch" was
+    indexing into steps_for_process_type's raw (non-deduplicated) list instead, which
+    still has one entry per sample/variation-group at a position. On a batch where an
+    earlier same-type position has multiple samples (any batch using Subbatches - the
+    normal case), this silently mis-sourced every later same-type occurrence from one of
+    the earlier position's duplicate entries instead of its real target step - live
+    reproduced on a real batch: the target sequence's 2nd/3rd Spin Coating
+    (sourced from real archive positions 12/13, 5 solutes/5 solvents respectively) were
+    silently sourced from position 11's duplicate entries instead (2 solutes/2 solvents
+    each), so only the first 2 of 5 ever got a value - not a field-mapping gap, an
+    occurrence-indexing bug. Fixed by giving every "pick one logical step by occurrence"
+    caller (fetch_process_field_values, list_process_occurrences, preview_value_for_field,
+    expand_process_config_for_source, compute_field_distribution_for_occurrence's target
+    step resolution) this deduplicated view instead of the raw steps_for_process_type
+    list, so occurrence N means the same thing everywhere: the Nth distinct sequence
+    position of this type."""
+    return _distinct_positions_in_order(steps_for_process_type(steps, process_type))
+
+
+def _derive_evaporation_organic(step: dict) -> str | None:
+    """Evaporation's 'Organic' Excel column (apps/Excel_creator/sheet_experiment.py's
+    make_label("Organic", True) - a literal True/False value in the sheet) is never
+    stored as its own archive attribute: NOMAD's map_evaporation() only uses it to choose
+    which of organic_evaporation/inorganic_evaporation gets populated on the step (see
+    this app's process_specs.py docstring) - 'co_evaporation' is an unrelated flag
+    (Evaporation-vs-Co-Evaporation section choice, not Organic-vs-Inorganic). Recovers
+    'True'/'False' - matching the Excel column's own literal spelling, not a Python bool,
+    so it round-trips through ProcessFieldSpec/Excel generation like any other string
+    field - from which list is actually non-empty on this step. Returns None if neither
+    is populated (step has no evaporation data at all, or came from Co-Evaporation, whose
+    perovskite_evaporation list this deliberately doesn't check)."""
+    if step.get("organic_evaporation"):
+        return "True"
+    if step.get("inorganic_evaporation"):
+        return "False"
+    return None
+
+
+# Fields with no direct archive attribute of their own - computed from other fields on
+# the same step instead of a process_specs.py path. Keep this small; only add an entry
+# here once a plain path is confirmed impossible (see _derive_evaporation_organic).
+# Generic Process has no derived fields: the experiment parser's map_generic() stores only
+# its Name and Notes, no per-column process_parameters list.
+_DERIVED_FIELDS: dict[str, dict[str, Callable[[dict], Any]]] = {
+    "Evaporation": {"Organic": _derive_evaporation_organic},
+}
+
+
+def _apply_multiplier(process_type: str, field_key: str, value: Any) -> Any:
+    """Applies FIELD_VALUE_MULTIPLIERS' confirmed unit-conversion factor, if any, to a
+    raw archive value before it's written/previewed - see
+    process_specs.build_field_value_multipliers."""
+    multiplier = FIELD_VALUE_MULTIPLIERS.get(process_type, {}).get(field_key)
+    if multiplier is not None and isinstance(value, int | float):
+        return value * multiplier
+    return value
+
+
+def fetch_process_field_values(
+    url: str,
+    token: str,
+    cache: NomadSessionCache,
+    batch_id: str,
+    process_type: str,
+    occurrence: int = 0,
+) -> tuple[dict[str, Any], str | None]:
+    """Values for the `occurrence`-th step of process_type in the batch (0 = earliest
+    position, matching sort order), plus the lab_id of its first referenced sample for
+    provenance tagging. Returns ({}, None) if the batch has no matching step."""
+    field_paths = PROCESS_TYPE_FIELD_PATHS.get(process_type)
+    if not field_paths and process_type not in _DERIVED_FIELDS:
+        return {}, None
+    steps = distinct_steps_for_process_type(
+        cache.get_processing_steps(url, token, batch_id), process_type
+    )
+    if occurrence >= len(steps):
+        return {}, None
+    step = steps[occurrence]
+    values = {}
+    for field_key, (paths, _unit_verified) in (field_paths or {}).items():
+        value = _get_path_any(step, paths)
+        if value is not None:
+            values[field_key] = _apply_multiplier(process_type, field_key, value)
+    for field_key, resolver in _DERIVED_FIELDS.get(process_type, {}).items():
+        value = resolver(step)
+        if value is not None:
+            values[field_key] = value
+    samples = step.get("samples") or []
+    source_sample_id = samples[0]["lab_id"] if samples else None
+    return values, source_sample_id
+
+
+def list_process_occurrences(
+    url: str, token: str, cache: NomadSessionCache, batch_id: str, process_type: str
+) -> list[tuple[int, str]]:
+    """(occurrence_index, label) for every DISTINCT sequence position of process_type in
+    batch_id, in the same order autofill_process_from_batch's `occurrence` parameter
+    indexes into. Label is the step's Material name when process_type has that field
+    mapped (the material-gated process types), else a generic 'Occurrence N' fallback -
+    lets the 'adopt from template batch' picker distinguish multiple same-type steps
+    (e.g. several Spin Coating layers) by what they actually deposited. Uses
+    distinct_steps_for_process_type, not the raw per-sample step list - a batch with
+    Subbatches has one raw step per sample at each position, which would otherwise list
+    the same logical step several times over before ever reaching a later, genuinely
+    different occurrence."""
+    steps = distinct_steps_for_process_type(
+        cache.get_processing_steps(url, token, batch_id), process_type
+    )
+    material_path_info = PROCESS_TYPE_FIELD_PATHS.get(process_type, {}).get(MATERIAL_FIELD_KEY)
+    occurrences = []
+    for index, step in enumerate(steps):
+        label = None
+        if material_path_info is not None:
+            material_value = _get_path_any(step, material_path_info[0])
+            if material_value:
+                label = str(material_value)
+        occurrences.append((index, label or f"Occurrence {index + 1}"))
+    return occurrences
+
+
+def autofill_process_from_batch(
+    process: ProcessInstance,
+    url: str,
+    token: str,
+    cache: NomadSessionCache,
+    batch_id: str,
+    occurrence: int = 0,
+    provenance_source: Literal["batch_template", "process_override"] = "batch_template",
+) -> int:
+    """Writes every mapped field found in the batch's matching process step via
+    set_field_if_empty (no-clobber), and flags each written value as an outlier if it
+    differs substantially from the field's historical distribution at the same
+    experimental-plan position (see compute_field_distribution_for_occurrence) - this is
+    what feeds the outlier-flagged half of the nudge queue and the provenance tag's red
+    coloring in the GUI. Returns how many fields were actually written."""
+    values, source_sample_id = fetch_process_field_values(
+        url, token, cache, batch_id, process.process_type, occurrence
+    )
+    written = 0
+    for field_key, value in values.items():
+        spec = process.field_specs.get(field_key)
+        if spec is None:
+            continue
+        provenance = FieldProvenance(
+            source=provenance_source, source_batch_id=batch_id, source_sample_id=source_sample_id
+        )
+        if set_field_if_empty(spec, value, provenance):
+            written += 1
+            distribution = compute_field_distribution_for_occurrence(
+                url,
+                token,
+                cache,
+                batch_id,
+                process.process_type,
+                field_key,
+                occurrence,
+                exclude_occurrence=True,
+            )
+            spec.is_outlier = is_outlier(value, distribution)
+    return written
+
+
+def occurrence_index_for_process(state: ExperimentState, process: ProcessInstance) -> int:
+    """How many processes of the same process_type precede this one in the sequence -
+    used to source the Nth occurrence of that type from a template/override batch (e.g.
+    the target sequence's 2nd Slot Die Coating sources from the batch's 2nd Slot Die
+    Coating step, not always the first)."""
+    count = 0
+    for candidate in state.process_sequence:
+        if candidate.sequence_index == process.sequence_index:
+            return count
+        if candidate.process_type == process.process_type:
+            count += 1
+    return count
+
+
+def preview_value_for_field(
+    state: ExperimentState, process: ProcessInstance, field_key: str, cache: NomadSessionCache
+) -> Any:
+    """Best-effort preview of what field_key WOULD become if re-autofilled from this
+    process's active source batch (its override, else the whole-experiment template) -
+    read from already-cached NOMAD data only, so it never triggers a network call just
+    from rendering a field row. Returns None if there's no active source, its steps
+    aren't cached yet, or the source has no value for this field. Purely a display hint
+    (see gui_components' Text.placeholder usage) - never written via set_field_if_empty."""
+    batch_id = process.source_override_batch_id or state.whole_experiment_template_batch_id
+    if not batch_id:
+        return None
+    steps = cache.peek_processing_steps(batch_id)
+    if steps is None:
+        return None
+    path_info = PROCESS_TYPE_FIELD_PATHS.get(process.process_type, {}).get(field_key)
+    if path_info is None:
+        return None
+    matching = distinct_steps_for_process_type(steps, process.process_type)
+    occurrence = occurrence_index_for_process(state, process)
+    if occurrence >= len(matching):
+        return None
+    value = _get_path_any(matching[occurrence], path_info[0])
+    if value is None:
+        return None
+    return _apply_multiplier(process.process_type, field_key, value)
+
+
+# ---------------------------------------------------------------------------
+# Field-mapping debug report - powers the in-app "Debug: Batch Field Mapping" panel.
+# Answers "what does this app actually take from a real batch, and what's left over on
+# the raw archive step that no mapping claims" directly against real data, instead of
+# guessing from process_specs.py alone (which only shows what's configured, not what
+# the archive actually contains for a specific real step). Read-only: never writes into
+# ExperimentState.
+# ---------------------------------------------------------------------------
+
+
+def _flatten_leaf_paths(data: Any, prefix: list) -> list[tuple[list, Any]]:
+    """[(path, value), ...] for every non-empty scalar leaf reachable from data, with path
+    as a list of str/int segments in the exact same format process_specs.py's own
+    'path'/'path_template' entries use - so a raw archive field can be directly compared
+    against configured mapping paths by value equality, not string matching."""
+    leaves: list[tuple[list, Any]] = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            leaves.extend(_flatten_leaf_paths(value, [*prefix, key]))
+    elif isinstance(data, list):
+        for index, item in enumerate(data):
+            leaves.extend(_flatten_leaf_paths(item, [*prefix, index]))
+    elif _is_filled(data):
+        leaves.append((prefix, data))
+    return leaves
+
+
+def _path_to_label(path: list) -> str:
+    parts: list[str] = []
+    for segment in path:
+        if isinstance(segment, int):
+            parts[-1] = f"{parts[-1]}[{segment}]"
+        else:
+            parts.append(str(segment))
+    return ".".join(parts)
+
+
+def build_field_mapping_debug_report(process_type: str, raw_source: dict) -> dict:
+    """For one real archive step/source dict (a processing step for a real process type,
+    or the {"sample":..., "substrate":...} dict for "Experiment Info" - see
+    fetch_experiment_info_source), returns:
+    {"mapped": [{"excel_key", "value", "unit_verified", "paths"}, ...],
+     "ignored": [{"path", "value"}, ...]}
+    "mapped" covers EVERY configured process_specs.py entry for process_type,
+    including ones with no match on this particular step (value=None) - unlike
+    fetch_process_field_values, which only returns fields it actually found. Values have
+    any configured "multiply" conversion already applied (see _apply_multiplier), so what
+    this reports matches what autofill would actually write, not the raw archive number.
+    "ignored" is every raw leaf field on raw_source not claimed by any configured path -
+    real gaps (mismatched process-type disambiguation, genuinely unmapped fields, config
+    ranges too narrow for this step's actual data) show up here directly. Also includes
+    any process_type entries from _DERIVED_FIELDS (fields with no single archive path -
+    computed from other fields on the step instead), tagged with a placeholder paths
+    value rather than a real archive path."""
+    field_paths = PROCESS_TYPE_FIELD_PATHS.get(process_type, {})
+    mapped_rows = []
+    claimed_paths: set[tuple] = set()
+    for excel_key, (paths, unit_verified) in field_paths.items():
+        value = _get_path_any(raw_source, paths)
+        if value is not None:
+            value = _apply_multiplier(process_type, excel_key, value)
+        mapped_rows.append(
+            {
+                "excel_key": excel_key,
+                "value": value,
+                "unit_verified": unit_verified,
+                "paths": [_path_to_label(path) for path in paths],
+            }
+        )
+        for path in paths:
+            claimed_paths.add(tuple(path))
+
+    for excel_key, resolver in _DERIVED_FIELDS.get(process_type, {}).items():
+        mapped_rows.append(
+            {
+                "excel_key": excel_key,
+                "value": resolver(raw_source),
+                "unit_verified": True,
+                "paths": ["<derived, see _DERIVED_FIELDS>"],
+            }
+        )
+
+    ignored_rows = [
+        {"path": _path_to_label(path), "value": value}
+        for path, value in _flatten_leaf_paths(raw_source, [])
+        if tuple(path) not in claimed_paths
+    ]
+    return {"mapped": mapped_rows, "ignored": ignored_rows}
+
+
+def expand_process_config_for_source(
+    state: ExperimentState,
+    process: ProcessInstance,
+    url: str,
+    token: str,
+    cache: NomadSessionCache,
+    batch_id: str,
+    occurrence: int,
+) -> None:
+    """Widens process.config (solvents/solutes/spinsteps/... counts) to at least cover
+    what the source batch's matching step actually has data for, then regenerates
+    field_specs (additive only, see rebuild_field_specs) so autofill_process_from_batch
+    has a slot to write every value the source can supply. Never shrinks an
+    already-larger config. No-op if the occurrence doesn't exist in the source batch."""
+    all_steps = cache.get_processing_steps(url, token, batch_id)
+    steps = distinct_steps_for_process_type(all_steps, process.process_type)
+    if occurrence >= len(steps):
+        return
+    inferred = infer_config_from_source_step(process.process_type, steps[occurrence])
+    changed = False
+    for key, count in inferred.items():
+        if count > process.config.get(key, 0):
+            process.config[key] = count
+            changed = True
+    if changed:
+        rebuild_field_specs(state)
+
+
+def _distinct_positions_in_order(steps: list[dict]) -> list[dict]:
+    """One representative step per distinct positon_in_experimental_plan, in the order
+    they first appear (get_processing_steps is already sorted by position) - collapses
+    the per-sample/per-variation-group duplicate entries get_processing_steps returns for
+    the same logical sequence step (e.g. several samples annealed at different
+    temperatures but at the same sequence position) down to one, taking the first-listed
+    entry (matches 'if there are variations, always grab the first value')."""
+    seen_positions: set = set()
+    representatives = []
+    for step in steps:
+        position = step.get("positon_in_experimental_plan")
+        if position in seen_positions:
+            continue
+        seen_positions.add(position)
+        representatives.append(step)
+    return representatives
+
+
+def build_process_sequence_from_batch(
+    url: str, token: str, cache: NomadSessionCache, batch_id: str
+) -> list[ProcessInstance]:
+    """One ProcessInstance per distinct sequence position in batch_id (see
+    _distinct_positions_in_order), in position order, each with its config sized to match
+    what that step actually has data for (infer_config_from_source_step). Powers "Copy
+    Values From Batch": the whole-experiment template replicates the source batch's own
+    process sequence shape, not just fills values into whatever the user already built.
+    Steps whose method isn't a process type this app models (AVAILABLE_PROCESSES) are
+    skipped defensively - real archive data could contain types not covered here yet."""
+    steps = _distinct_positions_in_order(cache.get_processing_steps(url, token, batch_id))
+    sequence: list[ProcessInstance] = []
+    for step in steps:
+        process_type = resolve_process_type(step)
+        if process_type is None or process_type == "Experiment Info":
+            continue
+        config = default_config_for(process_type)
+        for key, count in infer_config_from_source_step(process_type, step).items():
+            config[key] = max(config.get(key, 0), count)
+        sequence.append(
+            ProcessInstance(
+                process_type=process_type, sequence_index=len(sequence) + 1, config=config
+            )
+        )
+    return sequence
+
+
+def clear_autofilled_value(spec: ProcessFieldSpec, sources: set[str]) -> None:
+    """Clears value(s) whose provenance.source is in `sources`. Never touches a manually
+    edited value - used to 'reset' prior autofill when a template/override is re-applied,
+    per 'every autofilled field must always remain manually editable'."""
+    if spec.varies:
+        for sample_number in list(spec.per_sample_values):
+            provenance = spec.per_sample_provenance.get(sample_number)
+            if provenance is not None and provenance.source in sources:
+                del spec.per_sample_values[sample_number]
+                del spec.per_sample_provenance[sample_number]
+        return
+    if spec.provenance is not None and spec.provenance.source in sources:
+        spec.value = None
+        spec.provenance = None
+        spec.is_outlier = False
+
+
+def apply_whole_experiment_template(
+    state: ExperimentState,
+    url: str,
+    token: str,
+    cache: NomadSessionCache,
+    batch_id: str,
+    progress_callback=None,
+) -> dict[int, int]:
+    """Whole-experiment template scope: REPLACES the entire process sequence with one
+    mirroring batch_id's own steps (see build_process_sequence_from_batch - one process
+    per distinct sequence position, config sized to the source's actual data), then
+    autofills every process from that same batch. This is a product decision, not an
+    accident: replicating a whole experiment (a batch with 10 steps becomes a 10-step
+    sequence), not just filling values into whatever the user had already built - so any
+    processes/overrides/manual edits the user had before picking a template are
+    discarded, same as re-picking a different template batch. Also autofills "Experiment
+    Info" fields (Substrate material, Sample area, ...) from the same batch - see
+    autofill_experiment_info_from_batch - except Date/Project_Name/Batch/Subbatch, which
+    are never touched (EXPERIMENT_INFO_NEVER_AUTOFILLED).
+
+    `progress_callback`, if given, is called as progress_callback(done, total) after each
+    process is autofilled - this is the only widget-adjacent hook in this module (still
+    zero widget imports: it's a plain callable, e.g. gui_components wires it to a
+    FloatProgress). This step is genuinely slow (one or more real HTTP calls per process,
+    unlike a single-process override), so the caller can show real incremental progress
+    instead of one static "working" message for the whole operation.
+
+    Returns {sequence_index: fields_written} for every process that got at least one
+    field written."""
+    state.process_sequence = build_process_sequence_from_batch(url, token, cache, batch_id)
+    rebuild_field_specs(state)
+    written_by_process: dict[int, int] = {}
+    total = len(state.process_sequence)
+    for done, process in enumerate(state.process_sequence, start=1):
+        occurrence = occurrence_index_for_process(state, process)
+        written = autofill_process_from_batch(
+            process, url, token, cache, batch_id, occurrence, provenance_source="batch_template"
+        )
+        if written:
+            written_by_process[process.sequence_index] = written
+        if progress_callback is not None:
+            progress_callback(done, total)
+    autofill_experiment_info_from_batch(state, url, token, cache, batch_id)
+    state.whole_experiment_template_batch_id = batch_id
+    return written_by_process
+
+
+def apply_process_override(
+    state: ExperimentState,
+    process: ProcessInstance,
+    url: str,
+    token: str,
+    cache: NomadSessionCache,
+    batch_id: str,
+    occurrence: int | None = None,
+) -> int:
+    """Per-process override scope: clears this process's prior autofill (whole-template or
+    a previous override - never manual edits) and refills from the new batch. Only this
+    one process is touched; everything else stays tied to the whole-experiment template.
+
+    `occurrence` defaults to this process's positional occurrence within the target
+    sequence (occurrence_index_for_process); pass it explicitly to instead adopt a
+    specific occurrence the user picked by hand (e.g. by material name, see
+    list_process_occurrences) from a batch with multiple same-type steps.
+
+    Before autofilling, widens this process's config to match how much data the source
+    occurrence actually has (see expand_process_config_for_source) - otherwise values
+    beyond the target's current config count (e.g. a 2nd solvent) would be silently
+    dropped since there'd be no field_spec slot to write them into."""
+    for spec in process.field_specs.values():
+        clear_autofilled_value(spec, {"batch_template", "process_override"})
+    if occurrence is None:
+        occurrence = occurrence_index_for_process(state, process)
+    expand_process_config_for_source(state, process, url, token, cache, batch_id, occurrence)
+    written = autofill_process_from_batch(
+        process, url, token, cache, batch_id, occurrence, provenance_source="process_override"
+    )
+    process.source_override_batch_id = batch_id
+    return written
+
+
+def clear_process_override(state: ExperimentState, process: ProcessInstance) -> None:
+    """Removes the override: process_override-sourced values are cleared (never manual
+    edits) and the process becomes tied to the whole-experiment template again. Does NOT
+    automatically re-autofill from the whole template - call apply_whole_experiment_template
+    again (or leave the now-empty fields for the next nudge pass) if that's desired."""
+    for spec in process.field_specs.values():
+        clear_autofilled_value(spec, {"process_override"})
+    process.source_override_batch_id = None
+
+
+def compute_field_distribution_for_occurrence(
+    url: str,
+    token: str,
+    cache: NomadSessionCache,
+    batch_id: str,
+    process_type: str,
+    field_key: str,
+    occurrence: int = 0,
+    exclude_occurrence: bool = False,
+) -> list[float]:
+    """Numeric values of field_key across every step sharing the SAME experimental-plan
+    position as the given occurrence (i.e. across the real "variations" NOMAD recorded at
+    that position - see the real file's per-Variation-group solvent ratios), not across
+    every occurrence of process_type in the whole sequence.
+
+    exclude_occurrence=True drops the occurrence's own step from the returned values -
+    use this when testing whether THAT value is an outlier relative to the others.
+    Including it (the default) suffers from statistical masking: with a self-inclusive
+    population stdev and few points, one extreme value inflates its own stdev enough that
+    it can never exceed a fixed z-score threshold (for n<=5 points the maximum possible
+    self-inclusive z-score is under 2 regardless of how extreme the value is) - so
+    is_outlier() would silently never fire on small, realistic sample counts."""
+    field_paths = PROCESS_TYPE_FIELD_PATHS.get(process_type, {})
+    path_info = field_paths.get(field_key)
+    if path_info is None:
+        return []
+    paths, _ = path_info
+    all_steps = cache.get_processing_steps(url, token, batch_id)
+    distinct_steps = distinct_steps_for_process_type(all_steps, process_type)
+    if occurrence >= len(distinct_steps):
+        return []
+    target_step = distinct_steps[occurrence]
+    target_position = target_step.get("positon_in_experimental_plan")
+    # Deliberately the RAW (non-deduplicated) list here, not distinct_steps - this
+    # function wants every sample/variation-group sharing target_position, which is
+    # exactly what distinct_steps_for_process_type collapses away.
+    steps = steps_for_process_type(all_steps, process_type)
+    values = []
+    for step in steps:
+        if step.get("positon_in_experimental_plan") != target_position:
+            continue
+        if exclude_occurrence and step is target_step:
+            continue
+        value = _get_path_any(step, paths)
+        if isinstance(value, int | float):
+            values.append(float(value))
+    return values
+
+
+def is_outlier(value: Any, distribution: list[float], k: float = 2.0) -> bool:
+    """Flags `value` if more than k standard deviations from the mean of `distribution`.
+    Needs >=2 points to be meaningful; k=2.0 is a starting default - tune after real
+    feedback, same as the nudge count/strategy."""
+    if not isinstance(value, int | float) or len(distribution) < 2:
+        return False
+    mean = statistics.mean(distribution)
+    std = statistics.pstdev(distribution)
+    if std == 0:
+        return False
+    return abs(float(value) - mean) > k * std
+
+
+# ---------------------------------------------------------------------------
+# Varying-fields matrix + Variation column - experiment-wide (spans Experiment Info and
+# every process), one checkbox per field ("this field varies"), matrix rows = samples
+# (mothers; children always inherit). The Variation column is always freshly (re)computed
+# from currently-checked fields, never autofilled/inherited, no-clobber into empty cells
+# only - see the addendum in the task brief.
+# ---------------------------------------------------------------------------
+
+
+def iter_varying_fields(state: ExperimentState) -> list[tuple[str, ProcessFieldSpec]]:
+    """(display_label, spec) for every field currently marked varies=True, in column
+    order (Experiment Info first, then each process in sequence order). Excludes
+    "Variation" itself, which is a computed output column, never a matrix input."""
+    fields: list[tuple[str, ProcessFieldSpec]] = []
+    for key, spec in state.experiment_info_fields.items():
+        if key == "Variation":
+            continue
+        if spec.varies:
+            fields.append((f"Experiment Info - {key}", spec))
+    for process in state.process_sequence:
+        for key, spec in process.field_specs.items():
+            if spec.varies:
+                fields.append((f"{process.sequence_index}: {process.process_type} - {key}", spec))
+    return fields
+
+
+_UNIT_BRACKET_RE = re.compile(r"\s*\[[^\]]*\]\s*")
+_SLUG_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _field_slug(field_key: str) -> str:
+    """Short, stable slug for one field's name - e.g. 'Substrate temperature [°C]' ->
+    'substrate-temperature', 'Solvent 1 name' -> 'solvent-1-name'. Strips a trailing
+    bracketed unit, lowercases, and collapses everything else to hyphens. Deliberately
+    mechanical (no hand-maintained per-field shortenings) so it never goes stale as
+    fields are added."""
+    without_unit = _UNIT_BRACKET_RE.sub("", field_key)
+    return _SLUG_NON_ALNUM_RE.sub("-", without_unit.strip().lower()).strip("-")
+
+
+def _variation_field_key(display_label: str) -> str:
+    """iter_varying_fields() labels are always '<process label> - <field key>' - see its
+    docstring (process labels never contain ' - ' themselves)."""
+    _prefix, _sep, field_key = display_label.partition(" - ")
+    return field_key or display_label
+
+
+_VARIATION_PLACEHOLDER_RE = re.compile(r"\\(\d+)")
+
+
+def render_variation_template(template: str, values: list) -> str:
+    """Renders a custom Variation template like 'Den=\\1_Sol-\\2_SubTemp=\\3' -
+    '\\N' (1-based, familiar regex-backreference syntax) is replaced by values[N-1] (the
+    Nth varying field's value for this sample, in the same column order shown in the
+    Varying Fields matrix). Not every varying column has to be referenced - the template
+    only outputs what it references. If \\N's index is out of range, or that sample has
+    no value for it, it's simply replaced with an empty string (per product decision:
+    'if a column value is not used, then it is not used' - a template is never blocked
+    from rendering just because one referenced field happens to be unfilled for one
+    sample)."""
+
+    def _substitute(match: re.Match) -> str:
+        index = int(match.group(1)) - 1
+        if 0 <= index < len(values) and _is_filled(values[index]):
+            return str(values[index])
+        return ""
+
+    return _VARIATION_PLACEHOLDER_RE.sub(_substitute, template)
+
+
+def compute_variation_label(
+    state: ExperimentState, sample_number: int, delimiter: str = "_"
+) -> str:
+    """If state.variation_template is set, renders it via render_variation_template.
+    Otherwise builds a self-describing Variation string from every checked-varying
+    field's value for this sample, in column order - e.g. 'density-1_solvent-1-name-ipa'
+    rather than a bare '1_ipa', so the Variation column reads sensibly without
+    cross-referencing the process sequence. Each part is '<field-slug>-<value>' (see
+    _field_slug), joined with delimiter."""
+    varying_fields = iter_varying_fields(state)
+    values = [spec.per_sample_values.get(sample_number) for _label, spec in varying_fields]
+    if state.variation_template:
+        return render_variation_template(state.variation_template, values)
+    parts = []
+    for (label, _spec), value in zip(varying_fields, values, strict=True):
+        if not _is_filled(value):
+            continue
+        parts.append(f"{_field_slug(_variation_field_key(label))}-{value}")
+    return delimiter.join(parts)
+
+
+def apply_variation_template(state: ExperimentState, template: str | None) -> int:
+    """Sets state.variation_template (None/blank reverts to the automatic field-slug
+    label) and clears every "computed"-sourced per-sample Variation value (never a
+    manually-typed one) so update_variation_column regenerates them under the new
+    template - mirrors clear_autofilled_value's "re-picking a source discards only what
+    that source itself previously wrote" pattern. Returns update_variation_column's
+    written count. Caller (gui_components' VariationTemplatePanel) still needs to trigger
+    its own refresh_all afterward, same as every other cross-widget state mutation."""
+    state.variation_template = template.strip() if template and template.strip() else None
+    variation_spec = state.experiment_info_fields.get("Variation")
+    if variation_spec is not None:
+        clear_autofilled_value(variation_spec, {"computed"})
+    return update_variation_column(state)
+
+
+def update_variation_column(state: ExperimentState, delimiter: str = "_") -> int:
+    """No-clobber (re)computation of the Variation column for every sample - only writes
+    into currently-empty per-sample slots. Returns how many slots were written.
+
+    NOT called automatically after every matrix/field edit anymore (it used to be, from
+    every panel's _notify_change) - product feedback was that this made the Variation
+    column feel "buggy": since it's no-clobber, a sample's label was computed once (the
+    slot became non-empty) and then silently stopped updating on every later edit to that
+    same sample's other varying fields, which read as "only the first column I type into
+    actually affects the Variation column." Now purely a plain, directly-editable matrix
+    column (see VaryingFieldsMatrix's Variation cells) unless explicitly (re)computed via
+    this function - wired to gui_components' "Auto-fill Variation" button
+    (auto_fill_variation_column) and to apply_variation_template's custom-format Apply
+    button, both explicit user actions."""
+    variation_spec = state.experiment_info_fields.get("Variation")
+    if variation_spec is None:
+        return 0
+    variation_spec.varies = True
+    written = 0
+    for sample_number in state.sample_numbers():
+        if _is_filled(variation_spec.per_sample_values.get(sample_number)):
+            continue
+        label = compute_variation_label(state, sample_number, delimiter)
+        if not label:
+            continue
+        variation_spec.per_sample_values[sample_number] = label
+        variation_spec.per_sample_provenance[sample_number] = FieldProvenance(source="computed")
+        written += 1
+    return written
+
+
+def auto_fill_variation_column(state: ExperimentState, delimiter: str = "_") -> int:
+    """On-demand FULL recompute of the Variation column - powers gui_components'
+    "Auto-fill Variation" button. First clears every "computed"-sourced value (never a
+    manually-typed one - same discard-only-what-this-source-wrote pattern as
+    apply_variation_template), then calls update_variation_column so every sample's
+    label is freshly derived from its CURRENT varying-field values, not just the ones
+    that happened to be empty. Returns how many slots were (re)written."""
+    variation_spec = state.experiment_info_fields.get("Variation")
+    if variation_spec is not None:
+        clear_autofilled_value(variation_spec, {"computed"})
+    return update_variation_column(state, delimiter)
+
+
+def populate_column_from_first(spec: ProcessFieldSpec, sample_numbers: list[int]) -> int:
+    """Copies the first sample's value (in `sample_numbers` order) into every other
+    sample for this one field - powers the Varying Fields matrix's per-column "populate
+    down" button, a time-saver for the common case where most samples share one value
+    (e.g. every sample spun at "1000 rpm" except a couple of outliers) and typing it once
+    then adjusting the few that differ is faster than typing it N times. Deliberately
+    OVERWRITES every other sample's existing value - this is a one-shot bulk action the
+    user explicitly triggers, not a no-clobber autofill. Forces spec.varies = True first
+    (mirrors VaryingFieldsMatrix._on_variation_cell_change's own defensive forcing) so
+    this is safe to call even on a field whose per-sample scope hasn't been touched yet.
+    No-op (returns 0) if there's no first sample or its own value is still empty - nothing
+    to copy yet."""
+    if not sample_numbers:
+        return 0
+    spec.varies = True
+    first_value = spec.per_sample_values.get(sample_numbers[0])
+    if not _is_filled(first_value):
+        return 0
+    written = 0
+    for sample_number in sample_numbers[1:]:
+        set_field_manual(spec, first_value, sample_number=sample_number)
+        written += 1
+    return written
+
+
+def relevant_field_keys_for_process(process: ProcessInstance) -> set[str]:
+    """Field keys process.config CURRENTLY generates an Excel column for - i.e. what a
+    fresh rebuild_field_specs() would sync today, reusing the same header-generation
+    machinery rather than duplicating sheet_experiment.py's config-gating logic.
+
+    sync_field_specs_from_columns is deliberately additive-only (a field_spec, once
+    created, is never deleted - see its own docstring), so an optional block toggled on
+    then off again (e.g. the "Vacuum Quenching" checkbox) leaves its field_specs sitting
+    in process.field_specs forever: harmless for stored values (nothing is lost, and
+    re-checking the box brings the old value straight back), but wrong for anything that
+    iterates field_specs directly - it would still count/show fields the current config
+    no longer has a column for. Callers that count or display fields (progress, nudge
+    queue, ProcessFieldsPanel) should filter through this first; callers that only care
+    about not losing data (Excel export's column_map, which is rebuilt from the live
+    config at generation time anyway) don't need it."""
+    workbook = Workbook()
+    add_experiment_sheet(
+        workbook,
+        [
+            {"process": "Experiment Info"},
+            {"process": process.process_type, "config": dict(process.config)},
+        ],
+        is_testing=False,
+    )
+    column_map = build_column_map(workbook.active)
+    return {field_key for (sequence_index, field_key) in column_map if sequence_index == 1}
+
+
+def relevant_field_specs(process: ProcessInstance) -> dict[str, ProcessFieldSpec]:
+    """process.field_specs filtered to keys relevant_field_keys_for_process still backs -
+    see that function's docstring for why this filtering is needed."""
+    relevant = relevant_field_keys_for_process(process)
+    return {key: spec for key, spec in process.field_specs.items() if key in relevant}
+
+
+# ---------------------------------------------------------------------------
+# Material-gated progress bar. A process only counts toward the denominator if it is not
+# material-gated, or is material-gated and has "Material name" filled - see
+# ProcessInstance.counts_toward_progress(). Field-level counting is done in alias-grouped
+# "progress units" (alias_config.resolve_progress_units) so config-dependent field
+# renaming (e.g. single- vs multi-step Spin Coating rotation fields) doesn't double-count.
+# Scoped to process_sequence only - Experiment Info fields are not counted (not mentioned
+# in the material-gating spec, and typically filled at experiment setup, not per-process).
+# ---------------------------------------------------------------------------
+
+
+def compute_process_progress(
+    process: ProcessInstance, alias_groups: list[dict] | None = None
+) -> tuple[int, int]:
+    """(filled_units, total_units) for one process, after alias-group merging. (0, 0) if
+    the process is material-gated and has no material yet (excluded entirely, per the
+    material-gating rule - matches the real NOMAD parser, which skips such processes).
+    Fields with required_for_progress=False are dropped before unit resolution, so they
+    never appear in the denominator OR numerator - the user-facing "this field doesn't
+    matter" opt-out (see set_field_required_for_progress). Also excludes fields whose
+    config-gated column no longer exists (see relevant_field_specs) - e.g. an optional
+    checkbox (Vacuum Quenching, ...) that was checked then unchecked again, whose
+    field_specs otherwise linger forever without this filter."""
+    if not process.counts_toward_progress():
+        return (0, 0)
+    specs = relevant_field_specs(process)
+    field_keys = [key for key, spec in specs.items() if spec.required_for_progress]
+    units = resolve_progress_units(process.process_type, field_keys, alias_groups)
+    filled = sum(1 for unit in units if any(specs[key].is_filled() for key in unit))
+    return (filled, len(units))
+
+
+def compute_experiment_progress(
+    state: ExperimentState, alias_groups: list[dict] | None = None
+) -> tuple[int, int]:
+    """(filled_units, total_units) summed across every process in the sequence."""
+    total_filled = 0
+    total_units = 0
+    for process in state.process_sequence:
+        filled, total = compute_process_progress(process, alias_groups)
+        total_filled += filled
+        total_units += total
+    return (total_filled, total_units)
+
+
+def progress_band(filled: int, total: int) -> str:
+    """Coarse completion band for ProgressBarWidget's color-coding: 'red' at 1/3 full or
+    less, 'yellow' below 2/3, 'green' at 90% or more, 'blue' in between. An empty
+    denominator (nothing counts toward progress yet) is treated as 'red'."""
+    if total <= 0:
+        return "red"
+    ratio = filled / total
+    if ratio <= 1 / 3:
+        return "red"
+    if ratio < 2 / 3:
+        return "yellow"
+    if ratio < 0.9:
+        return "blue"
+    return "green"
+
+
+def compute_experiment_info_progress(state: ExperimentState) -> tuple[int, int]:
+    """(filled, total) for state.experiment_info_fields, excluding computed-only keys
+    (Variation/Nomad ID/Sample) and fields the user has marked required_for_progress=False
+    - the same filter ExperimentInfoPanel uses to decide what it renders (plus the
+    opt-out). Used to show a completion percentage next to the Experiment Info row's
+    title."""
+    relevant = [
+        spec
+        for key, spec in state.experiment_info_fields.items()
+        if key not in EXPERIMENT_INFO_COMPUTED_KEYS and spec.required_for_progress
+    ]
+    filled = sum(1 for spec in relevant if spec.is_filled())
+    return (filled, len(relevant))
+
+
+# ---------------------------------------------------------------------------
+# Nudge queue - guided popup flow prioritizing empty/unfilled fields over already-filled
+# ones (replaces plain random spot-checking), ending with a summary of remaining gaps.
+# Outlier flagging on filled values (ProcessFieldSpec.is_outlier, set during autofill
+# above) still applies separately and is queued after the missing-field items.
+#
+# Scoped to non-varying fields only: a varying field's "value" is per-sample
+# (per_sample_values), which doesn't map onto this queue's single-value edit widget: the
+# VaryingFieldsMatrix is already the visible, editable surface for those. Unlike the
+# progress bar, this queue does NOT exclude material-gated processes with an empty
+# material field - the point of nudging is to help the user close exactly that kind of
+# gap, not hide it because the progress bar isn't counting it yet.
+# ---------------------------------------------------------------------------
+
+
+class NudgeItem(BaseModel):
+    sequence_index: int
+    process_type: str
+    field_key: str
+    kind: Literal["missing", "outlier"]
+
+
+def build_nudge_queue(state: ExperimentState, max_items: int | None = None) -> list[NudgeItem]:
+    """Missing fields first, grouped by process with the worst gaps (most missing fields)
+    first, then outlier-flagged filled fields in sequence order. max_items caps the total
+    queue length (None = no cap) - kept as a parameter so the strategy is easy to retune,
+    per the product owner's expectation that this gets tuned after real feedback. Fields
+    with required_for_progress=False are skipped entirely - marking a field "not
+    required" means don't nag about it either, not just don't count it. Also skips fields
+    whose config-gated column no longer exists (see relevant_field_specs) - otherwise an
+    unchecked optional block (Vacuum Quenching, ...) that was ever checked once would nag
+    forever about a field the user can no longer even see."""
+    processes_with_missing: list[tuple[ProcessInstance, list[str]]] = []
+    for process in state.process_sequence:
+        missing_keys = [
+            key
+            for key, spec in relevant_field_specs(process).items()
+            if not spec.varies and not spec.is_filled() and spec.required_for_progress
+        ]
+        if missing_keys:
+            processes_with_missing.append((process, missing_keys))
+    processes_with_missing.sort(key=lambda pair: len(pair[1]), reverse=True)
+
+    missing_items = [
+        NudgeItem(
+            sequence_index=process.sequence_index,
+            process_type=process.process_type,
+            field_key=field_key,
+            kind="missing",
+        )
+        for process, missing_keys in processes_with_missing
+        for field_key in missing_keys
+    ]
+
+    outlier_items = [
+        NudgeItem(
+            sequence_index=process.sequence_index,
+            process_type=process.process_type,
+            field_key=field_key,
+            kind="outlier",
+        )
+        for process in state.process_sequence
+        for field_key, spec in relevant_field_specs(process).items()
+        if not spec.varies and spec.is_outlier and spec.is_filled() and spec.required_for_progress
+    ]
+
+    queue = missing_items + outlier_items
+    return queue if max_items is None else queue[:max_items]
+
+
+def build_missing_fields_summary(state: ExperimentState) -> list[tuple[ProcessInstance, int]]:
+    """Every process that still has missing REQUIRED fields (varying or not - uses the
+    same is_filled() the progress bar uses; excludes required_for_progress=False fields
+    and config-gated-away fields, same as the progress bar - see relevant_field_specs),
+    with a count of how many. Always the LAST popup shown in the nudge flow, regardless
+    of queue length."""
+    summary = []
+    for process in state.process_sequence:
+        missing_count = sum(
+            1
+            for spec in relevant_field_specs(process).values()
+            if not spec.is_filled() and spec.required_for_progress
+        )
+        if missing_count:
+            summary.append((process, missing_count))
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Excel finalization - reuses Excel_creator's ExperimentExcelBuilder exactly for the
+# header/guide/citation sheets, then smart_databaser writes real data rows (mother +
+# child) itself, never Excel_creator's single fabricated is_testing row.
+# ---------------------------------------------------------------------------
+
+PARENT_ID_COLUMN_KEY = "Parent ID"
+
+
+def enumerate_sample_rows(state: ExperimentState) -> list[tuple[int, int | None]]:
+    """(sample_number, child_index) pairs in output row order: each sample's mother row
+    (child_index=None) first, then its children 1..child_count, per sample in
+    state.samples order."""
+    rows: list[tuple[int, int | None]] = []
+    for sample in state.samples:
+        rows.append((sample.sample_number, None))
+        rows.extend(
+            (sample.sample_number, child_index) for child_index in range(1, sample.child_count + 1)
+        )
+    return rows
+
+
+def subbatch_for_sample(state: ExperimentState, sample_number: int) -> str | None:
+    """Subbatch is never manually typed - it always equals the sample's variation
+    Subbatch (Sample Setup panel's SamplePlan.variation_group_index), 1-based, per the
+    product decision that Subbatch numbers should just match the Subbatch a sample was
+    set up under. Returns None if sample_number isn't in state.samples (defensive -
+    shouldn't happen via normal flows)."""
+    for sample in state.samples:
+        if sample.sample_number == sample_number:
+            return str(sample.variation_group_index + 1)
+    return None
+
+
+def compute_nomad_id(state: ExperimentState, sample_number: int, child_index: int | None) -> str:
+    """The lab id scheme of Excel_creator's Nomad ID formula and the experiment parser:
+    {LAB_ID_PREFIX}_{Project_Name}_{Date}_{Batch}_{Subbatch}_{Sample}, e.g.
+    KIT_JoDa_20260526_1_2_3. The parser takes everything before the last "_" as the batch
+    id, so Sample must stay the last segment. Subbatch is computed via subbatch_for_sample,
+    not read from experiment_info_fields (see EXPERIMENT_INFO_COMPUTED_KEYS); empty
+    Project_Name/Date/Batch values are skipped (missing_critical_fields blocks the export in
+    that case anyway).
+
+    peroTF ids have no child-row segment, so child_index is accepted for the uniform per-row
+    call signature but not used: a child row (only reachable through SamplePlan.child_count,
+    which the GUI no longer sets) gets its mother's id."""
+    parts = []
+    for key in ("Project_Name", "Date", "Batch"):
+        spec = state.experiment_info_fields.get(key)
+        if spec is not None and _is_filled(spec.value):
+            parts.append(str(spec.value))
+    subbatch = subbatch_for_sample(state, sample_number)
+    if subbatch is not None:
+        parts.append(subbatch)
+    parts.append(str(sample_number))
+    return "_".join([LAB_ID_PREFIX, *parts])
+
+
+def _resolve_experiment_info_cell(
+    state: ExperimentState, field_key: str, sample_number: int
+) -> Any:
+    spec = state.experiment_info_fields.get(field_key)
+    if spec is None:
+        return None
+    if spec.varies:
+        return spec.per_sample_values.get(sample_number)
+    return spec.value
+
+
+def _resolve_process_cell(
+    state: ExperimentState, sequence_index: int, field_key: str, sample_number: int
+) -> Any:
+    try:
+        process = state.get_process(sequence_index)
+    except KeyError:
+        return None
+    spec = process.field_specs.get(field_key)
+    if spec is None:
+        return None
+    if spec.varies:
+        return spec.per_sample_values.get(sample_number)
+    return spec.value
+
+
+def resolve_cell_value(
+    state: ExperimentState,
+    sequence_index: int,
+    field_key: str,
+    sample_number: int,
+    child_index: int | None,
+) -> Any:
+    """A varying field's per-sample value is shared by a sample's mother and every child
+    row (children inherit the same process-column/Experiment Info values as their
+    mother, per the real file's structure) - child_index is accepted for a uniform
+    per-row call signature (see generate_full_workbook) but not used to vary the result;
+    nothing in this app's data model currently varies by child_index."""
+    if sequence_index == 0:
+        return _resolve_experiment_info_cell(state, field_key, sample_number)
+    return _resolve_process_cell(state, sequence_index, field_key, sample_number)
+
+
+def append_parent_id_column(worksheet: Worksheet) -> int:
+    """Appends 'Parent ID' at the end of the worksheet rather than splicing it into the
+    Experiment Info block, to avoid disturbing sheet_experiment.py's existing data
+    validations/merged ranges (which reference fixed column letters computed at
+    generation time). Assumes NOMAD's parser matches columns by header text, not
+    position - worth a sanity check with a Data Steward once this is live."""
+    column_index = worksheet.max_column + 1
+    worksheet.cell(row=1, column=column_index, value="Experiment Info")
+    worksheet.cell(row=2, column=column_index, value=PARENT_ID_COLUMN_KEY)
+    return column_index
+
+
+def generate_full_workbook(state: ExperimentState) -> Workbook:
+    """Full 3-sheet workbook (Experiment Data + Data Entry Guide + How to Cite) via
+    Excel_creator's own ExperimentExcelBuilder, then real mother+child data rows written
+    by smart_databaser itself. Nomad ID, "Sample", "Subbatch", and Parent ID are always
+    freshly computed at write time from sample_number/child_index (never sourced from
+    field_specs, never no-clobbered) - they're derived identifiers, not user data, so
+    requiring the user to manually mark them varying and re-enter the same numbers per
+    row would be redundant.
+
+    The Parent ID column itself is only appended when at least one sample actually has
+    children (child_count > 0) - the per-sample child-row (diced-pixel) UI was removed
+    from SampleSetupPanel a while back, so for the overwhelming majority of experiments
+    every sample has child_count == 0 and Parent ID would always be a fully blank trailing
+    column with no possible content; product feedback confirmed that blank column reads as
+    noise, not a placeholder for a future need."""
+    builder = ExperimentExcelBuilder(process_sequence_to_dicts(state), is_testing=False)
+    builder.build_excel()
+    workbook = builder.workbook
+    worksheet = workbook["Experiment Data"]
+    column_map = build_column_map(worksheet)
+    has_children = any(sample.child_count > 0 for sample in state.samples)
+    parent_id_col = append_parent_id_column(worksheet) if has_children else None
+    nomad_id_col = column_map.get((0, "Nomad ID"))
+    sample_col = column_map.get((0, "Sample"))
+    subbatch_col = column_map.get((0, "Subbatch"))
+
+    mother_nomad_ids: dict[int, str] = {}
+    for row_offset, (sample_number, child_index) in enumerate(enumerate_sample_rows(state)):
+        row = 3 + row_offset
+        nomad_id = compute_nomad_id(state, sample_number, child_index)
+        if child_index is None:
+            mother_nomad_ids[sample_number] = nomad_id
+
+        for (sequence_index, field_key), col in column_map.items():
+            if sequence_index == 0 and field_key in ("Nomad ID", "Sample", "Subbatch"):
+                continue
+            value = resolve_cell_value(state, sequence_index, field_key, sample_number, child_index)
+            if value is not None:
+                worksheet.cell(row=row, column=col, value=value)
+
+        if nomad_id_col is not None:
+            worksheet.cell(row=row, column=nomad_id_col, value=nomad_id)
+        if sample_col is not None:
+            worksheet.cell(row=row, column=sample_col, value=sample_number)
+        if subbatch_col is not None:
+            worksheet.cell(
+                row=row, column=subbatch_col, value=subbatch_for_sample(state, sample_number)
+            )
+        if child_index is not None and parent_id_col is not None:
+            worksheet.cell(row=row, column=parent_id_col, value=mother_nomad_ids.get(sample_number))
+
+    return workbook
+
+
+def workbook_to_bytes(workbook: Workbook) -> bytes:
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def build_experiment_filename() -> str:
+    """Reuses ExperimentExcelBuilder.save()'s exact filename convention
+    (YYYYMMDD_experiment_file.xlsx) - not a per-sample renaming scheme,
+    since NOMAD's parser for these files is keyed on structure/content, and the
+    date/time in the name is the de facto creation timestamp."""
+    return f"{datetime.now().strftime('%Y%m%d')}_experiment_file.xlsx"
+
+
+# ---------------------------------------------------------------------------
+# Upload mechanism - distinct decision point, per the plan: pushes the generated Excel's
+# raw bytes into a user-selected, already-existing NOMAD upload (the manual "create the
+# upload in the NOMAD web GUI first" step is kept - this app never auto-creates an
+# upload). A single file (no zip - one experiment Excel, not per-sample files), sent with
+# the xlsx content-type, and explicit raise_for_status() on the PUT and every poll call.
+# The target upload_id comes from perotf_utils.api_calls.get_all_uploads (via
+# NomadSessionCache.get_uploads).
+#
+# MUST be live-verified against a disposable test upload on this Oasis before it is
+# trusted against a real upload - it has not been exercised against the real API here.
+# ---------------------------------------------------------------------------
+
+UPLOAD_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def upload_experiment_excel(
+    url: str,
+    token: str,
+    upload_id: str,
+    filename: str,
+    excel_bytes: bytes,
+    poll_interval_seconds: float = 2.0,
+    max_poll_seconds: float = 120.0,
+) -> None:
+    """PUTs the Excel's raw bytes into upload_id's /raw/ endpoint, triggers processing,
+    then polls until data.process_running is False. Raises requests.HTTPError if the PUT
+    itself fails, or TimeoutError if processing doesn't finish within max_poll_seconds.
+
+    The POST to /action/process deliberately does NOT raise_for_status(): it has been
+    seen live to return 400 even though the upload proceeds and finishes processing
+    normally - most likely because PUTting the file already triggers processing
+    automatically on this NOMAD version, making the explicit trigger redundant/rejected.
+    So: fire the POST, ignore its response, and treat the polling loop below as the
+    actual source of truth for success/failure."""
+    put_response = requests.put(
+        f"{url}/uploads/{upload_id}/raw/",
+        data={"wait_for_processing": False},
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": (filename, excel_bytes, UPLOAD_MIME_TYPE)},
+    )
+    put_response.raise_for_status()
+
+    requests.post(
+        f"{url}/uploads/{upload_id}/action/process",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    elapsed = 0.0
+    while elapsed < max_poll_seconds:
+        time.sleep(poll_interval_seconds)
+        elapsed += poll_interval_seconds
+        status_response = requests.get(
+            f"{url}/uploads/{upload_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+        status_response.raise_for_status()
+        if not status_response.json()["data"]["process_running"]:
+            return
+
+    raise TimeoutError(f"Upload {upload_id} processing did not finish within {max_poll_seconds}s")

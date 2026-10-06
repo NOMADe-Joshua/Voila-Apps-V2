@@ -1,6 +1,6 @@
 [project]
 name = "excel-creator"
-version = "1.0.0"
+version = "1.0.1"
 description = "Build Excel templates for a fabrication process sequence, ready for upload to NOMAD"
 requires-python = ">=3.10"
 dependencies = [

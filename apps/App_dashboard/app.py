@@ -40,21 +40,11 @@ def setup_app():
             display(Javascript(f"window.open({json.dumps(url)}, '_blank')"))
 
     def render_app_card(entry):
-        if entry.external_url:
-            full_url = entry.external_url
-        else:
-            if not dm.notebook_exists(entry):
-                logger.warning(
-                    "Notebook not found for %s: %s/%s", entry.name, entry.folder, entry.notebook
-                )
-            full_url = f"{URL_BASE}{dm.build_voila_url(entry, user, uploads_path)}"
-        return gui.create_app_card_overlay(
-            entry, full_url, lambda _b, name=entry.name, url=full_url: open_app(name, url)
-        )
-
-    def render_learning_card():
-        entry = dm.LEARNING_FOLDER
-        full_url = f"{URL_BASE}{dm.build_jupyter_url(entry, user, dm.get_upload_id())}"
+        if not dm.notebook_exists(entry):
+            logger.warning(
+                "Notebook not found for %s: %s/%s", entry.name, entry.folder, entry.notebook
+            )
+        full_url = f"{URL_BASE}{dm.build_voila_url(entry, user, uploads_path)}"
         return gui.create_app_card_overlay(
             entry, full_url, lambda _b, name=entry.name, url=full_url: open_app(name, url)
         )
@@ -65,8 +55,6 @@ def setup_app():
     sections = []
     for category, entries in dm.CATEGORIES.items():
         cards = [render_app_card(e) for e in entries]
-        if category == "Build Your Own":
-            cards.insert(0, render_learning_card())
         sections.append(gui.create_category_section(category, cards))
 
     root.children = [

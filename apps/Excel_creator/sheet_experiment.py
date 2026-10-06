@@ -498,24 +498,27 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False):
         row2_color = lighten_color(cell_color)
         for i, step_item in enumerate(steps):
             col_index = start_col + i
+            # make_label returns (label, test value) when is_testing is truthy and the
+            # plain label otherwise; the header row is written in both cases.
             if isinstance(step_item, tuple):
                 step_label, test_val = step_item
-                cell = ws.cell(row=2, column=col_index)
-                cell.value = step_label
-                cell.fill = PatternFill(
-                    start_color=row2_color, end_color=row2_color, fill_type="solid"
-                )
-                if is_testing:
-                    ws.cell(row=3, column=col_index, value=test_val)
+            else:
+                step_label, test_val = step_item, None
+            cell = ws.cell(row=2, column=col_index)
+            cell.value = step_label
+            cell.fill = PatternFill(start_color=row2_color, end_color=row2_color, fill_type="solid")
+            if is_testing:
+                ws.cell(row=3, column=col_index, value=test_val)
         start_col = end_col + 1
         incremental_number += 1
 
     # Example: Apply a custom formula for the "Nomad ID" column (example only)
-    for row in range(3, 4):
-        nomad_id_formula = (
-            f'=CONCATENATE("KIT_",B{row},"_",A{row},"_",C{row},"_",D{row},"_",E{row})'
-        )
-        ws[f"F{row}"].value = nomad_id_formula
+    if is_testing:
+        for row in range(3, 4):
+            nomad_id_formula = (
+                f'=CONCATENATE("KIT_",B{row},"_",A{row},"_",C{row},"_",D{row},"_",E{row})'
+            )
+            ws[f"F{row}"].value = nomad_id_formula
 
     # Adjust column widths
     for col in ws.columns:

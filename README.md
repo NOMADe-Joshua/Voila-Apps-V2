@@ -25,21 +25,15 @@ two repos (see `CONTRIBUTING.md`).
 | Process JV Overview | `Process_JV_Overview` | Processing steps of a batch next to its JV results |
 | MPPT Analysis | `MPPT_Analysis` | Maximum power point tracking curves and fits |
 | EQE Analysis | `EQE_Analysis` | EQE spectra and integrated Jsc against AM1.5G |
-| Diode Analyzer | `Diode_Analyzer` | Diode-model fits of uploaded IV curves |
 | AbsPL Analysis | `AbsPL_Analysis` | Absolute PL spectra, peak fits, QFLS and PLQY |
 | UV-Vis Analyzer | `UVVis_Analyzer` | UV-Vis spectra from NOMAD |
 | XRD Peak Fitting | `XRD_PF` | XRD pattern peak detection and fitting |
-| Peak Explorer | `Peak_Explorer` | Interactive peak identification in uploaded spectra |
-| SEM Crystal Counter | `SEM_crystal_counter` | Grain counting and size statistics from SEM images |
-| XPS Automated | `XPS-Automated` | XPS spectra alignment (experimental) |
-| Data Overview Machines | `Data_Overview_Machines` | What was measured and processed in the last week |
+| SEM Grain Size Analysis | `SEM_crystal_counter` | Grain size distribution of perovskite films from SEM images |
 | Data Tools | `Data_Tools` | Converters and renamers for the ELN naming scheme |
 | Excel Creator | `Excel_creator` | Experiment planning workbooks for NOMAD uploads |
+| Smart Databaser | `smart_databaser` | Experiment workbooks for NOMAD, autofilled live from earlier batches |
 | Design of Experiments | `DesignOfExperiments` | DoE planning and sampling |
-| Hansen Green Calculator | `Hansen_green_calculator` | Hansen solubility parameters and green solvent blends |
-| Perovskite Calculator | `Perovskite_calculator` | Precursor solution calculator |
 | UV-Vis Simulator | `UVVis_Simulator` | Thin-film optics from a refractive index library |
-| Wetting Envelope | `Wetting_envelope` | Wetting envelope plotter (Owens-Wendt) |
 
 ---
 
@@ -52,13 +46,13 @@ Voila-Apps-V2/
 │   ├── perotf_utils/         # shared library, imported as perotf_utils.<module>
 │   │   ├── config.py         # the ONLY place for server URL, paths and NOMAD entry types
 │   │   ├── api_calls.py, access_token.py, auth_manager.py, auth_ui.py,
-│   │   └── batch_selection.py, error_handler.py, plotting_utils.py, process_handling.py
+│   │   ├── batch_selection.py, error_handler.py, plotting_utils.py, process_handling.py
+│   │   └── process_specs.py  # process catalog of the Smart Databaser
 │   ├── utils.ipynb           # admin: usage-log dashboard and backup zip
 │   └── log_view.ipynb        # admin: usage-log viewer
 ├── apps/<AppName>/           # one folder per app: pyproject.toml, notebook(s), modules
 ├── tests/<AppName>/          # one test folder per app, plus tests/structure and tests/shared
-├── Learning/                 # tutorial notebooks
-└── scripts/                  # fixture generator and git helpers
+└── scripts/                  # test fixture generator
 ```
 
 ## Configuration
@@ -104,13 +98,6 @@ python -m pytest tests -m "not live"              # everything except live-serve
 python -m pytest tests/JV-Analysis                # one app
 ruff check . && ruff format --check .
 ```
-
-## Build your own analysis (with an LLM)
-
-To query the Oasis from a notebook, a script or a chatbot, paste
-[`NOMAD_DATA_ACCESS_PROMPT.md`](NOMAD_DATA_ACCESS_PROMPT.md) into the
-conversation. It covers authentication, the two query endpoints, the peroTF
-entry types and worked examples.
 
 ## Contributing
 
