@@ -1,27 +1,27 @@
-# Graph Report - Voila-Apps-V2  (2026-10-06)
+# Graph Report - Voila-Apps-V2  (2026-10-07)
 
 ## Corpus Check
-- 142 files · ~202,118 words
+- 143 files · ~202,569 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 19 file(s) not represented in the graph (top: .ipynb 16, (none) 2, .xls 1)
 
 ## Summary
-- 3701 nodes · 5727 edges · 264 communities (72 shown, 192 thin omitted)
-- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 253 edges (avg confidence: 0.86)
+- 3710 nodes · 5743 edges · 261 communities (71 shown, 190 thin omitted)
+- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 254 edges (avg confidence: 0.86)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `0f431864`
+- Built from commit: `7ee05e0a`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
-- pandas
+- DesignOfExperiments/plot_manager.py
 - io
-- ipywidgets
+- plotly_graph_objects
 - MinimalistExperimentBuilder
 - App_dashboard/data_manager.py
-- JV-Analysis/app.py
+- openpyxl
 - AbsPLGUIComponents
 - ValidationUtils
 - DoEApplication
@@ -65,20 +65,20 @@
 - AuthenticationUI
 - ResultExporter
 - PlotManager
-- CI Per-Suite Test Matrix Job
+- build_process_sequence_from_batch
 - JVCurveAnalysisUI
 - PLAnalysisApp
 - EQE_Analysis/plot_manager.py
 - smart_databaser/data_manager.py
 - test_repo_structure.py
 - ._create_variable_widget
-- XRD_PF/data_manager.py
+- H5DataLoader
 - AbsPLAppController
 - AbsPLDataManager
 - ColorSchemeSelector
 - process_specs.py
 - APIClient
-- Process_JV_Overview/app.py
+- eqe_split_module.py
 - ResizablePlotManager
 - GUIComponents
 - ErrorHandler
@@ -87,14 +87,15 @@
 - FontSizeUI
 - FontSizeUI
 - UVVisPlotUI
+- DesignOfExperiments/utils.py
 - MathUtils
-- _is_filled
+- ProcessFieldSpec
 - ._render_batch
 - ProcessJVOverviewApp
-- ._update_wavelength_range_on_spectrum
+- .__init__
 - Deploying the app suite to a NOMAD Oasis
 - tests/conftest.py
-- batch_process
+- pandas
 - LatinHypercubeSampling
 - AuthenticationUI
 - ._create_condition_selector
@@ -103,27 +104,26 @@
 - PlotManager
 - UVVisDataManager
 - UVVisDiagnosticHelper
-- plotly_graph_objects
-- XRD_PF/utils.py
+- ipywidgets
+- test_config.py
 - test_api_connectivity.py
-- generate_full_workbook
+- EQE_Analysis/diagnostic_helper.py
 - Excel Creator Quick Guide
 - SimpleAuthManager
 - JV Analysis Dashboard User Manual v3.0
 - Per-app checklist
 - UVVisBatchSelector
 - Plotter
-- test_config.py
+- pytest
 - SimpleAuthManager
 - FontSizeUI
 - MPPT Analysis Tool - User Manual
 - generate_jv_pptx_bytes
-- ._on_auth_success
+- Process_JV_Overview/app.py
 - SimpleAuthManager
 - .display
 - SaveUI
-- SimpleAuthManager
-- fitting_engine.py
+- ChebyshevBackgroundModel
 - OrthogonalArraySampling
 - ._create_filtered_curves_data
 - .update_variable_reorder
@@ -146,37 +146,38 @@
 - ColorUtils
 - _ProcessRow
 - NomadSessionCache
-- FieldProvenance
+- Voila-Apps-V2: peroTF NOMAD Analysis Apps monorepo
 - ._make_move_down_handler
 - ProcessSequenceBuilder
 - jv_app_colors
 - UVVis_Analyzer/gui_components.py
-- pytest
+- VariationTemplatePanel
 - dm
 - plotting_string_action
 - plotting_string_action
+- ._process_jv_data_for_analysis
 - Data_Tools/conftest.py
 - DesignOfExperiments/conftest.py
-- EQE_Analysis/conftest.py
-- ProcessFieldSpec
+- ._process_jv_data_for_analysis
+- alias_config.py
 - ._create_matching_curves_from_filtered_jv
-- process_eqe_file
-- JV-Analysis/conftest.py
+- ._on_download_pptx_clicked
+- CI Per-Suite Test Matrix Job
 - MPPT_Analysis/conftest.py
-- Voila-Apps-V2: peroTF NOMAD Analysis Apps monorepo
+- ._filter_batches_with_jv
 - ._create_matching_curves_from_filtered_jv
 - Process_JV_Overview/conftest.py
 - UVVis_Analyzer/conftest.py
-- XRD_PF/conftest.py
+- EQE_Analysis/conftest.py
+- JV-Analysis/conftest.py
 - NudgePopupFlow
-- EQE_Analysis/diagnostic_helper.py
-- AbsPL_Analysis/data_manager.py
-- ._on_download_pptx_clicked
+- XRD_PF/conftest.py
+- JV-Analysis/app.py
 - Final report format
 - _create_batch_picker
 - SEM Perovskite Grain Size Analysis Manual
 - pull_request_template.md
-- relevant_field_specs
+- ProcessInstance
 - ExperimentState
 - ProcessFieldsPanel
 - DiagnosticLogger
@@ -186,14 +187,12 @@
 - SampleSetupPanel
 - _mock_response
 - _set_id_fields
-- VariationTemplatePanel
 - smart_databaser/conftest.py
 - _add_manual_field
 - _m_def
-- smart_databaser/app.py
+- initialize_ui
 - _standalone_field_row
-- ._fetch_batch
-- .get_data_info
+- ._load_jv
 - test_every_mapped_catalog_label_is_a_column_excel_creator_writes
 - _bind_app_modules
 - test_resolve_progress_units_does_not_cross_process_type_boundary
@@ -238,39 +237,35 @@
   UNIFICATION_PROMPT.md → shared/perotf_utils/auth_manager.py
 - `Known environment gotcha: `display()` inside a widget callback needs an `Output()` under Voila` --references--> `setup_app()`  [EXTRACTED]
   CLAUDE.md → apps/App_dashboard/app.py
+- `Known gaps (tracked, not silently fixed)` --references--> `visible_categories()`  [INFERRED]
+  CLAUDE.md → apps/App_dashboard/data_manager.py
 - `Layout` --references--> `log_notebook_usage()`  [INFERRED]
   CLAUDE.md → shared/perotf_utils/access_token.py
 - `Notebook` --references--> `log_notebook_usage()`  [INFERRED]
   UNIFICATION_PROMPT.md → shared/perotf_utils/access_token.py
-- `Logging` --references--> `ErrorHandler`  [INFERRED]
-  UNIFICATION_PROMPT.md → shared/perotf_utils/error_handler.py
 
 ## Import Cycles
 - None detected.
 
-## Communities (264 total, 192 thin omitted)
-
-### Community 0 - "pandas"
-Cohesion: 0.04
-Nodes (9): Constants, format_percentage(), generate_experiment_id(), truncate_string(), _flatten_multiindex_columns(), _flatten_multiindex_columns(), merge_process(), merge_step_data() (+1 more)
+## Communities (261 total, 190 thin omitted)
 
 ### Community 1 - "io"
-Cohesion: 0.05
-Nodes (24): extract_x_y(), get_oldest_file_date(), process_files(), process_zip_file(), rename_files(), create_download_zip(), extract_channel_from_block(), extract_metadata() (+16 more)
-
-### Community 2 - "ipywidgets"
 Cohesion: 0.06
-Nodes (10): create_resizable_plot(), display_resizable_plot(), ResizablePlotManager, ResizablePlotWidget, create_experiment_app(), main(), _field_row_caption(), _outlier_flag_html() (+2 more)
+Nodes (23): extract_x_y(), get_oldest_file_date(), process_files(), process_zip_file(), rename_files(), extract_channel_from_block(), extract_metadata(), format_old_file() (+15 more)
+
+### Community 2 - "plotly_graph_objects"
+Cohesion: 0.07
+Nodes (12): create_resizable_plot(), display_resizable_plot(), ResizablePlotManager, ResizablePlotWidget, create_resizable_plot(), display_resizable_plot(), ResizablePlotWidget, test_resizable_plot() (+4 more)
 
 ### Community 3 - "MinimalistExperimentBuilder"
 Cohesion: 0.06
 Nodes (10): ExperimentExcelBuilder, add_guide_sheet(), add_experiment_sheet(), generate_steps_for_process(), make_label(), lighten_color(), add_citation_sheet(), _debug_print() (+2 more)
 
 ### Community 4 - "App_dashboard/data_manager.py"
-Cohesion: 0.07
-Nodes (21): setup_app(), open_app(), open_whats_new(), render_app_card(), AppEntry, build_voila_url(), _cwd_parts(), get_current_user() (+13 more)
+Cohesion: 0.06
+Nodes (23): setup_app(), open_app(), open_whats_new(), render_app_card(), AppEntry, build_voila_url(), _cwd_parts(), get_current_user() (+15 more)
 
-### Community 5 - "JV-Analysis/app.py"
+### Community 5 - "openpyxl"
 Cohesion: 0.04
 Nodes (16): clean_filename(), create_new_results_folder(), generate_detailed_export_excel(), is_running_in_jupyter(), save_combined_excel_data(), save_full_data_frame(), clean_filename(), create_new_results_folder() (+8 more)
 
@@ -286,21 +281,21 @@ Nodes (5): DataProcessor, ExperimentalDesignUtils, FileHandler, safe_float_conve
 Cohesion: 0.06
 Nodes (5): HaltonSampling, RandomSampling, SamplingAlgorithm, SobolSampling, UniformGridSampling
 
-### Community 13 - "DataManager"
+### Community 18 - "GUIComponents"
 Cohesion: 0.05
-Nodes (3): DataManager, extract_px_and_cycle_info(), extract_status_from_metadata()
+Nodes (6): GUIComponents, debug_print(), format_timestamp(), generate_output_filename(), safe_divide(), validate_time_index()
 
 ### Community 19 - "AuthenticationUI"
 Cohesion: 0.07
 Nodes (7): AuthenticationUI, create_manual(), only_curve_name(), only_sample_name(), plot_options, sample_and_curve_name(), WidgetFactory
 
 ### Community 22 - "get_ids_in_batch"
-Cohesion: 0.09
-Nodes (14): extract_px_and_cycle_info(), extract_status_from_metadata(), _fetch_abspl(), _fetch_eqe(), _fetch_jv(), _fetch_mppt(), _fetch_xrd(), main() (+6 more)
+Cohesion: 0.13
+Nodes (11): _fetch_abspl(), _fetch_eqe(), _fetch_jv(), _fetch_mppt(), _fetch_xrd(), main(), _make_serialisable(), get_all_eqe() (+3 more)
 
 ### Community 23 - "requests"
 Cohesion: 0.10
-Nodes (22): _entry_id_from_reference(), fetch_experiment_info_source(), get_specific_data_of_sample(), get_token(), get_all_batches_wth_data(), get_all_measurements_except_JV(), get_all_mppt(), get_all_uploads() (+14 more)
+Nodes (23): _entry_id_from_reference(), fetch_experiment_info_source(), get_specific_data_of_sample(), get_token(), get_all_batches_wth_data(), get_all_JV(), get_all_measurements_except_JV(), get_all_mppt() (+15 more)
 
 ### Community 24 - "DragDropUploadWidget"
 Cohesion: 0.08
@@ -312,7 +307,7 @@ Nodes (11): _add_sibling_apps(), _app_install_marker(), _apply_config_env(), _ap
 
 ### Community 30 - "test_app_dashboard.py"
 Cohesion: 0.10
-Nodes (7): _entry(), _registered(), test_build_voila_url_matches_expected_nomad_structure(), test_categories_cover_every_app_folder_without_repeating_a_notebook(), test_every_registered_notebook_exists_on_disk(), test_get_uploads_path_keeps_a_repo_subdirectory_inside_the_upload(), test_get_uploads_path_uses_the_leftmost_uploads_segment()
+Nodes (10): _entry(), _registered(), test_a_category_with_only_hidden_cards_disappears(), test_build_voila_url_matches_expected_nomad_structure(), test_categories_cover_every_app_folder_without_repeating_a_notebook(), test_every_registered_notebook_exists_on_disk(), test_get_uploads_path_keeps_a_repo_subdirectory_inside_the_upload(), test_get_uploads_path_uses_the_leftmost_uploads_segment() (+2 more)
 
 ### Community 37 - "fitting_tools.py"
 Cohesion: 0.13
@@ -323,36 +318,32 @@ Cohesion: 0.04
 Nodes (46): _cache_with(), test_apply_process_override_captures_values_beyond_original_config(), test_apply_process_override_explicit_occurrence_overrides_positional_default(), test_apply_process_override_only_touches_target_process(), test_apply_whole_experiment_template_also_autofills_experiment_info(), test_apply_whole_experiment_template_discards_prior_sequence_and_manual_edits(), test_apply_whole_experiment_template_replaces_sequence_and_fills_values(), test_autofill_does_not_flag_value_within_distribution() (+38 more)
 
 ### Community 44 - "perotf-utils"
-Cohesion: 0.13
-Nodes (15): abspl-analysis, app-dashboard, data-tools, designofexperiments, eqe-analysis, excel-creator, jv-analysis, mppt-analysis (+7 more)
+Cohesion: 0.12
+Nodes (16): abspl-analysis, app-dashboard, data-tools, designofexperiments, eqe-analysis, excel-creator, jv-analysis, log-view (+8 more)
 
-### Community 51 - "CI Per-Suite Test Matrix Job"
-Cohesion: 0.60
-Nodes (5): CI Workflow (GitHub Actions), CI Test Suite Discovery Job, CI Ruff Lint Job, CI Per-Suite Test Matrix Job, Root Aggregated requirements.txt
+### Community 51 - "build_process_sequence_from_batch"
+Cohesion: 0.13
+Nodes (9): build_process_sequence_from_batch(), default_config_for(), _distinct_positions_in_order(), distinct_steps_for_process_type(), _has_any_data(), infer_config_from_source_step(), list_process_occurrences(), resolve_process_type() (+1 more)
 
 ### Community 54 - "EQE_Analysis/plot_manager.py"
 Cohesion: 0.17
 Nodes (8): _build_legend_annotation(), _build_mj_legend_annotation(), _compute_cumulative_jsc_am15g(), _compute_group_stats(), create_eqe_figure(), _format_ann_val(), _get_am15g(), _positions_label()
 
 ### Community 56 - "smart_databaser/data_manager.py"
-Cohesion: 0.07
-Nodes (16): build_experiment_filename(), build_process_sequence_from_batch(), compute_field_distribution_for_occurrence(), compute_sample_set_split(), default_config_for(), _derive_evaporation_organic(), _distinct_positions_in_order(), distinct_steps_for_process_type() (+8 more)
+Cohesion: 0.06
+Nodes (19): append_parent_id_column(), build_column_map(), build_experiment_filename(), compute_nomad_id(), compute_sample_set_split(), _derive_evaporation_organic(), enumerate_sample_rows(), generate_full_workbook() (+11 more)
 
 ### Community 57 - "test_repo_structure.py"
 Cohesion: 0.22
 Nodes (9): _code_cells(), _offending_lines(), _rel(), test_app_has_a_notebook(), test_app_has_pyproject_depending_on_perotf_utils(), test_no_hysprint_utils_imports(), test_notebook_code_has_no_server_literals_or_sys_path(), test_notebook_starts_with_bootstrap_cell() (+1 more)
 
-### Community 59 - "XRD_PF/data_manager.py"
-Cohesion: 0.15
-Nodes (3): get_axes_from_extent(), get_h5_path_from_ipython(), H5DataLoader
-
 ### Community 63 - "process_specs.py"
 Cohesion: 0.07
 Nodes (19): atmospheric_args(), build_boolean_config_fields(), build_field_paths(), build_field_value_multipliers(), build_indexed_config_keys(), build_numeric_config_fields(), field_args(), _field_paths() (+11 more)
 
-### Community 65 - "Process_JV_Overview/app.py"
-Cohesion: 0.15
-Nodes (4): get_batch_ids(), create_batch_selection(), extract_date(), sort_by_date_desc()
+### Community 65 - "eqe_split_module.py"
+Cohesion: 0.21
+Nodes (5): create_download_zip(), format_eqe_output(), generate_filename(), parse_eqe_file(), process_eqe_file()
 
 ### Community 66 - "ResizablePlotManager"
 Cohesion: 0.15
@@ -362,13 +353,17 @@ Nodes (4): create_resizable_plot(), display_resizable_plot(), ResizablePlotManag
 Cohesion: 0.15
 Nodes (4): add_diagnostic_button_to_app(), on_diagnose_click(), DebugLogger, diagnose_direction_values()
 
-### Community 76 - "_is_filled"
-Cohesion: 0.12
-Nodes (9): compute_variation_label(), _field_slug(), _is_filled(), iter_varying_fields(), missing_critical_fields(), render_variation_template(), _substitute(), set_field_varies() (+1 more)
+### Community 74 - "DesignOfExperiments/utils.py"
+Cohesion: 0.09
+Nodes (4): Constants, format_percentage(), generate_experiment_id(), truncate_string()
 
-### Community 77 - "._render_batch"
-Cohesion: 0.24
-Nodes (4): count_samples(), format_date(), format_error(), plural()
+### Community 76 - "ProcessFieldSpec"
+Cohesion: 0.09
+Nodes (13): compute_variation_label(), _field_slug(), _is_filled(), iter_varying_fields(), missing_critical_fields(), populate_column_from_first(), ProcessFieldSpec, render_variation_template() (+5 more)
+
+### Community 78 - "ProcessJVOverviewApp"
+Cohesion: 0.20
+Nodes (3): format_error(), plural(), ProcessJVOverviewApp
 
 ### Community 81 - "Deploying the app suite to a NOMAD Oasis"
 Cohesion: 0.07
@@ -378,29 +373,29 @@ Nodes (27): 1. Open an issue first, 2. Open a PR that references it, 3. Bump the
 Cohesion: 0.13
 Nodes (8): Hard rules: apply to every edit in `apps/`, Known environment gotcha: `tests/conftest.py` is load-bearing, app_loader(), load_app_modules(), _no_network(), _sibling_apps(), Step 3 - Pre-shipping gate, Tests (monorepo layout)
 
-### Community 83 - "batch_process"
-Cohesion: 0.21
-Nodes (6): batch_process, create_step_description(), param_selection_buttons(), flatten_layers(), make_table(), manufacturing_parameter
+### Community 83 - "pandas"
+Cohesion: 0.05
+Nodes (13): extract_cycle_info(), get_axes_from_extent(), sanitize_array(), sanitize_float(), batch_process, create_step_description(), param_selection_buttons(), flatten_layers() (+5 more)
 
 ### Community 86 - "._create_condition_selector"
 Cohesion: 0.23
 Nodes (4): clear_all_samples(), create_sample_checkbox_handler(), handler(), select_all_samples()
 
-### Community 94 - "plotly_graph_objects"
-Cohesion: 0.12
-Nodes (8): create_resizable_plot(), display_resizable_plot(), ResizablePlotWidget, test_resizable_plot(), create_resizable_plot(), display_resizable_plot(), ResizablePlotWidget, test_resizable_plot()
+### Community 94 - "ipywidgets"
+Cohesion: 0.07
+Nodes (6): create_experiment_app(), main(), _field_row_caption(), _outlier_flag_html(), _provenance_summary_html(), _trigger_browser_download()
 
-### Community 95 - "XRD_PF/utils.py"
-Cohesion: 0.18
-Nodes (5): debug_print(), format_timestamp(), generate_output_filename(), safe_divide(), validate_time_index()
+### Community 95 - "test_config.py"
+Cohesion: 0.20
+Nodes (3): test_admin_users_default_and_override(), test_endpoints_are_absolute_paths_without_trailing_slash(), test_environment_overrides_the_server()
 
 ### Community 96 - "test_api_connectivity.py"
 Cohesion: 0.27
 Nodes (5): _skip_if_no_credentials(), test_api_reachable(), test_get_ids_in_batch_returns_list(), test_get_sample_description_returns_dict(), test_token_authentication()
 
-### Community 97 - "generate_full_workbook"
-Cohesion: 0.10
-Nodes (11): append_parent_id_column(), build_column_map(), compute_nomad_id(), enumerate_sample_rows(), generate_full_workbook(), generate_header_workbook(), _parse_sequence_index(), process_sequence_to_dicts() (+3 more)
+### Community 97 - "EQE_Analysis/diagnostic_helper.py"
+Cohesion: 0.22
+Nodes (5): add_diagnostic_button_to_app(), _on_click(), _on_mj_click(), diagnose_eqe_loading(), diagnose_multijunction()
 
 ### Community 98 - "Excel Creator Quick Guide"
 Cohesion: 0.50
@@ -422,9 +417,9 @@ Nodes (9): 1. Batch Selection, 2. Sample Selection, 3. Curve Fitting, 4. Plottin
 Cohesion: 0.22
 Nodes (3): _fig_to_png_bytes(), generate_jv_pptx_bytes(), _add_figure()
 
-### Community 111 - "._on_auth_success"
-Cohesion: 0.20
-Nodes (3): get_batches_with_uploads(), get_upload_ids_with_entries(), parse_batch_id()
+### Community 111 - "Process_JV_Overview/app.py"
+Cohesion: 0.15
+Nodes (3): get_batches_with_uploads(), get_upload_name(), parse_batch_id()
 
 ### Community 123 - "._create_filtered_curves_data"
 Cohesion: 0.28
@@ -440,7 +435,7 @@ Nodes (5): _forbidden_chars_message(), _guard_forbidden_characters(), _on_change
 
 ### Community 131 - "Any"
 Cohesion: 0.12
-Nodes (14): _apply_multiplier(), autofill_experiment_info_from_batch(), build_field_mapping_debug_report(), fetch_process_field_values(), find_forbidden_characters(), _flatten_leaf_paths(), _get_path(), _get_path_any() (+6 more)
+Nodes (13): _apply_multiplier(), build_field_mapping_debug_report(), fetch_process_field_values(), find_forbidden_characters(), _flatten_leaf_paths(), _get_path(), _get_path_any(), is_outlier() (+5 more)
 
 ### Community 140 - "create_finish_section"
 Cohesion: 0.28
@@ -454,41 +449,41 @@ Nodes (3): _extract_xrd_arrays(), _search(), _to_1d()
 Cohesion: 0.12
 Nodes (4): create_resizable_plot(), display_resizable_plot(), ResizablePlotManager, ResizablePlotWidget
 
+### Community 153 - "_ProcessRow"
+Cohesion: 0.18
+Nodes (3): _observer(), _ProcessRow, _sync_widget_value()
+
 ### Community 157 - "NomadSessionCache"
 Cohesion: 0.11
-Nodes (9): apply_process_override(), apply_whole_experiment_template(), autofill_process_from_batch(), expand_process_config_for_source(), is_outlier(), NomadSessionCache, occurrence_index_for_process(), ProcessInstance (+1 more)
+Nodes (11): apply_process_override(), apply_whole_experiment_template(), autofill_experiment_info_from_batch(), autofill_process_from_batch(), compute_field_distribution_for_occurrence(), expand_process_config_for_source(), FieldProvenance, NomadSessionCache (+3 more)
 
-### Community 159 - "FieldProvenance"
-Cohesion: 0.25
-Nodes (5): FieldProvenance, fill_all_date_and_operator_fields(), _apply(), populate_column_from_first(), set_field_manual()
+### Community 159 - "Voila-Apps-V2: peroTF NOMAD Analysis Apps monorepo"
+Cohesion: 0.15
+Nodes (10): Change management: issues, PRs, versions, graphify, Known environment gotcha: always tear down local test processes (Voila, kernels, Playwright), Known environment gotcha: `display()` inside a widget callback needs an `Output()` under Voila, Known environment gotcha: every notebook bootstraps via `bootstrap.py`, never its own install cell, Known gaps (tracked, not silently fixed), Layout, Voila-Apps-V2: peroTF NOMAD Analysis Apps monorepo (+2 more)
 
 ### Community 169 - "dm"
 Cohesion: 0.06
 Nodes (29): dm(), mods(), _fill_critical_fields(), test_batch_field_mapping_debug_panel_loads_batch_and_renders_report(), test_batch_picker_lists_newest_batch_first_and_search_keeps_that_order(), test_create_finish_section_blocks_both_missing_lists_both_fields(), test_create_finish_section_blocks_download_when_batch_missing(), test_create_finish_section_blocks_upload_when_project_name_missing() (+21 more)
 
-### Community 182 - "ProcessFieldSpec"
-Cohesion: 0.17
-Nodes (6): is_field_required_by_default(), ProcessFieldSpec, set_field_required_for_progress(), sync_field_specs_from_columns(), _FieldRow, _observer()
+### Community 182 - "alias_config.py"
+Cohesion: 0.47
+Nodes (3): _field_matches_member(), load_alias_groups(), resolve_progress_units()
 
 ### Community 183 - "._create_matching_curves_from_filtered_jv"
 Cohesion: 0.32
 Nodes (3): _norm_cycle(), _norm_text(), should_include_curve()
 
-### Community 184 - "process_eqe_file"
-Cohesion: 0.25
-Nodes (4): format_eqe_output(), generate_filename(), parse_eqe_file(), process_eqe_file()
-
-### Community 188 - "Voila-Apps-V2: peroTF NOMAD Analysis Apps monorepo"
-Cohesion: 0.15
-Nodes (10): Change management: issues, PRs, versions, graphify, Known environment gotcha: always tear down local test processes (Voila, kernels, Playwright), Known environment gotcha: `display()` inside a widget callback needs an `Output()` under Voila, Known environment gotcha: every notebook bootstraps via `bootstrap.py`, never its own install cell, Known gaps (tracked, not silently fixed), Layout, Voila-Apps-V2: peroTF NOMAD Analysis Apps monorepo (+2 more)
+### Community 185 - "CI Per-Suite Test Matrix Job"
+Cohesion: 0.60
+Nodes (5): CI Workflow (GitHub Actions), CI Test Suite Discovery Job, CI Ruff Lint Job, CI Per-Suite Test Matrix Job, Root Aggregated requirements.txt
 
 ### Community 189 - "._create_matching_curves_from_filtered_jv"
 Cohesion: 0.32
 Nodes (3): _norm_cycle(), _norm_text(), should_include_curve()
 
-### Community 207 - "EQE_Analysis/diagnostic_helper.py"
-Cohesion: 0.22
-Nodes (5): add_diagnostic_button_to_app(), _on_click(), _on_mj_click(), diagnose_eqe_loading(), diagnose_multijunction()
+### Community 209 - "JV-Analysis/app.py"
+Cohesion: 0.16
+Nodes (4): get_batch_ids(), create_batch_selection(), extract_date(), sort_by_date_desc()
 
 ### Community 210 - "Final report format"
 Cohesion: 0.25
@@ -502,13 +497,13 @@ Nodes (11): _create_batch_picker(), on_click(), create_download_button(), on_cli
 Cohesion: 0.83
 Nodes (4): SEM Perovskite Grain Size Analysis Manual, Cluster Filters (Min Cluster Size, Max Border Pixels), Canny Edge Detection Parameters (threshold, sigma, histogram equalization), Kernel Size Neighborhood Grouping
 
-### Community 215 - "relevant_field_specs"
-Cohesion: 0.14
-Nodes (8): _field_matches_member(), load_alias_groups(), resolve_progress_units(), build_missing_fields_summary(), build_nudge_queue(), compute_experiment_progress(), compute_process_progress(), relevant_field_specs()
+### Community 215 - "ProcessInstance"
+Cohesion: 0.16
+Nodes (7): build_missing_fields_summary(), build_nudge_queue(), compute_experiment_progress(), compute_process_progress(), ProcessInstance, relevant_field_keys_for_process(), relevant_field_specs()
 
 ### Community 216 - "ExperimentState"
-Cohesion: 0.10
-Nodes (9): apply_variation_template(), auto_fill_variation_column(), clear_autofilled_value(), clear_process_override(), compute_experiment_info_progress(), ExperimentState, SamplePlan, update_variation_column() (+1 more)
+Cohesion: 0.09
+Nodes (11): apply_variation_template(), auto_fill_variation_column(), clear_autofilled_value(), clear_process_override(), compute_experiment_info_progress(), ExperimentState, fill_all_date_and_operator_fields(), _apply() (+3 more)
 
 ### Community 222 - "create_batch_selection"
 Cohesion: 0.28
@@ -530,8 +525,8 @@ Nodes (5): _add_manual_field(), test_create_quick_fill_all_button_fills_and_call
 Cohesion: 0.33
 Nodes (4): _m_def(), test_resolve_process_type_m_def_maps_the_three_method_less_classes(), test_resolve_process_type_m_def_matches_lab_variants_of_thermal_annealing(), test_resolve_process_type_m_def_unknown_class_returns_none()
 
-### Community 235 - "smart_databaser/app.py"
-Cohesion: 0.29
+### Community 235 - "initialize_ui"
+Cohesion: 0.50
 Nodes (3): initialize_ui(), on_start_nudge(), refresh_all()
 
 ### Community 236 - "_standalone_field_row"
@@ -539,24 +534,24 @@ Cohesion: 0.40
 Nodes (3): _standalone_field_row(), test_build_field_row_datetime_field_colon_is_not_a_forbidden_character(), test_build_field_row_operator_field_me_button_fills_current_user()
 
 ## Knowledge Gaps
-- **83 isolated node(s):** `abspl-analysis`, `app-dashboard`, `data-tools`, `designofexperiments`, `eqe-analysis` (+78 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1815 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **192 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **84 isolated node(s):** `abspl-analysis`, `app-dashboard`, `data-tools`, `designofexperiments`, `eqe-analysis` (+79 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1818 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **190 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `GUIComponents` connect `GUIComponents` to `pandas`, `.create_seed_configurator`, `.create_download_link`, `.set_current_data`, `Widget`, `.create_algorithm_selector`, `.get_variables_from_widgets`, `._create_variable_widget`, `.update_metrics_display`?**
-  _High betweenness centrality (0.064) - this node is a cross-community bridge._
+- **Why does `GUIComponents` connect `GUIComponents` to `.create_download_link`, `.create_seed_configurator`, `.set_current_data`, `Widget`, `.create_algorithm_selector`, `.get_variables_from_widgets`, `._create_variable_widget`, `.update_metrics_display`, `ipywidgets`?**
+  _High betweenness centrality (0.062) - this node is a cross-community bridge._
 - **Are the 2 inferred relationships involving `JVAnalysisApp` (e.g. with `EnhancedJVCurveAnalysisUI` and `ErrorHandler`) actually correct?**
   _`JVAnalysisApp` has 2 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `abspl-analysis`, `app-dashboard`, `data-tools` to the rest of the system?**
-  _83 weakly-connected nodes found - possible documentation gaps or missing edges._
-- **Should `pandas` be split into smaller, more focused modules?**
-  _Cohesion score 0.04108108108108108 - nodes in this community are weakly interconnected._
-- **Why does `JVAnalysisApp` connect `JVAnalysisApp` to `._build_theresa_jv_plot`, `ErrorHandler`, `JV-Analysis/app.py`, `._create_debug_dashboard`, `._make_variables_menu`, `EnhancedJVCurveAnalysisUI`, `._on_download_pptx_clicked`, `.display`, `._on_apply_filters`, `._create_filtered_curves_data`?**
-  _High betweenness centrality (0.057) - this node is a cross-community bridge._
+  _84 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Should `DesignOfExperiments/plot_manager.py` be split into smaller, more focused modules?**
+  _Cohesion score 0.07386363636363637 - nodes in this community are weakly interconnected._
+- **Why does `PlotUI` connect `PlotUI` to `._make_move_down_handler`, `._extract_variable_order_from_current_dom`, `.get_disabled_variables`, `.get_separate_scan_dir`, `.get_widget`, `._on_variable_order_state_change`, `._remove_plot_type`, `.set_reorder_update_callback`, `.sync_variable_order_from_dom`, `.update_variable_reorder`, `ipywidgets`?**
+  _High betweenness centrality (0.043) - this node is a cross-community bridge._
 - **Should `io` be split into smaller, more focused modules?**
-  _Cohesion score 0.05300207039337474 - nodes in this community are weakly interconnected._
-- **Why does `PlotUI` connect `PlotUI` to `._make_move_down_handler`, `ipywidgets`, `._extract_variable_order_from_current_dom`, `.get_disabled_variables`, `.get_separate_scan_dir`, `.get_widget`, `._on_variable_order_state_change`, `._remove_plot_type`, `.set_reorder_update_callback`, `.sync_variable_order_from_dom`, `.update_variable_reorder`?**
-  _High betweenness centrality (0.042) - this node is a cross-community bridge._
+  _Cohesion score 0.06291591046581972 - nodes in this community are weakly interconnected._
+- **Why does `JVAnalysisApp` connect `JVAnalysisApp` to `._build_theresa_jv_plot`, `ErrorHandler`, `._create_debug_dashboard`, `._make_variables_menu`, `EnhancedJVCurveAnalysisUI`, `JV-Analysis/app.py`, `.display`, `._on_download_pptx_clicked`, `._on_apply_filters`, `._create_filtered_curves_data`?**
+  _High betweenness centrality (0.040) - this node is a cross-community bridge._

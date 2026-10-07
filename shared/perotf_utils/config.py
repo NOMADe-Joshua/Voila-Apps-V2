@@ -52,6 +52,14 @@ ENTRY_TYPES = {
     "jv_baseclass": "baseclasses.solar_energy.jvmeasurement.JVMeasurement",
 }
 
+# NOMAD usernames (NOMAD_CLIENT_USER) that see admin-only apps such as the Usage Log.
+# Comma-separated override, e.g. PEROTF_ADMIN_USERS="nomade,someone.else".
+ADMIN_USERS = tuple(
+    name.strip()
+    for name in os.environ.get("PEROTF_ADMIN_USERS", "nomade").split(",")
+    if name.strip()
+)
+
 # First segment of every sample lab id (Nomad ID) this lab writes, e.g.
 # KIT_<Project_Name>_<Date>_<Batch>_<Subbatch>_<Sample>; the same prefix Excel_creator's
 # example Nomad ID formula uses.

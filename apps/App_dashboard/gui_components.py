@@ -5,6 +5,7 @@ CATEGORY_ICONS = {
     "Optical & Structural Analysis": "fa-microscope",
     "Data Management": "fa-database",
     "Utilities & Calculators": "fa-toolbox",
+    "Administration": "fa-user-shield",
 }
 
 STYLE = """

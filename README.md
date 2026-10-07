@@ -31,6 +31,7 @@ two repos (see `CONTRIBUTING.md`).
 | SEM Grain Size Analysis | `SEM_crystal_counter` | Grain size distribution of perovskite films from SEM images |
 | Data Tools | `Data_Tools` | Converters and renamers for the ELN naming scheme |
 | Excel Creator | `Excel_creator` | Experiment planning workbooks for NOMAD uploads |
+| Usage Log | `log_view` | Who started which app when, from the usage log every app writes |
 | Smart Databaser | `smart_databaser` | Experiment workbooks for NOMAD, autofilled live from earlier batches |
 | Design of Experiments | `DesignOfExperiments` | DoE planning and sampling |
 | UV-Vis Simulator | `UVVis_Simulator` | Thin-film optics from a refractive index library |
@@ -48,8 +49,7 @@ Voila-Apps-V2/
 │   │   ├── api_calls.py, access_token.py, auth_manager.py, auth_ui.py,
 │   │   ├── batch_selection.py, error_handler.py, plotting_utils.py, process_handling.py
 │   │   └── process_specs.py  # process catalog of the Smart Databaser
-│   ├── utils.ipynb           # admin: usage-log dashboard and backup zip
-│   └── log_view.ipynb        # admin: usage-log viewer
+│   └── utils.ipynb           # admin: old usage-log dashboard and backup zip
 ├── apps/<AppName>/           # one folder per app: pyproject.toml, notebook(s), modules
 ├── tests/<AppName>/          # one test folder per app, plus tests/structure and tests/shared
 └── scripts/                  # test fixture generator

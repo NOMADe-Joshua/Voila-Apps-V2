@@ -53,7 +53,7 @@ def setup_app():
         open_app("whats_new", gui.WHATS_NEW_URL)
 
     sections = []
-    for category, entries in dm.CATEGORIES.items():
+    for category, entries in dm.visible_categories(user).items():
         cards = [render_app_card(e) for e in entries]
         sections.append(gui.create_category_section(category, cards))
 

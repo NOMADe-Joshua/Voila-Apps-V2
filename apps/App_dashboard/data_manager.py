@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass
 
 from perotf_utils.access_token import log_button_usage
-from perotf_utils.config import NORTH_ENDPOINT
+from perotf_utils.config import ADMIN_USERS, NORTH_ENDPOINT
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,8 @@ class AppEntry:
     description: str
     icon: str
     experimental: bool = False
+    admin_only: bool = False
+    """Only shown to users listed in perotf_utils.config.ADMIN_USERS."""
 
 
 CATEGORIES: dict[str, list[AppEntry]] = {
@@ -136,12 +138,42 @@ CATEGORIES: dict[str, list[AppEntry]] = {
             "fa-layer-group",
         ),
     ],
+    "Administration": [
+        AppEntry(
+            "log_view",
+            "log_view.ipynb",
+            "Usage Log",
+            "Who started which app when: launches per day or week, filterable by date, "
+            "user and app, read from the usage log every app writes on start.",
+            "fa-chart-pie",
+            admin_only=True,
+        ),
+    ],
 }
 
 
 def get_current_user() -> str:
     """Return the NOMAD username of the person running this notebook, or '' if unknown."""
     return os.environ.get("NOMAD_CLIENT_USER", "")
+
+
+def is_admin(user: str) -> bool:
+    """Whether this NOMAD user may see admin-only apps (perotf_utils.config.ADMIN_USERS)."""
+    return bool(user) and user in ADMIN_USERS
+
+
+def visible_categories(user: str) -> dict[str, list[AppEntry]]:
+    """CATEGORIES as this user should see them: admin-only cards are dropped for
+    everyone else, and a category left without cards disappears entirely.
+
+    This only hides the card; the app itself checks the user again, since anyone who
+    knows the notebook URL could still open it."""
+    admin = is_admin(user)
+    visible = {
+        category: [entry for entry in entries if admin or not entry.admin_only]
+        for category, entries in CATEGORIES.items()
+    }
+    return {category: entries for category, entries in visible.items() if entries}
 
 
 def log_navigation(action: str) -> None:

@@ -109,6 +109,7 @@ NO_PROXY = "localhost,127.0.0.1"
 | `PEROTF_API_ENDPOINT` | the API is not at `/nomad-oasis/api/v1` | |
 | `PEROTF_GUI_ENDPOINT` | the GUI is not at `/nomad-oasis/gui` | Used for links to entries (JV app, Excel creator). |
 | `PEROTF_NORTH_ENDPOINT` | NORTH is not at `/nomad-oasis/north` | Used by the App Dashboard's links. |
+| `PEROTF_ADMIN_USERS` | someone other than `nomade` should see the Usage Log | Comma-separated NOMAD usernames; only they get the Usage Log card and its data. |
 | `HTTP_PROXY`, `HTTPS_PROXY` | the container has no direct outbound route | Applied *before* `pip install shared/` runs, because pip may fetch `hatchling` from PyPI to build it. |
 | `NO_PROXY` | whenever a proxy is set | Hosts reached *without* the proxy. Defaults to `localhost,127.0.0.1`. Only add the Oasis host if a direct call to it actually works from the container. |
 

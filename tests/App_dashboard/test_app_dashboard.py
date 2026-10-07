@@ -149,5 +149,27 @@ def test_setup_app_builds_one_section_per_category_offline(mods, monkeypatch):
     widget = mods["app"].setup_app()
 
     root, _js_output = widget.children
-    # style, header, one section per category, footer
-    assert len(root.children) == len(mods["data_manager"].CATEGORIES) + 3
+    # style, header, one section per category this user may see, footer
+    assert len(root.children) == len(mods["data_manager"].visible_categories(TEST_USER)) + 3
+
+
+def _visible_names(dm, user):
+    return {entry.name for entries in dm.visible_categories(user).values() for entry in entries}
+
+
+def test_usage_log_card_is_shown_to_admins_only(dm, monkeypatch):
+    monkeypatch.setattr(dm, "ADMIN_USERS", ("nomade",))
+
+    assert "Usage Log" in _visible_names(dm, "nomade")
+    assert "Usage Log" not in _visible_names(dm, TEST_USER)
+    assert "Usage Log" not in _visible_names(dm, "")  # NOMAD_CLIENT_USER unset
+
+
+def test_a_category_with_only_hidden_cards_disappears(dm, monkeypatch):
+    monkeypatch.setattr(dm, "ADMIN_USERS", ("nomade",))
+
+    assert "Administration" in dm.visible_categories("nomade")
+    assert "Administration" not in dm.visible_categories(TEST_USER)
+    # Everything that is not admin-only stays visible to everyone.
+    public = {e.name for es in dm.CATEGORIES.values() for e in es if not e.admin_only}
+    assert _visible_names(dm, TEST_USER) == public

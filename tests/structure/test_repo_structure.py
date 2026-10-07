@@ -92,6 +92,18 @@ def test_notebook_code_has_no_server_literals_or_sys_path(notebook):
     assert not offending, f"{_rel(notebook)} must use perotf_utils.config: {offending}"
 
 
+LOG_CALL = re.compile(r"^\s*(?:access_token\.)?log_notebook_usage\(")
+
+
+@pytest.mark.parametrize("notebook", NOTEBOOKS, ids=_rel)
+def test_notebook_logs_its_usage(notebook):
+    """Every app start is written to the usage log (perotf_utils.access_token)."""
+    calls = [
+        line for src in _code_cells(notebook) for line in src.splitlines() if LOG_CALL.search(line)
+    ]
+    assert calls, f"{_rel(notebook)} never calls log_notebook_usage()"
+
+
 @pytest.mark.parametrize("py_file", PY_FILES, ids=_rel)
 def test_python_file_has_no_server_literals_or_sys_path(py_file):
     text = py_file.read_text(encoding="utf-8")

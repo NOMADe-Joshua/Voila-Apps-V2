@@ -24,7 +24,7 @@ shared/perotf_utils/        # DO NOT DUPLICATE ANYTHING FROM HERE
     api_calls.py, access_token.py, auth_manager.py, auth_ui.py,
     batch_selection.py, error_handler.py, plotting_utils.py, process_handling.py
     process_specs.py        # smart_databaser's process catalog, see below
-shared/utils.ipynb, shared/log_view.ipynb   # admin notebooks (usage log), not apps
+shared/utils.ipynb          # admin notebook (old usage dashboard + backup zip), not an app
 tests/<AppName>/            # ONE folder per app, at repo root, never inside apps/
     conftest.py
     test_<app_name>.py      # exactly one test file per app
@@ -271,8 +271,14 @@ side.
   structural one, and needs a version bump when changed.
 - `log_notebook_usage()` writes next to `perotf_utils/access_token.py`, i.e.
   `shared/perotf_utils/notebook_usage.log` inside the upload; the log contains
-  user names and is gitignored. `shared/log_view.ipynb` and `shared/utils.ipynb`
-  read it from there.
+  user names and is gitignored. `apps/log_view` (dashboard card "Usage Log" under
+  Administration) and `shared/utils.ipynb` read it from there. The card and the
+  data are admin-only: `perotf_utils.config.ADMIN_USERS` (default `nomade`,
+  override `PEROTF_ADMIN_USERS`) is compared with `NOMAD_CLIENT_USER`; the
+  dashboard hides `AppEntry(admin_only=True)` cards for everyone else
+  (`data_manager.visible_categories`) and `log_view` checks again itself, since
+  the notebook URL still works. This is a display rule, not file access control:
+  anyone with access to the upload can still open the log file itself.
 - Not in this repo on purpose; all remain in `nomad-perotf-jupyter-voila-scripts`:
   - targeted the HZB server: `File_Uploader`, `Ink_Jet_Absorber_Analysis`,
     `NMR_Analysis`;

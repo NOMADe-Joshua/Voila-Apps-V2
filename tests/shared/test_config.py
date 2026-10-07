@@ -52,6 +52,16 @@ def test_environment_overrides_the_server(monkeypatch):
         importlib.reload(config)
 
 
+def test_admin_users_default_and_override(monkeypatch):
+    assert "nomade" in config.ADMIN_USERS
+    monkeypatch.setenv("PEROTF_ADMIN_USERS", " alice , bob ,")
+    try:
+        assert importlib.reload(config).ADMIN_USERS == ("alice", "bob")
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
 def test_api_calls_defaults_come_from_entry_types():
     import inspect
 
