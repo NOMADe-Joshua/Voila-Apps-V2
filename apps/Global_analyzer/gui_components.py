@@ -282,6 +282,7 @@ class GUIManager:
             layout={"max_height": "320px", "overflow_y": "auto", "padding": "4px"}
         )
         self.results_schemas_html = widgets.HTML()
+        self._column_labels: dict = {}  # column -> "column (Schema)" for the filter UI
         self.metadata_checklist_box = widgets.VBox(
             layout={
                 "max_height": "220px",
@@ -861,7 +862,11 @@ class GUIManager:
         return {dd.description: dd.value for dd in self.layer_selector_box.children}
 
     def set_analysis_columns(
-        self, results_cols: list, metadata_cols: list, results_groups: Optional[dict] = None
+        self,
+        results_cols: list,
+        metadata_cols: list,
+        results_groups: Optional[dict] = None,
+        metadata_groups: Optional[dict] = None,
     ):
         """(Re)build the Results / Process Metadata checkbox lists on the Analysis
         Data tab. Called whenever the shared analysis dataframe is rebuilt (batch
@@ -875,6 +880,8 @@ class GUIManager:
         results_groups maps a results column to its result schema label (e.g.
         "JV"); the Results tree shows one branch per label. Columns without an
         entry (e.g. from an uploaded CSV) go in a single "Results" branch.
+        results_groups / metadata_groups also label the row-filter column
+        dropdown, e.g. "annealing_temperature (Spin Coating)".
         """
         previous_results = {cb.description: cb.value for cb in self.results_checklist_box.children}
         previous_metadata = {
@@ -892,16 +899,23 @@ class GUIManager:
         self._render_results_tree(results_groups or {})
 
         previous_filter_column = self.filter_column_selector.value
-        filter_options = sorted(set(results_cols) | set(metadata_cols))
+        schema_of = {**(metadata_groups or {}), **(results_groups or {})}
+        filter_columns = sorted(set(results_cols) | set(metadata_cols))
+        self._column_labels = {
+            col: f"{col} ({schema_of[col]})" if col in schema_of else col for col in filter_columns
+        }
+        # (label, column) pairs: the dropdown shows the schema, its value stays
+        # the bare column name the filters and dataframe use.
+        filter_options = [(self._column_labels[col], col) for col in filter_columns]
         self.filter_column_selector.options = filter_options
-        if previous_filter_column in filter_options:
+        if previous_filter_column in filter_columns:
             self.filter_column_selector.value = previous_filter_column
-        elif filter_options:
-            self.filter_column_selector.value = filter_options[0]
+        elif filter_columns:
+            self.filter_column_selector.value = filter_columns[0]
 
     def _render_results_tree(self, results_groups: dict) -> None:
-        """Arrange the checkboxes of results_checklist_box into one collapsed
-        branch per result schema, each with a select-all toggle."""
+        """Arrange the checkboxes of results_checklist_box under one static
+        heading per result schema, each with a select-all toggle."""
         by_group: dict = {}
         for checkbox in self.results_checklist_box.children:
             group = results_groups.get(checkbox.description, "Results")
@@ -920,10 +934,16 @@ class GUIManager:
 
             select_all.observe(_toggle_all, names="value")
             branches.append(
-                widgets.Accordion(
-                    children=[widgets.VBox([select_all, *boxes])],
-                    titles=(f"{group} ({len(boxes)})",),
-                    selected_index=None,
+                widgets.VBox(
+                    [
+                        widgets.HTML(
+                            f"<b style='color:#444;'>{group}</b> "
+                            f"<span style='color:#888;'>({len(boxes)})</span>"
+                        ),
+                        select_all,
+                        *boxes,
+                    ],
+                    layout={"margin": "0 0 8px 0"},
                 )
             )
         self.results_tree_box.children = branches or [
@@ -964,8 +984,9 @@ class GUIManager:
 
         rows = []
         for row_filter in row_filters:
+            column_label = self._column_labels.get(row_filter["column"], row_filter["column"])
             label = widgets.HTML(
-                f"<code>{row_filter['column']} {row_filter['op']} {row_filter['value']:g}</code>"
+                f"<code>{column_label} {row_filter['op']} {row_filter['value']:g}</code>"
             )
             remove_button = widgets.Button(
                 description="Remove", icon="times", button_style="danger", layout={"width": "90px"}

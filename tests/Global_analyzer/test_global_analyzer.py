@@ -14,6 +14,7 @@ from data_manager import (
     get_layer_type_options,
     merged_result_column_names,
     parse_uploaded_analysis_csv,
+    process_type_label,
     result_type_label,
     select_layer_row_per_sample,
     uploaded_numeric_columns,
@@ -301,7 +302,7 @@ def test_set_analysis_columns_defaults_new_columns_to_checked():
     assert gui.get_checked_metadata_columns() == ["m1", "m2"]
 
 
-def test_results_tree_has_one_collapsed_branch_per_schema_jv_first():
+def test_results_tree_has_one_static_group_per_schema_jv_first():
     gui = GUIManager()
     gui.set_analysis_columns(
         ["tracking_time", "efficiency", "fill_factor"],
@@ -314,8 +315,10 @@ def test_results_tree_has_one_collapsed_branch_per_schema_jv_first():
     )
 
     branches = gui.results_tree_box.children
-    assert [b.titles[0] for b in branches] == ["JV (2)", "MPP Tracking (1)"]
-    assert all(b.selected_index is None for b in branches)
+    # Plain headings (not accordions), so nothing can be collapsed.
+    assert [type(b.children[0]).__name__ for b in branches] == ["HTML", "HTML"]
+    assert "JV" in branches[0].children[0].value
+    assert "MPP Tracking" in branches[1].children[0].value
     # Branch checkboxes are the same widgets read by get_checked_results_columns.
     assert sorted(gui.get_checked_results_columns()) == [
         "efficiency",
@@ -327,8 +330,8 @@ def test_results_tree_has_one_collapsed_branch_per_schema_jv_first():
 def test_results_tree_select_all_toggles_branch():
     gui = GUIManager()
     gui.set_analysis_columns(["a", "b", "c"], [], results_groups={"a": "JV", "b": "JV", "c": "EQE"})
-    jv_branch = next(b for b in gui.results_tree_box.children if b.titles[0].startswith("JV"))
-    jv_branch.children[0].children[0].value = False  # "Select all" off
+    jv_branch = next(b for b in gui.results_tree_box.children if "JV" in b.children[0].value)
+    jv_branch.children[1].value = False  # "Select all" off
 
     assert gui.get_checked_results_columns() == ["c"]
 
@@ -423,7 +426,35 @@ def test_set_sample_exclusion_checklist_toggle_invokes_callback():
 def test_set_analysis_columns_populates_filter_column_dropdown():
     gui = GUIManager()
     gui.set_analysis_columns(["r1", "r2"], ["m1"])
-    assert gui.filter_column_selector.options == ("m1", "r1", "r2")
+    assert [value for _label, value in gui.filter_column_selector.options] == ["m1", "r1", "r2"]
+
+
+def test_filter_column_dropdown_labels_columns_with_their_schema():
+    gui = GUIManager()
+    gui.set_analysis_columns(
+        ["efficiency", "plain"],
+        ["annealing_temperature"],
+        results_groups={"efficiency": "JV"},
+        metadata_groups={"annealing_temperature": "Spin Coating"},
+    )
+
+    options = dict(gui.filter_column_selector.options)
+    assert options["annealing_temperature (Spin Coating)"] == "annealing_temperature"
+    assert options["efficiency (JV)"] == "efficiency"
+    assert "plain" in options
+    # Filters keep working on the bare column name.
+    gui.filter_column_selector.value = "efficiency"
+    gui.render_active_filters(
+        [{"id": 1, "column": "efficiency", "op": ">=", "value": 5.0}], on_remove=lambda _id: None
+    )
+    assert "efficiency (JV) &gt;=" in gui.active_filters_box.children[0].children[0].value or (
+        "efficiency (JV) >=" in gui.active_filters_box.children[0].children[0].value
+    )
+
+
+def test_process_type_label():
+    assert process_type_label("spin_coating") == "Spin Coating"
+    assert process_type_label("ald") == "ALD"
 
 
 def test_render_active_filters_shows_placeholder_when_none_active():

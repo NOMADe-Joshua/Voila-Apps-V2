@@ -41,6 +41,7 @@ from data_manager import (
     get_layer_type_options,
     merged_result_column_names,
     parse_uploaded_analysis_csv,
+    process_type_label,
     result_type_label,
     select_layer_row_per_sample,
     uploaded_numeric_columns,
@@ -122,6 +123,8 @@ class SampleDataExplorer:
         # {column in the merged results table: result schema label, e.g. "JV"};
         # drives the grouped Results tree in the Analysis Data tab.
         self.analysis_results_groups: dict = {}
+        # Same for process metadata columns ("Spin Coating", ...).
+        self.analysis_metadata_groups: dict = {}
         self.row_filters: list = []  # [{"id", "column", "op", "value"}, ...]
         self._next_filter_id = 1
         self._last_correlation_result = None
@@ -269,6 +272,7 @@ class SampleDataExplorer:
 
         layer_selections = self.gui.get_layer_selections()
         process_df = None
+        self.analysis_metadata_groups = {}
         for metadata_type, metadata_df in self.data_manager.current_metadata.items():
             if metadata_df is None or metadata_df.empty or "sample_id" not in metadata_df.columns:
                 continue
@@ -278,8 +282,12 @@ class SampleDataExplorer:
             if metadata_df.empty:
                 continue
             if process_df is None:
+                renamed = {c: c for c in metadata_df.columns if c != "sample_id"}
                 process_df = metadata_df.copy()
             else:
+                renamed = merged_result_column_names(
+                    process_df.columns, metadata_df.columns, metadata_type
+                )
                 # Suffix by process type (not a generic "_dup") - the same column name
                 # (e.g. layer_material_name) means something different per process
                 # type (ETL vs HTL material), so it must survive as a distinct feature,
@@ -291,6 +299,8 @@ class SampleDataExplorer:
                     how="outer",
                     suffixes=("", f"_{metadata_type}"),
                 )
+            for merged_name in renamed.values():
+                self.analysis_metadata_groups[merged_name] = process_type_label(metadata_type)
 
         return process_df
 
@@ -367,6 +377,7 @@ class SampleDataExplorer:
             self.analysis_metadata_cols = []
             self.analysis_results_cols = []
             self.analysis_results_groups = {}
+            self.analysis_metadata_groups = {}
         else:
             combined = pd.merge(
                 process_df, results_df, on="sample_id", how="inner", suffixes=("", "_result")
@@ -390,6 +401,7 @@ class SampleDataExplorer:
             self.analysis_results_cols,
             self.analysis_metadata_cols,
             results_groups=self.analysis_results_groups,
+            metadata_groups=self.analysis_metadata_groups,
         )
         sample_ids = (
             sorted(self.full_analysis_df["sample_id"].unique())
@@ -625,6 +637,7 @@ class SampleDataExplorer:
         self.analysis_results_cols = [c for c in numeric_cols if c in results]
         self.analysis_metadata_cols = [c for c in numeric_cols if c not in results]
         self.analysis_results_groups = {}
+        self.analysis_metadata_groups = {}
         self.gui.set_layer_selectors({})
         self.gui.set_analysis_columns(self.analysis_results_cols, self.analysis_metadata_cols)
         sample_ids = sorted(df["sample_id"].unique())

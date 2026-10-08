@@ -71,6 +71,12 @@ def result_type_label(result_type: str) -> str:
     return RESULT_TYPE_LABELS.get(result_type, result_type.replace("_measurement", "").upper())
 
 
+def process_type_label(metadata_type: str) -> str:
+    """Display label of a process metadata key, e.g. 'spin_coating' -> 'Spin Coating'."""
+    words = metadata_type.split("_")
+    return " ".join(w.upper() if w in {"ald", "pl", "uv"} else w.capitalize() for w in words)
+
+
 def merged_result_column_names(
     left_columns, right_columns, result_type: str, key: str = "sample_id"
 ) -> dict:
