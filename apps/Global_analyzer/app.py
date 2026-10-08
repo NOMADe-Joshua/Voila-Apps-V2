@@ -39,7 +39,9 @@ from data_manager import (
     get_categorical_columns,
     get_layer_type_options,
     merge_results_per_sample,
+    merged_result_column_names,
     parse_uploaded_analysis_csv,
+    process_type_label,
     select_layer_row_per_sample,
     uploaded_numeric_columns,
     variation_warning,
@@ -139,6 +141,11 @@ class SampleDataExplorer:
         self.analysis_df = None
         self.analysis_metadata_cols = []
         self.analysis_results_cols = []
+        # {column in the merged results table: result schema label, e.g. "JV"};
+        # drives the grouped Results tree in the Analysis Data tab.
+        self.analysis_results_groups: dict = {}
+        # Same for process metadata columns ("Spin Coating", ...).
+        self.analysis_metadata_groups: dict = {}
         self.row_filters: list = []  # [{"id", "column", "op", "value"}, ...]
         self._next_filter_id = 1
         self._last_correlation_result = None
@@ -287,6 +294,7 @@ class SampleDataExplorer:
 
         layer_selections = self.gui.get_layer_selections()
         process_df = None
+        self.analysis_metadata_groups = {}
         for metadata_type, metadata_df in self.data_manager.current_metadata.items():
             if metadata_df is None or metadata_df.empty or "sample_id" not in metadata_df.columns:
                 continue
@@ -296,8 +304,12 @@ class SampleDataExplorer:
             if metadata_df.empty:
                 continue
             if process_df is None:
+                renamed = {c: c for c in metadata_df.columns if c != "sample_id"}
                 process_df = metadata_df.copy()
             else:
+                renamed = merged_result_column_names(
+                    process_df.columns, metadata_df.columns, metadata_type
+                )
                 # Suffix by process type (not a generic "_dup") - the same column name
                 # (e.g. layer_material_name) means something different per process
                 # type (ETL vs HTL material), so it must survive as a distinct feature,
@@ -309,6 +321,8 @@ class SampleDataExplorer:
                     how="outer",
                     suffixes=("", f"_{metadata_type}"),
                 )
+            for merged_name in renamed.values():
+                self.analysis_metadata_groups[merged_name] = process_type_label(metadata_type)
 
         return process_df
 
@@ -334,8 +348,11 @@ class SampleDataExplorer:
         if not self.data_manager.current_results:
             return None
 
+        self.analysis_results_groups = {}
         results_df, self._collapsed_result_types = merge_results_per_sample(
-            self.data_manager.current_results, self.gui.results_aggregation_selector.value
+            self.data_manager.current_results,
+            self.gui.results_aggregation_selector.value,
+            column_groups=self.analysis_results_groups,
         )
         return results_df
 
@@ -360,6 +377,8 @@ class SampleDataExplorer:
             self.full_analysis_df = None
             self.analysis_metadata_cols = []
             self.analysis_results_cols = []
+            self.analysis_results_groups = {}
+            self.analysis_metadata_groups = {}
         else:
             combined = pd.merge(
                 process_df, results_df, on="sample_id", how="inner", suffixes=("", "_result")
@@ -379,7 +398,12 @@ class SampleDataExplorer:
                 if col in results_numeric and combined[col].dropna().nunique() > 1
             ]
 
-        self.gui.set_analysis_columns(self.analysis_results_cols, self.analysis_metadata_cols)
+        self.gui.set_analysis_columns(
+            self.analysis_results_cols,
+            self.analysis_metadata_cols,
+            results_groups=self.analysis_results_groups,
+            metadata_groups=self.analysis_metadata_groups,
+        )
         sample_ids = (
             sorted(self.full_analysis_df["sample_id"].unique())
             if self.full_analysis_df is not None
@@ -620,6 +644,8 @@ class SampleDataExplorer:
         self.full_analysis_df = df
         self.analysis_results_cols = [c for c in numeric_cols if c in results]
         self.analysis_metadata_cols = [c for c in numeric_cols if c not in results]
+        self.analysis_results_groups = {}
+        self.analysis_metadata_groups = {}
         self.gui.set_layer_selectors({})
         self.gui.set_analysis_columns(self.analysis_results_cols, self.analysis_metadata_cols)
         sample_ids = sorted(df["sample_id"].unique())
@@ -1720,6 +1746,18 @@ class SampleDataExplorer:
                 if c in space and space[c]["fixed"] is not None
             }
 
+            # Fitting the Gaussian Process can take a while: show a banner that
+            # stays until the results replace it (clear_output(wait=True) below).
+            self.gui.suggest_experiments_button.disabled = True
+            ipy_display(
+                HTML(
+                    "<div style='padding:12px 16px; margin:8px 0; background:#fff3cd; "
+                    "border:2px solid #f0ad4e; border-radius:4px; color:#664d03; "
+                    "font-size:1.1em; font-weight:bold;'>"
+                    "⏳ Processing... fitting the model and calculating suggestions. "
+                    "This can take a moment.</div>"
+                )
+            )
             try:
                 result = ml.suggest_next_experiments(
                     self.analysis_df,
@@ -1733,14 +1771,18 @@ class SampleDataExplorer:
                     log_target=self.gui.bo_log_target.value,
                 )
             except ValueError as e:
+                clear_output(wait=True)
                 print(f"⚠️ {e}")
                 self._last_bo_result = None
                 return
             except Exception as e:
+                clear_output(wait=True)
                 print(f"❌ Error suggesting experiments: {e}")
                 logger.exception("Error suggesting experiments")
                 self._last_bo_result = None
                 return
+            finally:
+                self.gui.suggest_experiments_button.disabled = False
 
             suggestions = result["suggestions"]
             pred_col = f"predicted_{target}"
@@ -1830,11 +1872,20 @@ class SampleDataExplorer:
                 + "- Listed in the order they were picked as one batch (see 'How are the "
                 "suggestions calculated?' above).\n\n" + "\n".join(table_lines)
             )
+            try:
+                self.plot_manager.create_bo_suggestions_plot(suggestions, target)
+                self.plot_manager.create_bo_loo_plot(
+                    result["loo_df"], target, result["loo_r2"], log_target
+                )
+            except Exception as e:
+                clear_output(wait=True)
+                print(f"❌ Error plotting suggestions: {e}")
+                logger.exception("Error plotting BO suggestions")
+                self._last_bo_result = None
+                return
+            # Swap the Processing banner for the results in one step.
+            clear_output(wait=True)
             ipy_display(Markdown(summary))
-            self.plot_manager.create_bo_suggestions_plot(suggestions, target)
-            self.plot_manager.create_bo_loo_plot(
-                result["loo_df"], target, result["loo_r2"], log_target
-            )
             self._last_bo_result = result
 
     def _refresh_experimental_options(self):

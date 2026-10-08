@@ -13,7 +13,10 @@ from data_manager import (
     get_categorical_columns,
     get_layer_type_options,
     merge_results_per_sample,
+    merged_result_column_names,
     parse_uploaded_analysis_csv,
+    process_type_label,
+    result_type_label,
     select_layer_row_per_sample,
     uploaded_numeric_columns,
     variation_warning,
@@ -301,6 +304,50 @@ def test_set_analysis_columns_defaults_new_columns_to_checked():
     assert gui.get_checked_metadata_columns() == ["m1", "m2"]
 
 
+def test_results_tree_has_one_static_group_per_schema_jv_first():
+    gui = GUIManager()
+    gui.set_analysis_columns(
+        ["tracking_time", "efficiency", "fill_factor"],
+        ["m1"],
+        results_groups={
+            "tracking_time": "MPP Tracking",
+            "efficiency": "JV",
+            "fill_factor": "JV",
+        },
+    )
+
+    branches = gui.results_tree_box.children
+    # Plain headings (not accordions), so nothing can be collapsed.
+    assert [type(b.children[0]).__name__ for b in branches] == ["HTML", "HTML"]
+    assert "JV" in branches[0].children[0].value
+    assert "MPP Tracking" in branches[1].children[0].value
+    # Branch checkboxes are the same widgets read by get_checked_results_columns.
+    assert sorted(gui.get_checked_results_columns()) == [
+        "efficiency",
+        "fill_factor",
+        "tracking_time",
+    ]
+
+
+def test_results_tree_select_all_toggles_branch():
+    gui = GUIManager()
+    gui.set_analysis_columns(["a", "b", "c"], [], results_groups={"a": "JV", "b": "JV", "c": "EQE"})
+    jv_branch = next(b for b in gui.results_tree_box.children if "JV" in b.children[0].value)
+    jv_branch.children[1].value = False  # "Select all" off
+
+    assert gui.get_checked_results_columns() == ["c"]
+
+
+def test_merged_result_column_names_suffixes_only_overlapping_columns():
+    names = merged_result_column_names(
+        ["sample_id", "datetime", "efficiency"],
+        ["sample_id", "datetime", "power"],
+        "mpp_tracking",
+    )
+    assert names == {"datetime": "datetime_mpp_tracking", "power": "power"}
+    assert result_type_label("mpp_tracking") == "MPP Tracking"
+
+
 def test_set_layer_selectors_creates_one_dropdown_per_source():
     gui = GUIManager()
     gui.set_layer_selectors({"spin_coating": ["Active Layer", "ETL"], "slot_die_coating": ["HTL"]})
@@ -381,7 +428,35 @@ def test_set_sample_exclusion_checklist_toggle_invokes_callback():
 def test_set_analysis_columns_populates_filter_column_dropdown():
     gui = GUIManager()
     gui.set_analysis_columns(["r1", "r2"], ["m1"])
-    assert gui.filter_column_selector.options == ("m1", "r1", "r2")
+    assert [value for _label, value in gui.filter_column_selector.options] == ["m1", "r1", "r2"]
+
+
+def test_filter_column_dropdown_labels_columns_with_their_schema():
+    gui = GUIManager()
+    gui.set_analysis_columns(
+        ["efficiency", "plain"],
+        ["annealing_temperature"],
+        results_groups={"efficiency": "JV"},
+        metadata_groups={"annealing_temperature": "Spin Coating"},
+    )
+
+    options = dict(gui.filter_column_selector.options)
+    assert options["annealing_temperature (Spin Coating)"] == "annealing_temperature"
+    assert options["efficiency (JV)"] == "efficiency"
+    assert "plain" in options
+    # Filters keep working on the bare column name.
+    gui.filter_column_selector.value = "efficiency"
+    gui.render_active_filters(
+        [{"id": 1, "column": "efficiency", "op": ">=", "value": 5.0}], on_remove=lambda _id: None
+    )
+    assert "efficiency (JV) &gt;=" in gui.active_filters_box.children[0].children[0].value or (
+        "efficiency (JV) >=" in gui.active_filters_box.children[0].children[0].value
+    )
+
+
+def test_process_type_label():
+    assert process_type_label("spin_coating") == "Spin Coating"
+    assert process_type_label("ald") == "ALD"
 
 
 def test_render_active_filters_shows_placeholder_when_none_active():
@@ -1590,3 +1665,18 @@ def test_create_bo_loo_plot_and_importance_plot_render():
 
     assert len(pmgr.bo_loo_widget.data[1].x) == 20
     assert list(pmgr.rf_widget.data[0].y) == ["gap", "temp"]
+
+
+def test_merge_results_per_sample_fills_column_groups_with_merged_names():
+    jv = pd.DataFrame({"sample_id": ["a", "b"], "efficiency": [1.0, 2.0], "datetime": ["x", "y"]})
+    mpp = pd.DataFrame({"sample_id": ["a", "b"], "power": [3.0, 4.0], "datetime": ["x", "y"]})
+    groups = {}
+
+    merged, _ = merge_results_per_sample(
+        {"jv_measurement": jv, "mpp_tracking": mpp}, "Mean", column_groups=groups
+    )
+
+    assert groups["efficiency"] == "JV"
+    assert groups["power"] == "MPP Tracking"
+    assert groups["datetime_mpp_tracking"] == "MPP Tracking"
+    assert set(groups) == set(merged.columns) - {"sample_id"}
