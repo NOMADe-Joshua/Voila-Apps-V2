@@ -15,7 +15,8 @@ class AppState:
             "sample_ids": None,  # Available sample IDs
             "entries": None,  # Entry descriptions
             "properties": None,  # Sample properties
-            "selected_samples": [],  # User-selected samples
+            "selected_samples": [],  # Samples with at least one selected curve
+            "selected_curves": None,  # [(sample_id, curve_id)]; None = every curve
             "custom_names": {},  # Custom sample names
         }
 
@@ -39,6 +40,7 @@ class AppState:
             "entries": None,
             "properties": None,
             "selected_samples": [],
+            "selected_curves": None,
             "custom_names": {},
         }
         self.fit_results = None
@@ -57,6 +59,18 @@ class AppState:
     def has_fit_results(self):
         """Check if fitting results are available"""
         return self.fit_results is not None and len(self.fit_results) > 0
+
+    def selected_curve_ids(self, sample_id):
+        """Curve ids of one sample that are selected, or None for "all of them"."""
+        selected = self.data.get("selected_curves")
+        if selected is None:
+            return None
+        return [cid for sid, cid in selected if sid == sample_id]
+
+    def get_selected_curves_count(self):
+        """Number of individually selected curves (None selection counts nothing here)."""
+        selected = self.data.get("selected_curves")
+        return len(selected) if selected is not None else 0
 
     def get_selected_samples_count(self):
         """Get count of selected samples"""
@@ -78,9 +92,15 @@ class AppState:
         self.data["entries"] = entries
         self.data["properties"] = properties
 
-    def set_selected_samples(self, selected_samples, custom_names=None):
-        """Set selected samples and custom names"""
+    def set_selected_samples(self, selected_samples, custom_names=None, selected_curves=None):
+        """Set selected samples and custom names.
+
+        selected_curves: [(sample_id, curve_id)] of the individual measurements
+        (pixels) to analyse. None keeps the older meaning "every curve of every
+        selected sample".
+        """
         self.data["selected_samples"] = selected_samples
+        self.data["selected_curves"] = None if selected_curves is None else list(selected_curves)
         if custom_names:
             self.data["custom_names"] = custom_names
 
@@ -89,14 +109,10 @@ class AppState:
         self.fitted_curves_data = dict(fitted_curves_data)
         self._rebuild_fit_results_df()
 
-    def update_sample_fit_results(self, sample_id, fits_by_curve):
-        """Replace one sample's fits, leaving every other sample's fits untouched
-        (the individual, one-sample-at-a-time fitting path)."""
-        self.fitted_curves_data = {
-            key: fit for key, fit in self.fitted_curves_data.items() if key[0] != sample_id
-        }
-        for curve_id, fit in fits_by_curve.items():
-            self.fitted_curves_data[(sample_id, curve_id)] = fit
+    def update_curve_fit_results(self, fits_by_key):
+        """Replace the fits of the given (sample_id, curve_id) keys, leaving every
+        other curve's fit untouched (the individual, one-curve-at-a-time path)."""
+        self.fitted_curves_data.update(fits_by_key)
         self._rebuild_fit_results_df()
 
     def get_sample_fit_results(self, sample_id):
