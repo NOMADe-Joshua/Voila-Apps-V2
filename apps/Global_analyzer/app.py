@@ -39,7 +39,9 @@ from data_manager import (
     exclude_samples,
     get_categorical_columns,
     get_layer_type_options,
+    merged_result_column_names,
     parse_uploaded_analysis_csv,
+    result_type_label,
     select_layer_row_per_sample,
     uploaded_numeric_columns,
     variation_warning,
@@ -117,6 +119,9 @@ class SampleDataExplorer:
         self.analysis_df = None
         self.analysis_metadata_cols = []
         self.analysis_results_cols = []
+        # {column in the merged results table: result schema label, e.g. "JV"};
+        # drives the grouped Results tree in the Analysis Data tab.
+        self.analysis_results_groups: dict = {}
         self.row_filters: list = []  # [{"id", "column", "op", "value"}, ...]
         self._next_filter_id = 1
         self._last_correlation_result = None
@@ -311,6 +316,7 @@ class SampleDataExplorer:
 
         aggregation_method = self.gui.results_aggregation_selector.value
         results_df = None
+        self.analysis_results_groups = {}
         for result_type, result_type_df in self.data_manager.current_results.items():
             if (
                 result_type_df is None
@@ -319,9 +325,14 @@ class SampleDataExplorer:
             ):
                 continue
             grouped = aggregate_results_per_sample(result_type_df, aggregation_method)
+            label = result_type_label(result_type)
             if results_df is None:
+                renamed = {c: c for c in grouped.columns if c != "sample_id"}
                 results_df = grouped
             else:
+                renamed = merged_result_column_names(
+                    results_df.columns, grouped.columns, result_type
+                )
                 results_df = pd.merge(
                     results_df,
                     grouped,
@@ -329,6 +340,8 @@ class SampleDataExplorer:
                     how="outer",
                     suffixes=("", f"_{result_type}"),
                 )
+            for merged_name in renamed.values():
+                self.analysis_results_groups[merged_name] = label
 
         return results_df
 
@@ -353,6 +366,7 @@ class SampleDataExplorer:
             self.full_analysis_df = None
             self.analysis_metadata_cols = []
             self.analysis_results_cols = []
+            self.analysis_results_groups = {}
         else:
             combined = pd.merge(
                 process_df, results_df, on="sample_id", how="inner", suffixes=("", "_result")
@@ -372,7 +386,11 @@ class SampleDataExplorer:
                 if col in results_numeric and combined[col].dropna().nunique() > 1
             ]
 
-        self.gui.set_analysis_columns(self.analysis_results_cols, self.analysis_metadata_cols)
+        self.gui.set_analysis_columns(
+            self.analysis_results_cols,
+            self.analysis_metadata_cols,
+            results_groups=self.analysis_results_groups,
+        )
         sample_ids = (
             sorted(self.full_analysis_df["sample_id"].unique())
             if self.full_analysis_df is not None
@@ -606,6 +624,7 @@ class SampleDataExplorer:
         self.full_analysis_df = df
         self.analysis_results_cols = [c for c in numeric_cols if c in results]
         self.analysis_metadata_cols = [c for c in numeric_cols if c not in results]
+        self.analysis_results_groups = {}
         self.gui.set_layer_selectors({})
         self.gui.set_analysis_columns(self.analysis_results_cols, self.analysis_metadata_cols)
         sample_ids = sorted(df["sample_id"].unique())

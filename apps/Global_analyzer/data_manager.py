@@ -44,6 +44,43 @@ _ROW_FILTER_OPS = {
 
 RESULTS_AGGREGATION_METHODS = {"Mean": "mean", "Median": "median", "Max": "max"}
 
+# Every result schema the app loads (keys of data_manager.current_results) and the
+# short label used to group its columns in the Analysis Data tab's Results tree.
+RESULT_TYPE_LABELS = {
+    "jv_measurement": "JV",
+    "eqe_measurement": "EQE",
+    "mpp_tracking": "MPP Tracking",
+    "simple_mpp_tracking": "Simple MPP Tracking",
+    "pl_measurement": "PL",
+    "trpl_measurement": "TRPL",
+    "abspl_measurement": "AbsPL",
+    "pl_imaging": "PL Imaging",
+    "sem": "SEM",
+    "uvvis_measurement": "UV-Vis",
+    "pes": "PES",
+    "cyclic_voltammetry": "Cyclic Voltammetry",
+    "eis": "EIS",
+    "trspv_measurement": "trSPV",
+    "nmr": "NMR",
+    "xrd": "XRD",
+}
+
+
+def result_type_label(result_type: str) -> str:
+    """Display label of a result schema key, e.g. 'mpp_tracking' -> 'MPP Tracking'."""
+    return RESULT_TYPE_LABELS.get(result_type, result_type.replace("_measurement", "").upper())
+
+
+def merged_result_column_names(
+    left_columns, right_columns, result_type: str, key: str = "sample_id"
+) -> dict:
+    """Names the columns of the right frame get after
+    pd.merge(left, right, on=key, suffixes=("", f"_{result_type}")): a column
+    that also exists on the left gets the suffix, the rest keep their name.
+    Returns {name in right frame: name in merged frame}."""
+    overlap = (set(left_columns) & set(right_columns)) - {key}
+    return {c: (f"{c}_{result_type}" if c in overlap else c) for c in right_columns if c != key}
+
 
 def variation_warning(df: pd.DataFrame, columns: List[str], min_unique: int = 6) -> List[str]:
     """Return the subset of `columns` with fewer than min_unique distinct non-null

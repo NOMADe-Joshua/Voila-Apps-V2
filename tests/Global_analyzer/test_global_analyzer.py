@@ -12,7 +12,9 @@ from data_manager import (
     exclude_samples,
     get_categorical_columns,
     get_layer_type_options,
+    merged_result_column_names,
     parse_uploaded_analysis_csv,
+    result_type_label,
     select_layer_row_per_sample,
     uploaded_numeric_columns,
     variation_warning,
@@ -297,6 +299,48 @@ def test_set_analysis_columns_defaults_new_columns_to_checked():
 
     assert gui.get_checked_results_columns() == ["r2"]
     assert gui.get_checked_metadata_columns() == ["m1", "m2"]
+
+
+def test_results_tree_has_one_collapsed_branch_per_schema_jv_first():
+    gui = GUIManager()
+    gui.set_analysis_columns(
+        ["tracking_time", "efficiency", "fill_factor"],
+        ["m1"],
+        results_groups={
+            "tracking_time": "MPP Tracking",
+            "efficiency": "JV",
+            "fill_factor": "JV",
+        },
+    )
+
+    branches = gui.results_tree_box.children
+    assert [b.titles[0] for b in branches] == ["JV (2)", "MPP Tracking (1)"]
+    assert all(b.selected_index is None for b in branches)
+    # Branch checkboxes are the same widgets read by get_checked_results_columns.
+    assert sorted(gui.get_checked_results_columns()) == [
+        "efficiency",
+        "fill_factor",
+        "tracking_time",
+    ]
+
+
+def test_results_tree_select_all_toggles_branch():
+    gui = GUIManager()
+    gui.set_analysis_columns(["a", "b", "c"], [], results_groups={"a": "JV", "b": "JV", "c": "EQE"})
+    jv_branch = next(b for b in gui.results_tree_box.children if b.titles[0].startswith("JV"))
+    jv_branch.children[0].children[0].value = False  # "Select all" off
+
+    assert gui.get_checked_results_columns() == ["c"]
+
+
+def test_merged_result_column_names_suffixes_only_overlapping_columns():
+    names = merged_result_column_names(
+        ["sample_id", "datetime", "efficiency"],
+        ["sample_id", "datetime", "power"],
+        "mpp_tracking",
+    )
+    assert names == {"datetime": "datetime_mpp_tracking", "power": "power"}
+    assert result_type_label("mpp_tracking") == "MPP Tracking"
 
 
 def test_set_layer_selectors_creates_one_dropdown_per_source():
