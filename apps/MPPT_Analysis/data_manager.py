@@ -565,6 +565,21 @@ class DataManager:
             return list(sample_data.index.get_level_values(0).unique())
         return [0]
 
+    def get_curve_label(self, entries_data, sample_id, curve_id):
+        """Human label of one measurement: the NOMAD entry name (the pixel) without
+        the sample id prefix, or "Curve N" when the entry has no name."""
+        name = ""
+        if entries_data is not None:
+            try:
+                value = entries_data.loc[(sample_id, curve_id), "entry_names"]
+                name = value if isinstance(value, str) else ""
+            except (KeyError, IndexError):
+                name = ""
+        name = name.strip()
+        if name.startswith(sample_id):
+            name = name[len(sample_id) :].strip(" _-")
+        return name or f"Curve {curve_id}"
+
     def get_raw_curve(self, curves_data, sample_ids, sample_id, curve_id):
         """Return (time, power_density) numpy arrays for one (sample_id, curve_id)."""
         if sample_id not in list(sample_ids):
@@ -628,9 +643,18 @@ class DataManager:
         )
 
     def fit_sample(
-        self, curves_data, sample_ids, sample_id, model, frame_range=None, initial_values=None
+        self,
+        curves_data,
+        sample_ids,
+        sample_id,
+        model,
+        frame_range=None,
+        initial_values=None,
+        curve_ids=None,
     ):
-        """Fit every curve belonging to one sample with the given model/point range.
+        """Fit the curves of one sample with the given model/point range.
+
+        curve_ids: restrict the fit to these curves; None fits every curve of the sample.
 
         initial_values: optional {param_name: value}, passed through to every
         curve's fit_curve() call unchanged - each curve still gets its own
@@ -646,7 +670,10 @@ class DataManager:
         )
 
         results = {}
-        for curve_id in self.get_curve_ids_for_sample(curves_data, sample_ids, sample_id):
+        available = self.get_curve_ids_for_sample(curves_data, sample_ids, sample_id)
+        for curve_id in (
+            available if curve_ids is None else [c for c in available if c in curve_ids]
+        ):
             t_data, y_data = self.get_raw_curve(curves_data, sample_ids, sample_id, curve_id)
             if t_data is None:
                 continue
@@ -833,9 +860,16 @@ class DataManager:
 
         return outcomes
 
-    def get_selected_curve_data(self, curves_data, sample_ids, selected_samples, variable):
-        """Get curve data for selected samples"""
+    def get_selected_curve_data(
+        self, curves_data, sample_ids, selected_samples, variable, selected_curves=None
+    ):
+        """Get curve data for selected samples.
+
+        selected_curves: optional [(sample_id, curve_id)]; when given, only those
+        measurements are returned.
+        """
         selected_data = []
+        wanted = None if selected_curves is None else set(selected_curves)
 
         for sample_id in selected_samples:
             try:
@@ -844,6 +878,8 @@ class DataManager:
 
                     if hasattr(sample_data.index, "nlevels") and sample_data.index.nlevels > 1:
                         for curve_idx in sample_data.index.get_level_values(0).unique():
+                            if wanted is not None and (sample_id, curve_idx) not in wanted:
+                                continue
                             curve_data = sample_data.loc[curve_idx]
                             if variable in curve_data.columns:
                                 selected_data.append(
@@ -855,6 +891,8 @@ class DataManager:
                                     }
                                 )
                     else:
+                        if wanted is not None and (sample_id, 0) not in wanted:
+                            continue
                         if variable in sample_data.columns:
                             selected_data.append(
                                 {
