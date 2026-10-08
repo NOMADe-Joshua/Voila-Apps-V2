@@ -1726,6 +1726,18 @@ class SampleDataExplorer:
                 if c in space and space[c]["fixed"] is not None
             }
 
+            # Fitting the Gaussian Process can take a while: show a banner that
+            # stays until the results replace it (clear_output(wait=True) below).
+            self.gui.suggest_experiments_button.disabled = True
+            ipy_display(
+                HTML(
+                    "<div style='padding:12px 16px; margin:8px 0; background:#fff3cd; "
+                    "border:2px solid #f0ad4e; border-radius:4px; color:#664d03; "
+                    "font-size:1.1em; font-weight:bold;'>"
+                    "⏳ Processing... fitting the model and calculating suggestions. "
+                    "This can take a moment.</div>"
+                )
+            )
             try:
                 result = ml.suggest_next_experiments(
                     self.analysis_df,
@@ -1738,14 +1750,18 @@ class SampleDataExplorer:
                     fixed=fixed,
                 )
             except ValueError as e:
+                clear_output(wait=True)
                 print(f"⚠️ {e}")
                 self._last_bo_result = None
                 return
             except Exception as e:
+                clear_output(wait=True)
                 print(f"❌ Error suggesting experiments: {e}")
                 logger.exception("Error suggesting experiments")
                 self._last_bo_result = None
                 return
+            finally:
+                self.gui.suggest_experiments_button.disabled = False
 
             suggestions = result["suggestions"]
             pred_col = f"predicted_{target}"
@@ -1817,8 +1833,17 @@ class SampleDataExplorer:
                 + "- Listed in the order they were picked as one batch (see 'How are the "
                 "suggestions calculated?' above).\n\n" + "\n".join(table_lines)
             )
+            try:
+                self.plot_manager.create_bo_suggestions_plot(suggestions, target)
+            except Exception as e:
+                clear_output(wait=True)
+                print(f"❌ Error plotting suggestions: {e}")
+                logger.exception("Error plotting BO suggestions")
+                self._last_bo_result = None
+                return
+            # Swap the Processing banner for the results in one step.
+            clear_output(wait=True)
             ipy_display(Markdown(summary))
-            self.plot_manager.create_bo_suggestions_plot(suggestions, target)
             self._last_bo_result = result
 
     def _refresh_experimental_options(self):
