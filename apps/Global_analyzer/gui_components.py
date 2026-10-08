@@ -276,20 +276,13 @@ class GUIManager:
         )
         # The checkboxes live in results_checklist_box (the source of truth read
         # by get_checked_results_columns, never displayed); results_tree_box is
-        # what the tab shows: the same checkboxes, one collapsible branch per
-        # result schema (JV, MPP Tracking, ...).
-        self.results_tree_box = widgets.VBox(
-            layout={"max_height": "320px", "overflow_y": "auto", "padding": "4px"}
-        )
+        # what the tab shows: the same checkboxes under one heading per
+        # result schema (JV, MPP Tracking, ...). Full height, no inner scrollbar.
+        self.results_tree_box = widgets.VBox(layout={"padding": "4px"})
         self.results_schemas_html = widgets.HTML()
         self._column_labels: dict = {}  # column -> "column (Schema)" for the filter UI
         self.metadata_checklist_box = widgets.VBox(
-            layout={
-                "max_height": "220px",
-                "overflow_y": "auto",
-                "border": "1px solid #ddd",
-                "padding": "4px",
-            }
+            layout={"border": "1px solid #ddd", "padding": "4px"}
         )
         self.recalculate_button = widgets.Button(
             description="Recalculate",
