@@ -1,3 +1,14 @@
+# AbsPL: Begriffe in der App
+
+| Begriff | Bedeutung | Quelle |
+|---|---|---|
+| **PL** (`measurement_type="pl"`) | klassische Einzelmessung, ein Spektrum, eine Laserleistung | Archiv |
+| **Sweep** (`measurement_type="sweep"`) | eine Messung aus mehreren PL-Spektren bei variierter Laserleistung | Archiv (`len(results) > 1`) |
+| **Sweep-Schritt** (`sweep_step`) | Position eines Spektrums im Sweep (1, 2, ...), entspricht einer Laserleistung; bei PL leer | Index in `results` |
+| **Cycle** (`cycle_number`) | wievielte Wiederholung derselben Messung an einer Probe | `Cycle_N` in den Description Notes, sonst 0 |
+
+Alle Sweep-Schritte einer Sweep-Datei haben denselben Cycle.
+
 # AbsPL: Sweep vs. Single PL – Unterscheidung
 
 ## Kontext

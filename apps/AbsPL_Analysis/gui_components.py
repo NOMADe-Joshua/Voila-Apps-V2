@@ -53,7 +53,9 @@ class AbsPLGUIComponents:
             [
                 widgets.HTML("<h3>Filter Measurements</h3>"),
                 widgets.HTML(
-                    "<p style='margin: 0 0 8px 0;'>Define optional dropdown filters per row: Sample -> Type -> Spot size -> Cycle.</p>"
+                    "<p style='margin: 0 0 8px 0;'>Define optional dropdown filters per row: Sample -> Type -> Spot size -> Cycle.<br>"
+                    "<b>Type</b>: <i>pl</i> = single PL measurement, <i>sweep</i> = one measurement of several PL spectra at varying laser power (each spectrum is a sweep step).<br>"
+                    "<b>Cycle</b>: repetition of the same measurement on a sample (<i>Cycle_N</i> in the description notes).</p>"
                 ),
                 widgets.HTML(
                     "<p style='margin: 0 0 8px 0; color: #666;'>If no specific filter is selected, all loaded data is used.</p>"
@@ -143,18 +145,28 @@ class AbsPLGUIComponents:
         self._load_preset(None)
 
     def _create_trace_order_section(self):
+        # Hidden Text widgets carry the state from the browser (JS) back to Python.
         self.trace_order_state = widgets.Text(value="[]", layout=widgets.Layout(display="none"))
         self.trace_order_state.add_class("abspl-trace-order-state")
+        self.trace_excluded_state = widgets.Text(value="[]", layout=widgets.Layout(display="none"))
+        self.trace_excluded_state.add_class("abspl-trace-excluded-state")
         self.trace_order_container = widgets.HTML(value="")
+        # display(Javascript(...)) from inside a widget callback is dropped under Voila unless it
+        # goes through an Output() that is part of the displayed widget tree.
+        self.trace_js_output = widgets.Output(layout=widgets.Layout(width="0px", height="0px"))
 
         self.trace_order_section = widgets.VBox(
             [
                 widgets.HTML("<b>Trace Order (Drag & Drop)</b>"),
                 widgets.HTML(
-                    "<p style='margin: 0 0 8px 0; color: #666;'>Reorder samples to control plotting order and legend order.</p>"
+                    "<p style='margin: 0 0 8px 0; color: #666;'>Drag the \u2261 handle to reorder "
+                    "samples (plotting order and legend order). Untick \u2713 to exclude a sample "
+                    "from all plots. Applied when you click the plot button.</p>"
                 ),
                 self.trace_order_container,
                 self.trace_order_state,
+                self.trace_excluded_state,
+                self.trace_js_output,
             ],
             layout=widgets.Layout(
                 border="1px solid #ddd",
@@ -164,16 +176,34 @@ class AbsPLGUIComponents:
             ),
         )
 
+    @staticmethod
+    def _parse_json_list(raw):
+        try:
+            parsed = json.loads(raw or "[]")
+        except Exception:
+            return []
+        return [str(v) for v in parsed] if isinstance(parsed, list) else []
+
+    def get_trace_order(self):
+        """Sample order as set by drag & drop (all samples, including excluded ones)."""
+        return self._parse_json_list(self.trace_order_state.value)
+
+    def get_excluded_samples(self):
+        """Samples whose checkbox is unticked in the trace order table."""
+        return self._parse_json_list(self.trace_excluded_state.value)
+
     def _update_trace_order_widget(self, values):
         self.trace_order_values = [str(v) for v in values if v not in (None, "")]
         if not self.trace_order_values:
             self.trace_order_section.layout.display = "none"
             self.trace_order_state.value = "[]"
+            self.trace_excluded_state.value = "[]"
             self.trace_order_container.value = ""
             return
 
         self.trace_order_section.layout.display = "flex"
         self.trace_order_state.value = json.dumps(self.trace_order_values)
+        self.trace_excluded_state.value = "[]"
 
         table_id = f"abspl-order-tbody-{uuid.uuid4().hex[:8]}"
 
@@ -182,7 +212,10 @@ class AbsPLGUIComponents:
             escaped_value = html.escape(value, quote=True)
             rows += (
                 f"<tr class='abspl-order-row' draggable='true' data-index='{idx}'>"
-                f"<td style='width:24px;text-align:center;color:#999;cursor:grab;'>≡</td>"
+                "<td style='width:24px;text-align:center;color:#999;cursor:grab;'>\u2261</td>"
+                "<td style='width:30px;text-align:center;'>"
+                "<input type='checkbox' class='abspl-order-enable' checked "
+                "title='Include this sample in plots' style='cursor:pointer;'></td>"
                 f"<td style='padding:8px 10px;'><span class='abspl-order-idx'>{idx + 1}</span></td>"
                 f"<td style='padding:8px 10px;'>{escaped_value}</td>"
                 "</tr>"
@@ -192,6 +225,7 @@ class AbsPLGUIComponents:
             "<style>"
             ".abspl-order-table{width:100%;border-collapse:collapse;}"
             ".abspl-order-table td{border-bottom:1px solid #eee;}"
+            ".abspl-order-row{user-select:none;}"
             ".abspl-order-row.drag-over{background:#eef6ff;border-top:2px solid #3b82f6;}"
             "</style>"
             f"<table class='abspl-order-table'><tbody id='{table_id}'>"
@@ -201,50 +235,65 @@ class AbsPLGUIComponents:
 
         js_code = """
         (function(){
+            function setWidgetValue(selector, value){
+                const el = document.querySelector(selector + ' input, ' + selector + ' textarea');
+                if(!el) return;
+                el.value = JSON.stringify(value);
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
             function initDragDrop(attempt){
                 const tbody = document.querySelector('#__TABLE_ID__');
-                if(!tbody){
-                    if(attempt < 20){
-                        setTimeout(function(){ initDragDrop(attempt + 1); }, 120);
+                const orderInput = document.querySelector('.abspl-trace-order-state input, .abspl-trace-order-state textarea');
+                if(!tbody || !orderInput){
+                    if(attempt < 40){
+                        setTimeout(function(){ initDragDrop(attempt + 1); }, 150);
                     }
                     return;
                 }
-                const rows = Array.from(tbody.querySelectorAll('tr.abspl-order-row'));
-                let dragged = null;
                 const sourceValues = __SOURCE_VALUES__;
+                let dragged = null;
 
+                function rowsNow(){ return Array.from(tbody.querySelectorAll('tr.abspl-order-row')); }
+                function valueOf(row){
+                    const idx = parseInt(row.getAttribute('data-index'), 10);
+                    return (idx >= 0 && idx < sourceValues.length) ? sourceValues[idx] : null;
+                }
                 function syncState(){
-                    const ordered = Array.from(tbody.querySelectorAll('tr.abspl-order-row'))
-                        .map(r => {
-                            const idx = parseInt(r.getAttribute('data-index'), 10);
-                            if(Number.isNaN(idx) || idx < 0 || idx >= sourceValues.length) return null;
-                            return sourceValues[idx];
-                        })
-                        .filter(v => !!v);
-                    const stateInput = document.querySelector('.abspl-trace-order-state input, .abspl-trace-order-state textarea');
-                    if(stateInput){
-                        stateInput.value = JSON.stringify(ordered);
-                        stateInput.dispatchEvent(new Event('input', { bubbles: true }));
-                        stateInput.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                    Array.from(tbody.querySelectorAll('tr.abspl-order-row')).forEach((row, i) => {
-                        const idx = row.querySelector('.abspl-order-idx');
-                        if(idx) idx.textContent = String(i+1);
+                    const rows = rowsNow();
+                    setWidgetValue('.abspl-trace-order-state', rows.map(valueOf).filter(v => !!v));
+                    setWidgetValue('.abspl-trace-excluded-state', rows
+                        .filter(r => !r.querySelector('.abspl-order-enable').checked)
+                        .map(valueOf).filter(v => !!v));
+                    rows.forEach((row, i) => {
+                        const n = row.querySelector('.abspl-order-idx');
+                        if(n) n.textContent = String(i + 1);
                     });
                 }
 
-                rows.forEach(row => {
-                    row.addEventListener('dragstart', function(e){ dragged=this; this.style.opacity='0.5'; e.dataTransfer.effectAllowed='move'; });
-                    row.addEventListener('dragend', function(){ this.style.opacity='1'; rows.forEach(r => r.classList.remove('drag-over')); });
+                rowsNow().forEach(row => {
+                    row.addEventListener('dragstart', function(e){
+                        dragged = this; this.style.opacity = '0.5';
+                        e.dataTransfer.effectAllowed = 'move';
+                        e.dataTransfer.setData('text/plain', valueOf(this) || '');
+                    });
+                    row.addEventListener('dragend', function(){
+                        this.style.opacity = this.querySelector('.abspl-order-enable').checked ? '1' : '0.4';
+                        rowsNow().forEach(r => r.classList.remove('drag-over'));
+                    });
                     row.addEventListener('dragover', function(e){ e.preventDefault(); this.classList.add('drag-over'); });
                     row.addEventListener('dragleave', function(){ this.classList.remove('drag-over'); });
                     row.addEventListener('drop', function(e){
-                        e.preventDefault(); this.classList.remove('drag-over');
-                        if(!dragged || dragged===this) return;
-                        const all = Array.from(tbody.querySelectorAll('tr.abspl-order-row'));
-                        const di = all.indexOf(dragged); const ti = all.indexOf(this);
-                        if(di < ti) this.parentNode.insertBefore(dragged, this.nextSibling);
+                        e.preventDefault(); e.stopPropagation(); this.classList.remove('drag-over');
+                        if(!dragged || dragged === this) return;
+                        const all = rowsNow();
+                        if(all.indexOf(dragged) < all.indexOf(this)) this.parentNode.insertBefore(dragged, this.nextSibling);
                         else this.parentNode.insertBefore(dragged, this);
+                        syncState();
+                    });
+                    const cb = row.querySelector('.abspl-order-enable');
+                    cb.addEventListener('change', function(){
+                        row.style.opacity = this.checked ? '1' : '0.4';
                         syncState();
                     });
                 });
@@ -255,7 +304,9 @@ class AbsPLGUIComponents:
         """
         js_code = js_code.replace("__TABLE_ID__", table_id)
         js_code = js_code.replace("__SOURCE_VALUES__", json.dumps(self.trace_order_values))
-        display(Javascript(js_code))
+        with self.trace_js_output:
+            clear_output(wait=True)
+            display(Javascript(js_code))
 
     def _with_all_option(self, values):
         return [("All", "__all__")] + [(str(v), v) for v in values]
@@ -284,6 +335,7 @@ class AbsPLGUIComponents:
             options=[("All", "__all__")],
             value="__all__",
             description="Cycle",
+            tooltip="Repetition of the same measurement on a sample (Cycle_N in the description notes). Not the sweep step.",
             layout=widgets.Layout(width="200px"),
         )
         remove_btn = widgets.Button(
@@ -772,13 +824,7 @@ class AbsPLGUIComponents:
                 return None
 
         specs = []
-        trace_order = []
-        try:
-            parsed = json.loads(self.trace_order_state.value or "[]")
-            if isinstance(parsed, list):
-                trace_order = [str(v) for v in parsed]
-        except Exception:
-            trace_order = []
+        trace_order = self.get_trace_order()
 
         for row in self.plot_rows:
             plot_type_value = row["kind"].value

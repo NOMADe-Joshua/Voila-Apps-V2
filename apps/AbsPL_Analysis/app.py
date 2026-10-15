@@ -2,6 +2,7 @@
 Modular AbsPL app controller with JV-style Select Upload flow.
 """
 
+import logging
 import os
 
 import ipywidgets as widgets
@@ -13,10 +14,15 @@ from IPython.display import clear_output, display
 from plot_manager import AbsPLPlotManager
 from resizable_plot_utility import ResizablePlotManager
 
+from perotf_utils.api_calls import get_all_eqe, get_ids_in_batch
 from perotf_utils.auth_manager import AuthenticationManager
 from perotf_utils.auth_ui import AuthenticationUI
 from perotf_utils.batch_selection import create_batch_selection
-from perotf_utils.config import API_ENDPOINT, URL_BASE
+from perotf_utils.config import API_ENDPOINT, ENTRY_TYPES, URL_BASE
+
+log = logging.getLogger(__name__)
+
+SEARCH_BUTTON_TEXT = "🔬 Search for AbsPL"
 
 
 class AbsPLAppController:
@@ -39,6 +45,11 @@ class AbsPLAppController:
             description="Refresh Diagnostics", button_style="info"
         )
         self.clear_diag_button = widgets.Button(description="Clear Diagnostics")
+
+        # Batch selection / AbsPL-availability search state
+        self._batch_selector = None  # the inner SelectMultiple from create_batch_selection
+        self._all_batch_options = []  # unfiltered batch id list
+        self._search_status = widgets.Output(layout=widgets.Layout(margin="4px 0"))
 
         self.main_layout = widgets.Tab()
 
@@ -116,7 +127,29 @@ class AbsPLAppController:
                 batch_selection_widget = create_batch_selection(
                     url, token, self._load_data_from_selection
                 )
-                display(batch_selection_widget)
+                # children == (search_field, batch_ids_selector, load_batch_button)
+                self._batch_selector = batch_selection_widget.children[1]
+                self._all_batch_options = list(self._batch_selector.options)
+
+                search_btn = widgets.Button(
+                    description=SEARCH_BUTTON_TEXT,
+                    button_style="info",
+                    tooltip="Scan all listed batches and keep only those that contain AbsPL (PLQY) data",
+                    layout=widgets.Layout(width="190px"),
+                )
+                search_btn.on_click(self._on_search_for_abspl)
+                with self._search_status:
+                    clear_output(wait=True)
+
+                display(
+                    widgets.VBox(
+                        [
+                            batch_selection_widget,
+                            widgets.HBox([search_btn], layout=widgets.Layout(margin="6px 0")),
+                            self._search_status,
+                        ]
+                    )
+                )
                 debug_logger_abspl.add("AUTH", "Batch selector initialized", level="SUCCESS")
             except requests.exceptions.RequestException as exc:
                 print(f"Server error while loading batch selection: {exc}")
@@ -126,6 +159,58 @@ class AbsPLAppController:
                 debug_logger_abspl.add("AUTH", f"Batch selector init failed: {exc}", level="ERROR")
 
         self._on_refresh_diagnostics(None)
+
+    def _on_search_for_abspl(self, button=None):
+        """Filter the batch list down to batches that contain AbsPL (PLQY) entries."""
+        if self._batch_selector is None or not self._all_batch_options:
+            return
+
+        url = self.auth_manager.url
+        token = self.auth_manager.current_token
+        all_batch_ids = list(self._all_batch_options)
+        total = len(all_batch_ids)
+
+        if button is not None:
+            button.disabled = True
+            button.description = "🔄 Searching…"
+
+        valid_batches = []
+        try:
+            for i, batch_id in enumerate(all_batch_ids):
+                if i % 5 == 0 or i == total - 1:
+                    with self._search_status:
+                        clear_output(wait=True)
+                        print(f"🔍  Progress: {i + 1}/{total}, found {len(valid_batches)} so far")
+                        print(f"   Currently testing: {batch_id}")
+                try:
+                    sample_ids = get_ids_in_batch(url, token, [batch_id])
+                    if sample_ids and get_all_eqe(
+                        url, token, sample_ids, eqe_type=ENTRY_TYPES["abspl"]
+                    ):
+                        valid_batches.append(batch_id)
+                except Exception as exc:
+                    log.warning("AbsPL search failed for batch %s: %s", batch_id, exc)
+                    debug_logger_abspl.add(
+                        "SEARCH", f"Batch {batch_id} skipped: {exc}", level="WARNING"
+                    )
+
+            self._batch_selector.options = valid_batches
+            self._batch_selector.value = ()
+
+            with self._search_status:
+                clear_output(wait=True)
+                if valid_batches:
+                    print(f"✅  {len(valid_batches)} of {total} batch(es) contain AbsPL data.")
+                else:
+                    print("❌  None of the listed batches contain AbsPL data.")
+            debug_logger_abspl.add(
+                "SEARCH", f"{len(valid_batches)} of {total} batches contain AbsPL", level="INFO"
+            )
+        finally:
+            if button is not None:
+                button.disabled = False
+                button.description = SEARCH_BUTTON_TEXT
+            self._on_refresh_diagnostics(None)
 
     def _load_data_from_selection(self, batch_selector):
         batch_ids = list(batch_selector.value) if batch_selector.value else []
@@ -273,6 +358,11 @@ class AbsPLAppController:
         if summary_df.empty or spectra_df.empty:
             summary_df = self.data_manager.get_data().get("summary")
             spectra_df = self.data_manager.get_data().get("spectra")
+
+        excluded = set(self.gui.get_excluded_samples())
+        if excluded:
+            summary_df = summary_df[~summary_df["sample_id"].astype(str).isin(excluded)]
+            spectra_df = spectra_df[~spectra_df["sample_id"].astype(str).isin(excluded)]
 
         specs = self.gui.get_plot_specs()
         if not specs:

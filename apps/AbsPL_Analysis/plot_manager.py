@@ -318,6 +318,7 @@ class AbsPLPlotManager:
                         sub.get("sample_id", pd.Series([""] * len(sub))).astype(str),
                         sub.get("cycle_number", pd.Series([""] * len(sub))).astype(str),
                         sub.get("measurement_type", pd.Series([""] * len(sub))).astype(str),
+                        sub.get("sweep_step", pd.Series([""] * len(sub))).fillna("-").astype(str),
                     ],
                     axis=-1,
                 )
@@ -338,6 +339,7 @@ class AbsPLPlotManager:
                             "Sample: %{customdata[0]}<br>"
                             "Cycle: %{customdata[1]}<br>"
                             "Type: %{customdata[2]}<br>"
+                            "Sweep step: %{customdata[3]}<br>"
                             f"Intensity: %{{x:.4g}}<br>{y_col}: %{{y:.4g}}<extra></extra>"
                         ),
                     )
@@ -775,6 +777,13 @@ class AbsPLPlotManager:
                 else ("condition" if "condition" in df.columns else None)
             )
 
+        # Traces (and with them the legend) follow the drag & drop sample order
+        if trace_order and "sample_id" in df.columns:
+            rank = {str(v): i for i, v in enumerate(trace_order)}
+            df = df.assign(
+                _trace_rank=df["sample_id"].astype(str).map(lambda v: rank.get(v, len(rank)))
+            ).sort_values("_trace_rank", kind="stable")
+
         if color_by is None:
             categories = ["All"]
         else:
@@ -1137,28 +1146,44 @@ class AbsPLPlotManager:
             fit_quality_factor=False,
         )
 
-    def sweep_heatmap(self, df, sample=None, intensity_source="luminescence_flux_density"):
+    def sweep_heatmap(
+        self, df, sample=None, cycle=None, intensity_source="luminescence_flux_density"
+    ):
+        """Heatmap of one sweep: wavelength vs. sweep step (laser intensity).
+
+        One heatmap shows exactly one sweep, i.e. one sample in one cycle; the
+        rows are the sweep steps. Without ``sample``/``cycle`` the sample with
+        most sweep spectra and its lowest cycle are used.
+        """
+        y_title = "Sweep step"
         if df is None or df.empty:
-            return self._apply_layout(go.Figure(), "No data", "Wavelength (nm)", "Cycle")
+            return self._apply_layout(go.Figure(), "No data", "Wavelength (nm)", y_title)
 
         sweep_df = df[df["measurement_type"] == "sweep"].copy()
         if sweep_df.empty:
             return self._apply_layout(
-                go.Figure(), "No sweep data available", "Wavelength (nm)", "Cycle"
+                go.Figure(), "No sweep data available", "Wavelength (nm)", y_title
             )
 
         if sample is None:
             sample = sweep_df["sample_id"].value_counts().index[0]
 
-        s = sweep_df[sweep_df["sample_id"] == sample].sort_values("cycle_number")
+        s = sweep_df[sweep_df["sample_id"] == sample]
         if s.empty:
             return self._apply_layout(
-                go.Figure(), f"No sweep data for sample {sample}", "Wavelength (nm)", "Cycle"
+                go.Figure(), f"No sweep data for sample {sample}", "Wavelength (nm)", y_title
             )
+
+        cycle_series = pd.to_numeric(s["cycle_number"], errors="coerce")
+        if cycle is None:
+            cycle = cycle_series.min()
+        s = s[cycle_series == cycle].copy()
+        s["_step"] = pd.to_numeric(s.get("sweep_step"), errors="coerce")
+        s = s.sort_values("_step")
 
         rows = []
         wavelengths = None
-        cycle_labels = []
+        step_labels = []
         for _, row in s.iterrows():
             x = row.get("wavelength")
             y = row.get(intensity_source, row.get("y_data"))
@@ -1179,28 +1204,29 @@ class AbsPLPlotManager:
             if len(x) != len(wavelengths) or not np.allclose(x, wavelengths):
                 continue
             rows.append(y)
-            cycle_labels.append(int(row.get("cycle_number", len(cycle_labels) + 1)))
+            step = row["_step"]
+            step_labels.append(int(step) if np.isfinite(step) else len(step_labels) + 1)
 
         if wavelengths is None or not rows:
             return self._apply_layout(
                 go.Figure(),
                 f"Could not build heatmap for sample {sample}",
                 "Wavelength (nm)",
-                "Cycle",
+                y_title,
             )
 
         z = np.vstack(rows)
         fig = go.Figure(
             data=go.Heatmap(
                 x=wavelengths,
-                y=cycle_labels,
+                y=step_labels,
                 z=z,
                 colorscale="Viridis",
                 colorbar=dict(title="Intensity"),
             )
         )
         fig = self._apply_layout(
-            fig, f"Sweep Heatmap - Sample {sample}", "Wavelength (nm)", "Cycle"
+            fig, f"Sweep Heatmap - Sample {sample}, cycle {cycle:g}", "Wavelength (nm)", y_title
         )
         return fig
 

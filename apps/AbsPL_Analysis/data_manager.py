@@ -1,7 +1,21 @@
 """
 Data manager for AbsPL/PLQY analysis.
+
+Terminology (keep these apart, they are two different things):
+
+* **Measurement type** (``measurement_type``): ``"pl"`` is a classical single PL
+  measurement (one spectrum, one laser intensity). ``"sweep"`` is one
+  measurement made of several PL spectra taken while the laser power is varied.
+* **Sweep step** (``sweep_step``): the 1-based position of one spectrum inside
+  a sweep (one laser intensity). Always empty for ``"pl"`` rows.
+* **Cycle** (``cycle_number``): the number of the repetition of the *same*
+  measurement on the same sample (measuring a sample several times in a row).
+  It is not stored in the archive; it is read from ``Cycle_N`` in the
+  description notes of the entry. Every sweep step of one sweep file shares the
+  cycle of that file. Entries without ``Cycle_N`` count as cycle 0.
 """
 
+import logging
 import re
 
 import numpy as np
@@ -11,12 +25,16 @@ from diagnostic_helper import debug_logger_abspl
 from perotf_utils.api_calls import get_all_eqe, get_ids_in_batch, get_sample_description
 from perotf_utils.config import ENTRY_TYPES
 
+log = logging.getLogger(__name__)
+
+DEFAULT_CYCLE = 0
+
 
 def extract_cycle_info(*texts):
     """Extract cycle identifier from description/filename text.
 
     Supports: Cycle_M, pxNCycle_M, or standalone cycle number.
-    Returns: cycle_number (int or None)
+    Returns: cycle_number (int or None). Not to be confused with the sweep step.
     """
     combined_pattern = re.compile(r"px(?:\d+)?Cycle_(?P<cycle>\d+)", re.IGNORECASE)
     cycle_pattern = re.compile(r"Cycle_(?P<cycle>\d+)", re.IGNORECASE)
@@ -148,6 +166,7 @@ class AbsPLDataManager:
 
         summary_rows = []
         spectra_rows = []
+        n_without_cycle = 0
 
         for sample_id, entries in abspl_entries.items():
             sample_desc = descriptions.get(sample_id, "")
@@ -162,13 +181,18 @@ class AbsPLDataManager:
                 spot_size = self._extract_spot_size(data_dict)
                 description_notes = extract_description_notes(data_dict, metadata)
                 cycle_from_notes = extract_cycle_info(description_notes)
+                if cycle_from_notes is None:
+                    cycle_from_notes = DEFAULT_CYCLE
+                    n_without_cycle += 1
 
                 settings = data_dict.get("settings", {}) if isinstance(data_dict, dict) else {}
                 laser_intensity_default = settings.get("laser_intensity_suns", None)
 
                 for i, result in enumerate(results):
-                    # Cycle comes from Description Notes (e.g. "Cycle_N"), not from sweep sub-measurement index.
+                    # Cycle (repetition of the measurement) comes from the description notes
+                    # ("Cycle_N"); the index i inside a sweep file is the sweep step instead.
                     cycle_number = cycle_from_notes
+                    sweep_step = i + 1 if measurement_type == "sweep" else None
 
                     wavelength = self._as_list(result.get("wavelength"))
                     lum_flux = self._as_list(result.get("luminescence_flux_density"))
@@ -190,7 +214,7 @@ class AbsPLDataManager:
                     measurement_uid = (
                         f"{sample_id}|{metadata.get('entry_id', entry_idx)}|{entry_idx}|{i}"
                     )
-                    cycle_int = int(cycle_number) if str(cycle_number).isdigit() else cycle_number
+                    cycle_int = int(cycle_number)
 
                     summary_rows.append(
                         {
@@ -203,6 +227,7 @@ class AbsPLDataManager:
                             "description_notes": description_notes,
                             "measurement_type": measurement_type,
                             "cycle_number": cycle_int,
+                            "sweep_step": sweep_step,
                             "laser_spot_size": spot_size,
                             "laser_intensity_suns": self._safe_float(
                                 result.get("laser_intensity_suns", laser_intensity_default)
@@ -234,6 +259,7 @@ class AbsPLDataManager:
                             "description_notes": description_notes,
                             "measurement_type": measurement_type,
                             "cycle_number": cycle_int,
+                            "sweep_step": sweep_step,
                             "laser_spot_size": spot_size,
                             "laser_intensity_suns": self._safe_float(
                                 result.get("laser_intensity_suns", laser_intensity_default)
@@ -245,6 +271,19 @@ class AbsPLDataManager:
                             "spectrum_source": y_source,
                         }
                     )
+
+        if n_without_cycle:
+            debug_logger_abspl.add(
+                "LOAD",
+                f"{n_without_cycle} entr(y/ies) without 'Cycle_N' in the description notes: "
+                f"treated as cycle {DEFAULT_CYCLE}",
+                level="WARNING",
+            )
+            log.warning(
+                "%d AbsPL entries without Cycle_N in description notes, using cycle %d",
+                n_without_cycle,
+                DEFAULT_CYCLE,
+            )
 
         summary_df = pd.DataFrame(summary_rows)
         spectra_df = pd.DataFrame(spectra_rows)
@@ -371,6 +410,7 @@ class AbsPLDataManager:
                 "derived_jsc",
                 "laser_intensity_suns",
                 "cycle_number",
+                "sweep_step",
             ]
             if c in summary.columns
         ]
@@ -426,6 +466,7 @@ class AbsPLDataManager:
                     "measurement_type",
                     "sample_id",
                     "cycle_number",
+                    "sweep_step",
                     "laser_intensity_suns",
                 ]
                 if c in spectra_for_options.columns
@@ -443,7 +484,9 @@ class AbsPLDataManager:
                 cycle_text = f"C{int(cycle_val)}" if np.isfinite(cycle_val) else "C?"
                 suns_val = pd.to_numeric(row.get("laser_intensity_suns"), errors="coerce")
                 suns_text = f"{suns_val:.4g} sun" if np.isfinite(suns_val) else "n/a sun"
-                label = f"{mtype} | {sample} | {cycle_text} | {suns_text}"
+                step_val = pd.to_numeric(row.get("sweep_step"), errors="coerce")
+                step_text = f" | step {int(step_val)}" if np.isfinite(step_val) else ""
+                label = f"{mtype} | {sample} | {cycle_text}{step_text} | {suns_text}"
                 fit_curve_options.append({"label": label, "value": uid})
 
         return {
