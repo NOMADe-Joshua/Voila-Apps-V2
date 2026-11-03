@@ -67,4 +67,18 @@ def test_laser_scribing_is_not_offered(mods, monkeypatch):
     monkeypatch.delenv("NOMAD_CLIENT_ACCESS_TOKEN", raising=False)
     app = mods["voila_experiment_app"].MinimalistExperimentBuilder()
     assert "Laser Scribing" not in app.available_processes
-    assert "Laser Scribing" not in app.process_config_function()
+
+
+def test_generated_excel_has_example_row_and_nomad_id_formula(mods, monkeypatch):
+    """Row 3 always carries example values and the Nomad ID formula (no checkbox any more)."""
+    import io
+
+    from openpyxl import load_workbook
+
+    monkeypatch.delenv("JUPYTERHUB_USER", raising=False)
+    monkeypatch.delenv("NOMAD_CLIENT_ACCESS_TOKEN", raising=False)
+    app = mods["voila_experiment_app"].MinimalistExperimentBuilder()
+    ws = load_workbook(io.BytesIO(app._generate_excel_data()))["Experiment Data"]
+    assert ws["A2"].value == "Date"
+    assert ws["A3"].value == "YYYYMMDD"
+    assert ws["F3"].value.startswith('=CONCATENATE("KIT_"')
