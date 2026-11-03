@@ -9,6 +9,48 @@ GitHub fork of it, remote `upstream`) so apps can be exchanged; see
 passes is `UNIFICATION_PROMPT.md`; read it in full before doing one. This file
 is the condensed, everyday version.
 
+## How the apps run: Voila on NORTH
+
+Every app is a Jupyter notebook served by Voila: Voila runs all cells top to
+bottom in a fresh kernel and shows only their outputs (widgets, HTML, plots),
+never the code; users cannot edit or re-run cells. Everything interactive after
+that first run happens in ipywidgets callbacks. What follows from that:
+
+- **On the Oasis** the `voila` NORTH tool runs the notebooks in a per-user
+  container with the repo upload mounted (`/home/jovyan/uploads/<hash>/`); the
+  App Dashboard links into it via `NORTH_ENDPOINT`. NOMAD sets
+  `NOMAD_CLIENT_ACCESS_TOKEN`, `NOMAD_CLIENT_USER` and `JUPYTERHUB_USER` there,
+  so apps authenticate without a login. Outside NORTH they fall back to
+  username/password (or an exported `NOMAD_CLIENT_ACCESS_TOKEN`).
+- **One kernel per browser tab.** Opening or reloading the page starts a new
+  kernel that runs the notebook again; closing the tab shuts it down. No state
+  survives a reload, and an edited `.py` module takes effect on the next page
+  load (in JupyterLab only after a kernel restart).
+- **Every cell's stdout ends up in the UI**: `print()`, import banners and the
+  value of a cell's last expression. Hence the `_ =` in cell 0 and the banner
+  silencing in `bootstrap.py`.
+- **Errors are invisible by default.** An exception while a cell runs shows
+  only Voila's generic "error when executing cell" note (the traceback needs
+  `--show_tracebacks=True`), and an exception inside a widget callback shows
+  nothing at all. Catch errors in callbacks and show them in the app (an
+  `Output` or `HTML` status widget, `perotf_utils.error_handler.ErrorHandler`).
+- **`display()` from a callback** needs an `Output()` widget, see the gotcha
+  below.
+
+**Running an app locally** (Windows): use the repo's `.venv` (the `python` on
+PATH lacks the dependencies) and start Voila from the app folder, because
+cell 0 resolves `../../bootstrap.py` relative to it:
+```bash
+cd apps/Process_JV_Overview
+../../.venv/Scripts/python.exe -m voila process_jv_overview.ipynb --show_tracebacks=True
+```
+The app is then at `http://localhost:8866`. Tests and lint use the same
+environment (`.venv/Scripts/python.exe -m pytest tests -m "not live"`,
+`.venv/Scripts/ruff.exe`). The Oasis may not be reachable from the dev machine
+(it refused connections during a Claude session on 2026-11-03), so behaviour
+against live data is checked in NORTH. Tear down whatever you start (see the
+gotcha below).
+
 ## Layout
 
 ```
@@ -134,26 +176,67 @@ annealing incl. CR_/TFL_ variants, lamination) are recognised by their m_def,
 taken from `ENTRY_TYPES`. Only confirm a path against the real `map_<type>`
 function, never guess; mark unconfirmed units `unit_verified: False`.
 
-## Change management: issues, PRs, versions
+## NOMAD process data: what the archive actually holds
 
-Every user-visible change to an app starts as a GitHub issue on
-`NOMADe-Joshua/Voila-Apps-V2` and lands via a PR that references it
-(`Fixes #123`). Full process for humans: `CONTRIBUTING.md`. For you:
+Verified against the backend sources listed below:
 
-- When asked to fix or add something in an app, check whether an issue
-  already exists; if the user hasn't mentioned one and it's a non-trivial
-  change, ask whether one should be filed.
+- **Values come in the schema's unit**, not in SI and not in the Excel column's
+  unit: NOMAD converts an assigned quantity to the unit its `Quantity` declares
+  and stores the magnitude (nomad-FAIR `metainfo/data_type.py`, `normalize`).
+  Evaporation sources, for example, hold `thickness` in nm, `pressure`,
+  `pressure_start` and `pressure_end` in mbar, `temparature` in °C and the
+  rates in angstrom/s, while the Excel columns say `[bar]`; the parser converts.
+- **Unset quantities are left out of the JSON**, so the variations of one step
+  often differ in which keys and how many list entries (e.g. evaporation
+  sources) they have. `perotf_utils.process_handling.merge_step_data` therefore
+  groups the processes of a step by class (`m_def`) and fills gaps with `None`;
+  don't go back to grouping by key structure.
+- Field names keep the schema's spelling: `positon_in_experimental_plan`,
+  `temparature`, `substrate_temparature`.
+- `positon_in_experimental_plan` is the index of the step's column group in the
+  experiment Excel (`Experiment Info` is 0, Excel_creator labels the groups
+  `<n>: <Process>`). Step types the parser skips leave gaps in it.
+- The experiment Excel stays in the upload as the mainfile of the experiment
+  entry, but the apps show only what is stored in NOMAD and never read the
+  Excel back (user decision 2026-11-03; an Excel fallback in
+  Process_JV_Overview was removed again). A value missing in NOMAD is fixed in
+  the parser, not worked around in an app.
+
+Backend sources, a read-only reference: change nothing there from this repo
+unless the user asks. On the main dev machine they are under
+`\\wsl$\Ubuntu\home\joshua\nomad-distro-dev\packages\`:
+- `nomad-perotf/src/nomad_perotf/schema_packages/perotf_package.py`: the peroTF classes
+- `nomad-perotf/src/nomad_perotf/parsers/perotf_batch_parser.py`: the experiment Excel parser
+- `nomad-baseclasses/src/baseclasses/`: the base sections; `helper/solar_cell_batch_mapping.py`
+  holds the `map_*` functions the parser calls
+- `nomad-FAIR/`: NOMAD itself
+
+peroTF-specific backend changes go into nomad-perotf only. nomad-baseclasses is
+shared by many groups and is not changed for peroTF (user decision 2026-11-03).
+
+## Change management: versions, commits, releases
+
+We work directly in our own repo `NOMADe-Joshua/Voila-Apps-V2`: a change needs
+no GitHub issue and no PR, so don't propose filing one. `CONTRIBUTING.md`
+sections 1, 2 and 4 still describe the older issue/PR process; where they
+differ, this section wins.
+
+- **Commit only when the user asks**, on the current branch, with a
+  descriptive message that names the app (e.g. `Process_JV_Overview: keep every
+  evaporation source in the step tables`). The commit messages are the
+  changelog.
 - **Bump that app's `pyproject.toml` `version`** (SemVer: patch for a fix,
   minor for a non-breaking feature, major for a breaking change) in the same
   change, for that app only. Not for internal refactors, test-only changes, or
   `shared/perotf_utils/` edits.
-- This repo is a fork: `gh pr create` targets HZB's upstream repo unless
-  `gh repo set-default NOMADe-Joshua/Voila-Apps-V2` was run. Never open a PR
-  against `nomad-hzb/nomad-pv-analysis-apps` unless the user asks for it.
+- The repo is still a GitHub fork of HZB's: remote `upstream` and a plain
+  `gh pr create` point at `nomad-hzb/nomad-pv-analysis-apps`. Never push to or
+  open a PR against HZB unless the user asks for it.
 - "What's new" is the GitHub Releases page, linked from the App Dashboard
-  (`apps/App_dashboard/gui_components.py::WHATS_NEW_URL`); releases are cut
-  with `gh release create <tag> --generate-notes`, so keep PR titles
-  descriptive.
+  (`apps/App_dashboard/gui_components.py::WHATS_NEW_URL`).
+  `gh release create <tag> --generate-notes` only lists merged PRs, so write the
+  notes from the commits since the last tag (`git log <last-tag>..HEAD
+  --oneline`) and pass them with `--notes-file`.
 
 ## Known environment gotcha: `tests/conftest.py` is load-bearing
 
@@ -297,11 +380,19 @@ side.
   catalog paths are `unit_verified: False`; solvent volume is probably off by
   1000 (schema ml vs. column uL) and needs checking in the NOMAD GUI before a
   multiplier is added. Not autofillable because nomad_perotf's parser does not
-  store the data: Laser Scribing (parser branch commented out), Seq-Evaporation
-  (stored as plain evaporation), Multijunction Info, most Lamination columns,
-  Inkjet waveform and gas/vacuum quenching columns. HZB's child-sample `_C-n`
+  store the data: Seq-Evaporation (stored as an evaporation without sources, see
+  below), Multijunction Info, most Lamination columns, Inkjet waveform and
+  gas/vacuum quenching columns. Laser Scribing is no longer offered at all
+  (Excel_creator 1.1.0): the parser deliberately creates no entry for it. HZB's child-sample `_C-n`
   ids were dropped (peroTF ids have no such suffix), so the GUI no longer
   creates child rows.
+- **Seq-Evaporation sources are not in NOMAD**: nomad-baseclasses'
+  `map_evaporation()` returns before adding any source when the "Organic"
+  column is missing, which is always the case for Seq-Evaporation. Being fixed
+  in nomad-perotf's own parser (`parsers/perotf_mapping.py`, uncommitted as of
+  2026-11-03). Existing uploads keep their entries without sources: the parser
+  never overwrites a process entry it already created
+  (`create_archive(..., overwrite=False)`).
 - Still open, as at HZB: whether this repo should become an installable NOMAD
   plugin (NORTH tool entry points, Docker images). Nothing of that exists; don't
   scaffold it without explicit sign-off.
