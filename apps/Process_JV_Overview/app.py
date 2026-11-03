@@ -325,7 +325,8 @@ class ToggleBatchProcess(process_handling.batch_process):
                     [self._variations_of(sample_lists[idx]) for idx in process["indices"]],
                     allow_duplicates=True,
                 )
-                display(HTML(table.to_html()))
+                # Empty cell = this variation has no value for the parameter
+                display(HTML(table.to_html(na_rep="")))
                 display(
                     widgets.GridBox(
                         self.manufacturing_params[step_index][process_idx],

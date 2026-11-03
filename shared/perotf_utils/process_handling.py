@@ -53,17 +53,15 @@ class batch_process(widgets.GridBox):
         self.abbreviate_keys = abbreviate_keys
 
         # procedure relies on steps being ordered by "position_in_experimental_plan"
-        # result should be a list where the n-th entry is a list of all processes that were performed n-th in the production
-        steps = []
-        plan_position_offset = process_list[0][
-            "positon_in_experimental_plan"
-        ]  # the number indicating the first manufacturing step, might be 0 or 1
-
-        for step in process_list:
-            if step["positon_in_experimental_plan"] - plan_position_offset >= len(steps):
-                steps.append([step])
-            else:
-                steps[-1].append(step)
+        # result should be a list where the n-th entry is a list of all processes that were performed n-th in the production.
+        # Grouped by equal position, so a position without any stored process (e.g. a step type the
+        # experiment parser skips) does not split the variations of the following steps.
+        steps = [
+            list(group)
+            for _position, group in itertools.groupby(
+                process_list, key=lambda step: step["positon_in_experimental_plan"]
+            )
+        ]
 
         self.steps = steps
         self.steps_merged = list(map(lambda x: merge_step_data(x), steps))
@@ -100,22 +98,22 @@ class batch_process(widgets.GridBox):
         # create the parameter selection widgets
         def param_selection_buttons(step_index):
             sample_ids_nested = self.samples_for_processes_in_step(step_index)
-            return list(
-                map(
-                    lambda process: list(
-                        map(
-                            lambda jsonpath_values_tuple: manufacturing_parameter(
-                                jsonpath_values_tuple[0],
-                                list(map(lambda idx: sample_ids_nested[idx], process["indices"])),
-                                jsonpath_values_tuple[1],
-                                self.refresh_selected_parameter_overview,
-                            ),
-                            flatten_layers(process["json"], [], False, False),
-                        )
-                    ),
-                    self.steps_merged[step_index],
-                )
-            )
+
+            def process_buttons(process):
+                column_data = flatten_layers(process["json"], [], False, False)
+                labels = short_labels([keychain for keychain, _values in column_data])
+                return [
+                    manufacturing_parameter(
+                        keychain,
+                        [sample_ids_nested[idx] for idx in process["indices"]],
+                        values,
+                        self.refresh_selected_parameter_overview,
+                        label=label,
+                    )
+                    for (keychain, values), label in zip(column_data, labels)
+                ]
+
+            return [process_buttons(process) for process in self.steps_merged[step_index]]
 
         self.manufacturing_params = list(
             map(param_selection_buttons, range(len(self.steps_merged)))
@@ -134,7 +132,7 @@ class batch_process(widgets.GridBox):
                             remove_constants=self.exclude_constants.value,
                             remove_string=self.exclude_strings.value,
                             abbreviate_keys=self.abbreviate_keys.value,
-                        ).to_html()
+                        ).to_html(na_rep="")
                     )
                 )
                 display(
@@ -182,14 +180,14 @@ class batch_process(widgets.GridBox):
             lambda x: x.value,
             itertools.chain.from_iterable(itertools.chain.from_iterable(self.manufacturing_params)),
         ):
-            parameter_name_list.append(str(parameter_object.keychain[-1]))
+            parameter_name_list.append(parameter_object.description)
             for sample_id in filter(
                 lambda x: bool(x in self.efficiencies or not only_samples_with_efficiencies),
                 parameter_object.samples_values_dict,
             ):
                 if sample_id not in datapoints_dict:
                     datapoints_dict[sample_id] = {}
-                datapoints_dict[sample_id][str(parameter_object.keychain[-1])] = (
+                datapoints_dict[sample_id][parameter_object.description] = (
                     parameter_object.samples_values_dict[sample_id]
                 )
         if only_samples_with_all_values:
@@ -204,154 +202,96 @@ class batch_process(widgets.GridBox):
 
 class manufacturing_parameter(widgets.ToggleButton):
     # sample_ids should be a list of lists where the ith list contains all sample ids for which the ith value was used
-    def __init__(self, keychain, sample_ids_nested, values, update_callback):
-        super().__init__(description=str(keychain[-1]))
+    # label: button text, defaults to the last key; samples without a value (None) are left out
+    def __init__(self, keychain, sample_ids_nested, values, update_callback, label=None):
+        super().__init__(description=label or str(keychain[-1]))
         self.keychain = keychain
         self.value = False
-        self.samples_values_dict = dict(
-            itertools.chain.from_iterable(
-                map(
-                    lambda idx: map(
-                        lambda sample_id: (sample_id, values[idx]), sample_ids_nested[idx]
-                    ),
-                    range(len(sample_ids_nested)),
-                )
-            )
-        )
+        self.samples_values_dict = {
+            sample_id: values[idx]
+            for idx, sample_ids in enumerate(sample_ids_nested)
+            if values[idx] is not None
+            for sample_id in sample_ids
+        }
         self.observe(update_callback)
 
 
-def merge_step_data(initial_process_list, exclude_non_numeric=False, blacklist=[]):
-    ignored_keys = ["samples", "positon_in_experimental_plan"] + blacklist
+_MISSING = object()  # marks a process that has no value at a path, unlike a stored value
+
+
+def process_type(process):
+    """Key that decides which processes of one step are variations of the same step type."""
+    return process.get("m_def") or process.get("method") or ""
+
+
+def merge_step_data(initial_process_list, exclude_non_numeric=False, blacklist=()):
+    ignored_keys = ["samples", "positon_in_experimental_plan", *blacklist]
     process_list = [
-        {key: unfiltered_process[key] for key in set(unfiltered_process) - set(ignored_keys)}
+        {key: value for key, value in unfiltered_process.items() if key not in ignored_keys}
         for unfiltered_process in initial_process_list
     ]
-    return merge_process(process_list, exclude_non_numeric, 0)
+    groups = {}
+    for index, process in enumerate(process_list):
+        groups.setdefault(process_type(process), []).append(index)
+    merged = []
+    for indices in groups.values():
+        json_data = _merge_values([process_list[i] for i in indices], exclude_non_numeric)
+        merged.append(
+            {"indices": np.array(indices), "json": {} if json_data is None else json_data}
+        )
+    return merged
 
 
-# takes a list of json objects.
-# json objects with the same structure will be "merged" that is a single object is returned where the endpoints are arrays with the values
-# returns a list of each such merged objects where the top layer has keys "json" which gives the actual data and "indices" which gives the index in the input list where the data was taken from
-def merge_process(process_list, exclude_non_numeric, recursion_depth):
-    # object may be list of lists, a list of dicts (such as on top recursion level) or a list of str/float/int (final recursion layer)
-    assert all(
-        map(lambda x: bool(type(x) is type(process_list[0])), process_list)
-    )  # raise assertion error if not all processes have the same datatype
-    if isinstance(process_list[0], dict) or isinstance(process_list[0], list):
-        return_list = []
-        is_list = isinstance(process_list[0], list)
+# takes a list of json objects (the processes of one step type).
+# they are "merged" into a single object where the endpoints are arrays with one value per process:
+# the union of all keys and list entries is kept, a process without a value at a path gets None there,
+# so variations that leave different fields empty or have a different number of list entries (e.g.
+# evaporation sources) still show every parameter. Returns None when there is no data at all.
+def _merge_values(values, exclude_non_numeric):
+    present = [value for value in values if value is not _MISSING and value is not None]
+    if not present:
+        return None
 
-        if is_list:
-            all_key_structures = np.array(list(map(lambda x: list(range(len(x))), process_list)))
-            key_structures, process_to_structure = np.unique(
-                all_key_structures, return_inverse=True, axis=0
+    if all(isinstance(value, dict) for value in present):
+        merged = {}
+        for key in dict.fromkeys(key for value in present for key in value):
+            child = _merge_values(
+                [
+                    value.get(key, _MISSING) if isinstance(value, dict) else _MISSING
+                    for value in values
+                ],
+                exclude_non_numeric,
             )
-        else:
-            all_key_structures = np.array(list(map(lambda x: x.keys(), process_list)))
-            key_structures, process_to_structure = np.unique(
-                all_key_structures, return_inverse=True
+            if child is not None:
+                merged[key] = child
+        return merged or None
+
+    if all(isinstance(value, list) for value in present):
+        # list entries keep their index (None where no process has data), so "1" stays the second source
+        merged = [
+            _merge_values(
+                [
+                    value[index] if isinstance(value, list) and index < len(value) else _MISSING
+                    for value in values
+                ],
+                exclude_non_numeric,
             )
+            for index in range(max(len(value) for value in present))
+        ]
+        return merged if any(child is not None for child in merged) else None
 
-        for keyset_index, keyset in enumerate(key_structures):
-            process_indices = np.nonzero(process_to_structure == keyset_index)[0]
-
-            # central recursion on the data
-            key_results = dict(
-                filter(
-                    lambda keyresulttuple: all(
-                        map(lambda data: len(data["json"]), keyresulttuple[1])
-                    ),  # drop keys for which there is no data
-                    map(
-                        lambda key: (
-                            key,
-                            merge_process(
-                                list(
-                                    map(lambda x: x[key], np.array(process_list)[process_indices])
-                                ),  # operate on the entries behind KEY for every process
-                                exclude_non_numeric,
-                                recursion_depth + 1,
-                            ),  # additional arguments for merge_process()
-                        ),
-                        keyset,
-                    ),
-                )
-            )
-
-            if not key_results:
-                return_list = [
-                    {"indices": np.arange(len(process_list)), "json": [] if is_list else {}}
-                ]
-                break
-
-            # array works like substructure_map[key for subdata][j] = idx such that key_results[key][idx] gives the data corresponding to process_indices[j]
-            substructure_map = np.array(
-                list(
-                    map(
-                        lambda key: list(
-                            map(
-                                lambda i: np.argmax(
-                                    list(map(lambda x: i in x["indices"], key_results[key]))
-                                ),
-                                range(len(process_indices)),
-                            )
-                        ),
-                        key_results,
-                    )
-                )
-            )
-
-            # get unique combinations of datastructures, processes will be split as long as the structure differs for any key
-            structure_combinations, process_to_combination = np.unique(
-                substructure_map, axis=1, return_inverse=True
-            )
-            if is_list:
-                for unique_structure_index, unique_structure in enumerate(structure_combinations.T):
-                    indices_for_current_struc = np.nonzero(
-                        process_to_combination == unique_structure_index
-                    )[0]
-                    return_list.append(
-                        {
-                            "indices": process_indices[indices_for_current_struc],
-                            "json": list(
-                                map(
-                                    lambda key: key_results[key][
-                                        substructure_map[key][indices_for_current_struc[0]]
-                                    ]["json"],
-                                    key_results,
-                                )
-                            ),
-                        }
-                    )
-            else:
-                for unique_structure_index, unique_structure in enumerate(structure_combinations.T):
-                    indices_for_current_struc = np.nonzero(
-                        process_to_combination == unique_structure_index
-                    )[0]
-                    return_list.append(
-                        {
-                            "indices": process_indices[indices_for_current_struc],
-                            "json": dict(
-                                map(
-                                    lambda i: (
-                                        list(key_results)[i],
-                                        key_results[list(key_results)[i]][
-                                            substructure_map[i][indices_for_current_struc[0]]
-                                        ]["json"],
-                                    ),
-                                    range(len(key_results)),
-                                )
-                            ),
-                        }
-                    )
-    else:  # type is either string, float or some other non-nested-value
-        if isinstance(process_list[0], str) and exclude_non_numeric:
-            return_list = [{"indices": np.arange(len(process_list)), "json": {}}]
-        else:
-            return_list = [
-                {"indices": np.arange(len(process_list)), "json": np.array(process_list)}
-            ]
-    return return_list
+    leaf = [None if value is _MISSING else value for value in values]
+    if exclude_non_numeric and any(isinstance(value, str) for value in leaf):
+        return None
+    if None not in leaf and len({type(value) for value in leaf}) == 1:
+        return np.array(leaf)
+    # mixed types or missing values; nested data next to plain values is shown as text
+    array = np.empty(len(leaf), dtype=object)
+    for index, value in enumerate(leaf):
+        array[index] = (
+            json.dumps(value, cls=NpEncoder) if isinstance(value, (dict, list)) else value
+        )
+    return array
 
 
 def make_table(
@@ -380,15 +320,37 @@ def make_table(
     row_count = len(row_index)
 
     if abbreviate_keys:
-        column_dict = dict(
-            map(lambda x: (str(x[0][-1]), normalize_column_values(x[1], row_count)), column_data)
-        )
+        # labels from all parameters, so they match the parameter buttons whatever is hidden
+        all_keychains = [
+            keychain for keychain, _values in flatten_layers(process["json"], [], False, False)
+        ]
+        label_of = dict(zip(map(tuple, all_keychains), short_labels(all_keychains)))
+        column_dict = {
+            label_of[tuple(keychain)]: normalize_column_values(values, row_count)
+            for keychain, values in column_data
+        }
     else:
         column_dict = dict(
             map(lambda x: (str(x[0]), normalize_column_values(x[1], row_count)), column_data)
         )
 
     return pd.DataFrame(column_dict, index=row_index)
+
+
+# abbreviated parameter names: the last key of each keychain, extended by its parent keys only as far as
+# needed to stay unique, e.g. "thickness" or "0/thickness" and "1/thickness" for two evaporation sources
+def short_labels(keychains):
+    labels = []
+    for index, keychain in enumerate(keychains):
+        depth = 1
+        while depth < len(keychain) and any(
+            other[-depth:] == keychain[-depth:]
+            for other_index, other in enumerate(keychains)
+            if other_index != index
+        ):
+            depth += 1
+        labels.append("/".join(map(str, keychain[-depth:])))
+    return labels
 
 
 # expects an object of nested dicts or list with numpy arrays as endpoints. returns a list of tuples, each tuple contains a list of keys used to adress the data in the orginal array and the corresponding array.
