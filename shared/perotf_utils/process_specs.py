@@ -14,7 +14,7 @@ Two sources define what belongs in here, and the catalog must match both:
    never writes can never be filled, and a label spelled differently than in the sheet
    never autofills. peroTF's sheet_experiment.py does NOT read this module; it keeps its
    own inline labels, which is why every label below is copied from it verbatim,
-   including its spelling quirks ("Annealing athmosphere", "Solution volume [um]",
+   including its spelling quirks ("Athmosphere in chamber", "Solution volume [um]",
    "Drying gas temperature [°]").
 2. The archive paths nomad_perotf's experiment parser (perotf_batch_parser.py) stores
    through the nomad-baseclasses map_<type> functions (helper/solar_cell_batch_mapping.py).
@@ -23,9 +23,9 @@ Two sources define what belongs in here, and the catalog must match both:
 AVAILABLE_PROCESSES mirrors the process list of peroTF's Excel_creator
 (voila_experiment_app.py, MinimalistExperimentBuilder) in the same order, so smart_databaser
 offers exactly the process types Excel_creator can write. Types the parser never turns into
-an archive step (Multijunction Info; Laser Scribing while the parser has it commented out)
-or turns into a step of another type (Seq-Evaporation becomes a plain Evaporation) are
-still listed so they can be part of a new experiment; they simply never autofill.
+an archive step (Multijunction Info) or turns into a step of another type (Seq-Evaporation
+becomes a plain Evaporation) are still listed so they can be part of a new experiment; they
+simply never autofill.
 
 Shape of one field entry (a dict): {"test": <test value>, "path": [...]} for a single
 archive path, or {"test": <test value>, "paths": [[...], [...]]} for alternative paths tried
@@ -83,7 +83,8 @@ _LAYER_FIELDS = {
     "Tool/GB name": {"test": "Glovebox 1", "path": ["location"]},
 }
 
-# map_annealing() (called by every coating map_<type>) reads "Annealing athmosphere".
+# map_annealing() (called by every coating map_<type>) reads "Annealing atmosphere" and the
+# older spelling "Annealing athmosphere".
 _COATING_SUFFIX_FIELDS = {
     "Annealing time [min]": {"test": 30, "path": ["annealing", "time"], "unit_verified": False},
     "Annealing temperature [°C]": {
@@ -91,7 +92,7 @@ _COATING_SUFFIX_FIELDS = {
         "path": ["annealing", "temperature"],
         "unit_verified": False,
     },
-    "Annealing athmosphere": {"test": "Nitrogen", "path": ["annealing", "atmosphere"]},
+    "Annealing atmosphere": {"test": "Nitrogen", "path": ["annealing", "atmosphere"]},
     "Notes": {"test": "Process notes"},
 }
 
@@ -347,7 +348,6 @@ PROCESSES = {
         # map_evaporation(coevaporation=False). "Organic" only decides whether the values
         # land in organic_evaporation or inorganic_evaporation, so it has no path of its
         # own; smart_databaser derives it back (data_manager._DERIVED_FIELDS).
-        # "Power [%]" is not stored by the parser.
         "fields": {
             "Material name": {"test": "PCBM", "path": ["layer", 0, "layer_material_name"]},
             "Layer type": {
@@ -420,7 +420,6 @@ PROCESSES = {
                 ],
                 "unit_verified": False,
             },
-            "Power [%]": {"test": 50},
             "Tooling factor": {
                 "test": 1.5,
                 "paths": [
@@ -901,24 +900,6 @@ PROCESSES = {
             "solutes": _COATING_SOLUTE_INDEXED,
         },
     },
-    "Laser Scribing": {
-        # peroTF's parser has its Laser Scribing branch commented out, so no peroTF batch
-        # contains a laser scribing step and this process never autofills. The paths are
-        # the ones map_laser_scribing() writes, kept for when the parser enables it.
-        "meta": {"material_gated": False, "numeric_config": [], "boolean_config": []},
-        "fields": {
-            "Laser wavelength [nm]": {"test": 532, "path": ["properties", "laser_wavelength"]},
-            "Laser pulse time [ps]": {"test": 8, "path": ["properties", "laser_pulse_time"]},
-            "Laser pulse frequency [kHz]": {
-                "test": 80,
-                "path": ["properties", "laser_pulse_frequency"],
-            },
-            "Speed [mm/s]": {"test": 100, "path": ["properties", "speed"]},
-            "Fluence [J/cm2]": {"test": 0.5, "path": ["properties", "fluence"]},
-            "Power [%]": {"test": 75, "path": ["properties", "power_in_percent"]},
-            "Recipe file": {"test": "test_scribing_recipe.xml", "path": ["recipe_file"]},
-        },
-    },
     "Close Space Sublimation": {
         "meta": {
             "material_gated": True,
@@ -926,14 +907,12 @@ PROCESSES = {
             "boolean_config": [("milling", "Milling")],
             "config_defaults": {"materials": 1, "milling": False, "mixing_ratio": False},
         },
-        # map_close_space_sublimation(); "Organic" is not stored. The sheet only writes
-        # the "Source material ratio {n}" columns when materials > 1, and the parser reads
-        # source materials 1 to 4.
+        # map_close_space_sublimation(). The sheet only writes the "Source material ratio {n}"
+        # columns when materials > 1, and the parser reads source materials 1 to 4.
         "fields": {
             "Material name": {"test": "CdTe", "path": ["layer", 0, "layer_material_name"]},
             "Layer type": {"test": "Absorber", "path": ["layer", 0, "layer_type"]},
             "Tool/GB name": {"test": "CSS tool", "path": ["location"]},
-            "Organic": {"test": False},
             "Process pressure [mbar]": {
                 "test": 40,
                 "path": ["process", "pressure"],
@@ -1040,7 +1019,7 @@ PROCESSES = {
             },
             "Total time [s]": {"test": 420},
             "Athmosphere in chamber": {"test": "Nitrogen"},
-            "Humidity [%%rel]": {"test": 30},
+            "Humidity [%rel]": {"test": 30},
             "Stamp 1 Material": {"test": "PDMS"},
             "Stamp 1 Thickness [mm]": {"test": 1},
             "Stamp 1 Area [mm^2]": {"test": 100},
@@ -1067,7 +1046,7 @@ PROCESSES = {
                 "path": ["annealing", "temperature"],
                 "unit_verified": False,
             },
-            "Annealing athmosphere": {"test": "Nitrogen", "path": ["annealing", "atmosphere"]},
+            "Annealing atmosphere": {"test": "Nitrogen", "path": ["annealing", "atmosphere"]},
             "Relative humidity [%]": {"test": 35, "path": ["atmosphere", "relative_humidity"]},
             "Notes": {"test": "Test annealing process"},
         },

@@ -22,7 +22,7 @@ def add_guide_sheet(workbook):
         "• Cleaning: O2-Plasma, UV-Ozone",
         "• Coating: Spin Coating, Slot Die Coating, Dip Coating, Inkjet Printing",
         "• Deposition: Evaporation, Co-Evaporation, Seq-Evaporation, Close Space Sublimation, Sputtering, ALD",
-        "• Processing: Annealing, Lamination, Laser Scribing",
+        "• Processing: Annealing, Lamination",
         "• Info: Experiment Info, Multijunction Info, Generic Process",
         "",
         "Example Fabrication Sequence:",
@@ -126,7 +126,7 @@ def add_guide_sheet(workbook):
         ["Anti solvent dropping heigt", "Antisolvent dropping height", "Number", "mm", "30"],
         ["Annealing Time", "Annealing duration", "Number", "min", "30"],
         ["Annealing Temperature", "Annealing temperature", "Number", "°C", "120"],
-        ["Annealing athmosphere", "Annealing atmosphere", "Text", "", "Nitrogen"],
+        ["Annealing atmosphere", "Annealing atmosphere", "Text", "", "Nitrogen"],
         ["Notes", "Additional notes", "Text", "", ""],
     ]
     row = write_table(guide_ws, row, "Spin Coating", spin_coating)
@@ -154,7 +154,7 @@ def add_guide_sheet(workbook):
         ["Coated area", "Coated area", "Number", "mm²", "100"],
         ["Annealing time", "Annealing duration", "Number", "min", "30"],
         ["Annealing temperature", "Annealing temperature", "Number", "°C", "120"],
-        ["Annealing athmosphere", "Annealing atmosphere", "Text", "", "Air"],
+        ["Annealing atmosphere", "Annealing atmosphere", "Text", "", "Air"],
         ["Notes", "Additional notes", "Text", "", ""],
     ]
     row = write_table(guide_ws, row, "Slot Die Coating", slot_die)
@@ -163,7 +163,14 @@ def add_guide_sheet(workbook):
     inkjet = [
         ["Material name", "Printed material", "Text", "", "PEDOT:PSS"],
         ["Layer type", "Type of layer", "Text", "", "Hole Transport Layer"],
-        ["Tool/GB name", "Tool used", "Text", "", "HZB-Inkjet"],
+        [
+            "Tool/GB name",
+            "Printer: Pixdro/iLPixdro or Notion/iLNotion, matching the waveform type "
+            "(otherwise NOMAD stores no waveform)",
+            "Text",
+            "",
+            "Pixdro",
+        ],
         ["Solvent 1 name", "First solvent", "Text", "", "Water"],
         ["Solvent 1 volume", "Volume of solvent 1", "Number", "µL", "50"],
         ["Solute 1 type", "First solute type", "Text", "", "PEDOT:PSS"],
@@ -184,10 +191,10 @@ def add_guide_sheet(workbook):
         ["Nozzle temperature", "Nozzle temperature", "Number", "°C", "35"],
         ["Room temperature", "Room temperature", "Number", "°C", "22"],
         ["rel. humidity", "Relative humidity", "Number", "%", "45"],
-        ["Wf Number of Pulses", "Number of waveform pulses", "Number", "", "1"],
+        ["Wf Number of Pulses", "Number of waveform pulses (Pixdro: up to 3)", "Number", "", "1"],
         ["Annealing time", "Annealing duration", "Number", "min", "15"],
         ["Annealing temperature", "Annealing temperature", "Number", "°C", "100"],
-        ["Annealing athmosphere", "Annealing atmosphere", "Text", "", "Air"],
+        ["Annealing atmosphere", "Annealing atmosphere", "Text", "", "Air"],
         ["Notes", "Additional notes", "Text", "", ""],
     ]
     row = write_table(guide_ws, row, "Inkjet Printing", inkjet)
@@ -197,7 +204,7 @@ def add_guide_sheet(workbook):
         ["Material Name", "Evaporated material", "Text", "", "PCBM"],
         ["Layer Type", "Type of layer", "Text", "", "Electron Transport Layer"],
         ["Tool/GB name", "Tool used", "Text", "", "Hysprint Evap"],
-        ["Organic", "Is the layer organic?", "Boolean", "", "True"],
+        ["Organic", "Is the layer organic? Empty is stored as inorganic", "Boolean", "", "True"],
         ["Base Pressure", "Base pressure", "Number", "bar", "1e-6"],
         ["Pressure start", "Start pressure", "Number", "bar", "5e-6"],
         ["Pressure end", "End pressure", "Number", "bar", "3e-6"],
@@ -206,7 +213,6 @@ def add_guide_sheet(workbook):
         ["Substrate temperature", "Substrate temp.", "Number", "°C", "25"],
         ["Thickness", "Layer thickness", "Number", "nm", "100"],
         ["Rate", "Deposition rate", "Number", "Å/s", "1.0"],
-        ["Power", "Evaporation power", "Number", "%", "50"],
         ["Tooling factor", "Tooling factor", "Number", "", "1.5"],
         ["Notes", "Additional notes", "Text", "", ""],
     ]
@@ -274,7 +280,6 @@ def add_guide_sheet(workbook):
         ["Material name", "Sublimed material", "Text", "", "CdTe"],
         ["Layer type", "Type of layer", "Text", "", "Absorber"],
         ["Tool/GB name", "Tool used", "Text", "", "CSS Chamber"],
-        ["Organic", "Is the material organic?", "Boolean", "", "False"],
         ["Source material name 1", "First source material (optional)", "Text", "", "CdCl2"],
         ["Source material name 2", "Second source material (optional)", "Text", "", "MgCl2"],
         ["Source material name 3", "Third source material (optional)", "Text", "", ""],
@@ -370,7 +375,7 @@ def add_guide_sheet(workbook):
     annealing = [
         ["Annealing time", "Annealing duration", "Number", "min", "60"],
         ["Annealing temperature", "Annealing temperature", "Number", "°C", "150"],
-        ["Annealing athmosphere", "Annealing atmosphere", "Text", "", "Nitrogen"],
+        ["Annealing atmosphere", "Annealing atmosphere", "Text", "", "Nitrogen"],
         ["Relative humidity", "Relative humidity during annealing", "Number", "%", "35"],
         ["Notes", "Additional notes", "Text", "", ""],
     ]
@@ -402,18 +407,6 @@ def add_guide_sheet(workbook):
     ]
     row = write_table(guide_ws, row, "Lamination", lamination)
 
-    # Laser Scribing
-    laser = [
-        ["Laser wavelength", "Laser wavelength", "Number", "nm", "532"],
-        ["Laser pulse time", "Pulse duration", "Number", "ps", "8"],
-        ["Laser pulse frequency", "Pulse frequency", "Number", "kHz", "80"],
-        ["Speed", "Scribing speed", "Number", "mm/s", "100"],
-        ["Fluence", "Laser fluence", "Number", "J/cm²", "0.5"],
-        ["Power", "Laser power", "Number", "%", "75"],
-        ["Recipe file", "Recipe filename", "Text", "", "scribe_recipe.xml"],
-    ]
-    row = write_table(guide_ws, row, "Laser Scribing", laser)
-
     # 3. Data Entry Best Practices
     best_practices = [
         "",
@@ -431,7 +424,7 @@ def add_guide_sheet(workbook):
         "5. Process Configuration",
         "• Spin Coating: Configure number of solvents, solutes, spin steps, and optional features (antisolvent, gas/vacuum quenching)",
         "• Co-Evaporation: Specify number of materials (typically 2-3)",
-        "• Inkjet Printing: Choose between Pixdro and Notion waveform types",
+        "• Inkjet Printing: Choose between Pixdro and Notion waveform types and enter the same printer as Tool/GB name (Pixdro/iLPixdro or Notion/iLNotion); Pixdro supports up to 3 pulses",
         "• Cleaning: Configure number of solvents for ultrasonic cleaning steps",
         "",
     ]

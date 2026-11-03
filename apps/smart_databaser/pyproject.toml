@@ -1,6 +1,6 @@
 [project]
 name = "smart-databaser"
-version = "1.0.0"
+version = "1.1.0"
 description = "Build the experiment Excel for NOMAD with values autofilled live from earlier batches"
 requires-python = ">=3.10"
 dependencies = [

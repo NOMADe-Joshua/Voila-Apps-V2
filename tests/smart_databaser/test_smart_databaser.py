@@ -184,7 +184,7 @@ def test_set_field_varies_off_preserves_per_sample_values():
 
 
 def test_non_material_process_always_counts():
-    process = dm.ProcessInstance(process_type="Laser Scribing", sequence_index=1)
+    process = dm.ProcessInstance(process_type="Annealing", sequence_index=1)
     assert process.counts_toward_progress() is True
 
 
@@ -362,11 +362,12 @@ def test_rebuild_field_specs_multi_spinstep_uses_indexed_rotation_fields(fresh_s
 
 def test_full_real_file_shaped_sequence_produces_disjoint_column_ranges(fresh_state):
     """Coarse structural regression test mirroring the real batch's process shape:
-    Experiment Info, Laser Scribing, Cleaning O2-Plasma, Cleaning UV-Ozone, Spin Coating,
-    two Slot Die Coating steps, Evaporation, ALD, Laser Scribing, Evaporation, Laser
-    Scribing (11 processes total, matching the 11 merged header ranges observed in a
-    real experiment file)."""
-    fresh_state.add_process("Laser Scribing")
+    Experiment Info, Annealing, Cleaning O2-Plasma, Cleaning UV-Ozone, Spin Coating,
+    two Slot Die Coating steps, Evaporation, ALD, Annealing, Evaporation, Annealing
+    (11 processes total, matching the 11 merged header ranges observed in a real
+    experiment file; its Laser Scribing steps are Annealing here, since Excel_creator no
+    longer offers Laser Scribing)."""
+    fresh_state.add_process("Annealing")
     fresh_state.add_process("Cleaning O2-Plasma", config={"solvents": 2})
     fresh_state.add_process("Cleaning UV-Ozone", config={"solvents": 1})
     fresh_state.add_process("Spin Coating", config={"solvents": 1, "solutes": 1, "spinsteps": 1})
@@ -374,9 +375,9 @@ def test_full_real_file_shaped_sequence_produces_disjoint_column_ranges(fresh_st
     fresh_state.add_process("Slot Die Coating", config={"solvents": 3, "solutes": 2})
     fresh_state.add_process("Evaporation")
     fresh_state.add_process("ALD")
-    fresh_state.add_process("Laser Scribing")
+    fresh_state.add_process("Annealing")
     fresh_state.add_process("Evaporation")
-    fresh_state.add_process("Laser Scribing")
+    fresh_state.add_process("Annealing")
 
     assert len(fresh_state.process_sequence) == 11
 
@@ -663,7 +664,9 @@ def test_fetch_process_field_values_returns_mapped_values_and_source_sample():
 def test_fetch_process_field_values_unmapped_process_type_returns_empty():
     cache = dm.NomadSessionCache()
     cache._processing_steps_by_batch["B1"] = [SPIN_COATING_STEP]
-    values, source = dm.fetch_process_field_values("url", "token", cache, "B1", "Laser Scribing")
+    values, source = dm.fetch_process_field_values(
+        "url", "token", cache, "B1", "Multijunction Info"
+    )
     assert values == {}
     assert source is None
 
@@ -1160,7 +1163,7 @@ def test_infer_config_from_source_step_detects_solvent_and_solute_counts():
 
 
 def test_infer_config_from_source_step_unmapped_process_type_returns_empty():
-    assert dm.infer_config_from_source_step("Laser Scribing", SPIN_COATING_STEP_TWO_SOLVENTS) == {}
+    assert dm.infer_config_from_source_step("Annealing", SPIN_COATING_STEP_TWO_SOLVENTS) == {}
 
 
 def test_expand_process_config_for_source_widens_config_and_adds_field_specs(fresh_state):
@@ -1236,8 +1239,8 @@ def test_list_process_occurrences_labels_by_material_when_mapped():
 
 
 def test_list_process_occurrences_falls_back_to_generic_label_when_unmapped():
-    cache = _cache_with("B1", [{"method": "Laser Scribing", "positon_in_experimental_plan": 1.0}])
-    occurrences = dm.list_process_occurrences("url", "token", cache, "B1", "Laser Scribing")
+    cache = _cache_with("B1", [{"method": "Annealing", "positon_in_experimental_plan": 1.0}])
+    occurrences = dm.list_process_occurrences("url", "token", cache, "B1", "Annealing")
     assert occurrences == [(0, "Occurrence 1")]
 
 
@@ -1430,7 +1433,7 @@ def test_compute_process_progress_counts_after_material_filled(fresh_state):
 
 
 def test_compute_process_progress_non_material_process_always_counted(fresh_state):
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     filled, total = dm.compute_process_progress(process)
     assert total > 0
@@ -1462,11 +1465,11 @@ def test_compute_process_progress_merges_alias_group_as_one_unit(fresh_state):
 
 
 def test_compute_process_progress_excludes_not_required_fields(fresh_state):
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     filled_before, total_before = dm.compute_process_progress(process)
 
-    dm.set_field_required_for_progress(process.field_specs["Recipe file"], False)
+    dm.set_field_required_for_progress(process.field_specs["Annealing atmosphere"], False)
 
     filled_after, total_after = dm.compute_process_progress(process)
     assert total_after == total_before - 1
@@ -1483,7 +1486,7 @@ def test_set_field_required_for_progress_does_not_touch_value_or_provenance(fres
 
 def test_compute_experiment_progress_sums_across_processes(fresh_state):
     fresh_state.add_process("Spin Coating", config={"solvents": 0, "solutes": 0})
-    fresh_state.add_process("Laser Scribing")
+    fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     fresh_state.get_process(1).field_specs["Material name"].value = "PCBM"
 
@@ -1961,21 +1964,6 @@ def test_fetch_process_field_values_lamination():
     }
 
 
-LASER_SCRIBING_STEP = {
-    "method": "Laser Scribing",
-    "recipe_file": "test_scribing_recipe.xml",
-    "properties": {"laser_wavelength": 532, "speed": 100.0},
-}
-
-
-def test_fetch_process_field_values_laser_scribing():
-    cache = _cache_with("B1", [LASER_SCRIBING_STEP])
-    values, _source = dm.fetch_process_field_values("url", "token", cache, "B1", "Laser Scribing")
-    assert values["Recipe file"] == "test_scribing_recipe.xml"
-    assert values["Laser wavelength [nm]"] == 532
-    assert values["Speed [mm/s]"] == 100.0
-
-
 ANNEALING_STEP = {
     "method": "Annealing",
     "annealing": {"temperature": 150.0, "atmosphere": "Nitrogen"},
@@ -1987,7 +1975,7 @@ def test_fetch_process_field_values_annealing():
     cache = _cache_with("B1", [ANNEALING_STEP])
     values, _source = dm.fetch_process_field_values("url", "token", cache, "B1", "Annealing")
     assert values["Annealing temperature [°C]"] == 150.0
-    assert values["Annealing athmosphere"] == "Nitrogen"
+    assert values["Annealing atmosphere"] == "Nitrogen"
     assert values["Relative humidity [%]"] == 35.0
 
 
@@ -2063,16 +2051,16 @@ def test_process_fields_panel_required_field_shows_asterisk(fresh_state):
     """The per-row 'Required' checkbox was removed (required_for_progress is now
     config/required_fields.json-driven, not user-toggleable in this panel) - a required
     field's label instead gets a trailing '*', an excepted one doesn't."""
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
-    dm.set_field_required_for_progress(process.field_specs["Recipe file"], False)
+    dm.set_field_required_for_progress(process.field_specs["Annealing atmosphere"], False)
 
     panel = gc.ProcessFieldsPanel(fresh_state, process)
 
     # panel.children[0] is the provenance summary, not a field row - skip it
     labels = [row.children[1].value for row in panel.children[1:]]
-    assert "Recipe file" in labels  # excepted -> no asterisk
-    assert "Laser wavelength [nm] *" in labels  # still required by default -> asterisk
+    assert "Annealing atmosphere" in labels  # excepted -> no asterisk
+    assert "Annealing temperature [°C] *" in labels  # still required by default -> asterisk
 
 
 def test_process_fields_panel_shows_preview_placeholder_for_empty_field(fresh_state):
@@ -2391,7 +2379,7 @@ def test_missing_critical_fields_narrows_as_fields_are_filled(fresh_state):
 
 
 def test_progress_bar_widget_reflects_compute_experiment_progress(fresh_state):
-    fresh_state.add_process("Laser Scribing")  # not material-gated, always counts
+    fresh_state.add_process("Annealing")  # not material-gated, always counts
     dm.rebuild_field_specs(fresh_state)
     bar = gc.ProgressBarWidget(fresh_state)
 
@@ -2402,19 +2390,19 @@ def test_progress_bar_widget_reflects_compute_experiment_progress(fresh_state):
 
 
 def test_progress_bar_widget_refresh_updates_after_state_change(fresh_state):
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     bar = gc.ProgressBarWidget(fresh_state)
     before = bar.bar.value
 
-    process.field_specs["Recipe file"].value = "done"
+    process.field_specs["Annealing atmosphere"].value = "done"
     bar.refresh()
 
     assert bar.bar.value == before + 1
 
 
 def test_progress_bar_widget_bar_style_and_message_reflect_band(fresh_state):
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     bar = gc.ProgressBarWidget(fresh_state)
     assert bar.bar.bar_style == "danger"  # nothing filled yet -> red band
@@ -2788,7 +2776,7 @@ def test_build_missing_fields_summary_counts_varying_fields_too(fresh_state):
 
 
 def test_build_missing_fields_summary_empty_when_nothing_missing(fresh_state):
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     for spec in process.field_specs.values():
         spec.value = "filled"
@@ -2797,13 +2785,13 @@ def test_build_missing_fields_summary_empty_when_nothing_missing(fresh_state):
 
 
 def test_build_nudge_queue_excludes_not_required_missing_fields(fresh_state):
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
-    dm.set_field_required_for_progress(process.field_specs["Recipe file"], False)
+    dm.set_field_required_for_progress(process.field_specs["Annealing atmosphere"], False)
 
     queue = dm.build_nudge_queue(fresh_state)
 
-    assert not any(item.field_key == "Recipe file" for item in queue)
+    assert not any(item.field_key == "Annealing atmosphere" for item in queue)
 
 
 def test_build_nudge_queue_excludes_not_required_outlier_fields(fresh_state):
@@ -2824,7 +2812,7 @@ def test_build_nudge_queue_excludes_not_required_outlier_fields(fresh_state):
 
 
 def test_build_missing_fields_summary_excludes_not_required_fields(fresh_state):
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     for spec in process.field_specs.values():
         dm.set_field_required_for_progress(spec, False)
@@ -2838,7 +2826,7 @@ def test_build_missing_fields_summary_excludes_not_required_fields(fresh_state):
 
 
 def test_nudge_popup_flow_shows_first_missing_item(fresh_state):
-    fresh_state.add_process("Laser Scribing")
+    fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     flow = gc.NudgePopupFlow(fresh_state)
     assert len(flow.queue) > 0
@@ -2846,7 +2834,7 @@ def test_nudge_popup_flow_shows_first_missing_item(fresh_state):
 
 
 def test_nudge_popup_flow_confirm_writes_value_and_advances(fresh_state):
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     flow = gc.NudgePopupFlow(fresh_state)
     first_item = flow.queue[0]
@@ -2860,7 +2848,7 @@ def test_nudge_popup_flow_confirm_writes_value_and_advances(fresh_state):
 
 
 def test_nudge_popup_flow_confirm_with_blank_value_does_not_write(fresh_state):
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     flow = gc.NudgePopupFlow(fresh_state)
     first_item = flow.queue[0]
@@ -2873,7 +2861,7 @@ def test_nudge_popup_flow_confirm_with_blank_value_does_not_write(fresh_state):
 
 
 def test_nudge_popup_flow_skip_advances_without_writing(fresh_state):
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     flow = gc.NudgePopupFlow(fresh_state)
     first_item = flow.queue[0]
@@ -2904,7 +2892,7 @@ def test_nudge_popup_flow_confirming_outlier_clears_flag_and_sets_manual(fresh_s
 
 
 def test_nudge_popup_flow_reaches_summary_after_queue_exhausted(fresh_state):
-    fresh_state.add_process("Laser Scribing")
+    fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     flow = gc.NudgePopupFlow(fresh_state)
 
@@ -2916,7 +2904,7 @@ def test_nudge_popup_flow_reaches_summary_after_queue_exhausted(fresh_state):
 
 
 def test_nudge_popup_flow_summary_says_all_filled_when_nothing_missing(fresh_state):
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     for spec in process.field_specs.values():
         spec.value = "filled"
@@ -2927,7 +2915,7 @@ def test_nudge_popup_flow_summary_says_all_filled_when_nothing_missing(fresh_sta
 
 
 def test_nudge_popup_flow_skips_item_filled_elsewhere_since_construction(fresh_state):
-    process = fresh_state.add_process("Laser Scribing")
+    process = fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     flow = gc.NudgePopupFlow(fresh_state)
     first_item = flow.queue[0]
@@ -2940,7 +2928,7 @@ def test_nudge_popup_flow_skips_item_filled_elsewhere_since_construction(fresh_s
 
 
 def test_nudge_popup_flow_calls_on_change_callback(fresh_state):
-    fresh_state.add_process("Laser Scribing")
+    fresh_state.add_process("Annealing")
     dm.rebuild_field_specs(fresh_state)
     calls = []
     flow = gc.NudgePopupFlow(fresh_state, on_change=lambda: calls.append(1))
@@ -3878,12 +3866,12 @@ def test_subbatch_for_sample_missing_sample_returns_none(fresh_state):
 
 
 def test_is_field_required_by_default_global_exception():
-    assert dm.is_field_required_by_default("Laser Scribing", "Notes") is False
+    assert dm.is_field_required_by_default("Annealing", "Notes") is False
     assert dm.is_field_required_by_default("Experiment Info", "Notes") is False
 
 
 def test_is_field_required_by_default_true_for_ordinary_field():
-    assert dm.is_field_required_by_default("Laser Scribing", "Recipe file") is True
+    assert dm.is_field_required_by_default("Annealing", "Annealing atmosphere") is True
 
 
 def test_load_required_field_exceptions_matches_shipped_config():
@@ -4282,7 +4270,6 @@ EXCEL_CREATOR_PROCESSES = [
     "Inkjet Printing",
     "Slot Die Coating",
     "Dip Coating",
-    "Laser Scribing",
     "Close Space Sublimation",
     "Lamination",
     "Annealing",

@@ -45,7 +45,6 @@ class MinimalistExperimentBuilder:
             "Inkjet Printing",
             "Slot Die Coating",
             "Dip Coating",
-            "Laser Scribing",
             "Close Space Sublimation",
             "Lamination",
             "Annealing",
@@ -482,12 +481,12 @@ class MinimalistExperimentBuilder:
             )
             checkbox_controls.append(milling_checkbox)
 
-        # Wf Number of Pulses (for Inkjet Printing)
+        # Wf Number of Pulses (for Inkjet Printing); NOMAD's Pixdro waveform has pulses a, b, c
         if process_name == "Inkjet Printing":
             pulses_widget = widgets.BoundedIntText(
                 value=config.get("Wf Number of Pulses", 1),
                 min=1,
-                max=10,
+                max=3,
                 description="Pulses:",
                 style={"description_width": "50px"},
                 layout=widgets.Layout(width="115px"),
@@ -784,7 +783,6 @@ class MinimalistExperimentBuilder:
                     "Substrate temperature [°C]",
                     "Thickness [nm]",
                     "Rate [angstrom/s]",
-                    "Power [%]",
                     "Tooling factor",
                     "Notes",
                 ]
@@ -801,7 +799,6 @@ class MinimalistExperimentBuilder:
                     "Material name",
                     "Layer type",
                     "Tool/GB name",
-                    "Organic",
                     "Material name 1",
                     "Process pressure [mbar]",
                     "Source temperature [°C]",
@@ -832,7 +829,7 @@ class MinimalistExperimentBuilder:
                     "Cool down time [s]",
                     "Total time [s]",
                     "Athmosphere in chamber",
-                    "Humidity [%%rel]",
+                    "Humidity [%rel]",
                     "Stamp 1 Material",
                     "Stamp 1 Thickness [mm]",
                     "Stamp 1 Area [mm^2]",
@@ -861,17 +858,6 @@ class MinimalistExperimentBuilder:
                     "Notes",
                 ]
             },
-            "Laser Scribing": {
-                "steps": [
-                    "Laser wavelength [nm]",
-                    "Laser pulse time [ps]",
-                    "Laser pulse frequency [kHz]",
-                    "Speed [mm/s]",
-                    "Fluence [J/cm2]",
-                    "Power [%]",
-                    "Recipe file",
-                ]
-            },
             "ALD": {
                 "steps": [
                     "Material name",
@@ -896,7 +882,7 @@ class MinimalistExperimentBuilder:
                 "steps": [
                     "Annealing time [min]",
                     "Annealing temperature [°C]",
-                    "Annealing athmosphere",
+                    "Annealing atmosphere",
                     "Relative humidity [%]",
                     "Notes",
                 ]

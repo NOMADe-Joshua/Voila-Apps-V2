@@ -1,4 +1,5 @@
-"""Smoke tests for Excel_creator: modules import and the app builds without network or token."""
+"""Excel_creator: modules import, the app builds without network or token, and the experiment
+sheet writes the column names nomad_perotf's experiment parser reads."""
 
 from openpyxl import Workbook
 
@@ -35,3 +36,35 @@ def test_guide_sheet_links_to_configured_oasis(mods):
         if cell.hyperlink is not None
     ]
     assert f"{URL_BASE}{GUI_ENDPOINT}/search/voila" in links
+
+
+def header_labels(mods, processes):
+    wb = Workbook()
+    mods["sheet_experiment"].add_experiment_sheet(
+        wb, [{"process": process} for process in processes], is_testing=False
+    )
+    ws = wb.active
+    return [ws.cell(row=2, column=col).value for col in range(1, ws.max_column + 1)]
+
+
+def test_sheet_uses_the_corrected_column_names(mods):
+    labels = header_labels(mods, ["Spin Coating", "Lamination", "Annealing"])
+    assert labels.count("Annealing atmosphere") == 2
+    assert "Annealing athmosphere" not in labels
+    assert "Humidity [%rel]" in labels
+    assert "Humidity [%%rel]" not in labels
+
+
+def test_sheet_leaves_out_columns_nomad_does_not_store(mods):
+    labels = header_labels(mods, ["Evaporation", "Close Space Sublimation"])
+    assert "Power [%]" not in labels
+    # Evaporation keeps "Organic": it decides where the source is stored
+    assert labels.count("Organic") == 1
+
+
+def test_laser_scribing_is_not_offered(mods, monkeypatch):
+    monkeypatch.delenv("JUPYTERHUB_USER", raising=False)
+    monkeypatch.delenv("NOMAD_CLIENT_ACCESS_TOKEN", raising=False)
+    app = mods["voila_experiment_app"].MinimalistExperimentBuilder()
+    assert "Laser Scribing" not in app.available_processes
+    assert "Laser Scribing" not in app.process_config_function()

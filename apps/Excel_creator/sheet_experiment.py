@@ -282,7 +282,7 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False):
                 [
                     make_label("Annealing time [min]", ""),
                     make_label("Annealing temperature [°C]", ""),
-                    make_label("Annealing athmosphere", ""),
+                    make_label("Annealing atmosphere", ""),
                     make_label("Notes", ""),
                 ]
             )
@@ -304,7 +304,6 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False):
                 make_label("Substrate temperature [°C]", ""),
                 make_label("Thickness [nm]", ""),
                 make_label("Rate [angstrom/s]", ""),
-                make_label("Power [%]", ""),
                 make_label("Tooling factor", ""),
                 make_label("Notes", ""),
             ]
@@ -340,7 +339,6 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False):
                 make_label("Material name", ""),
                 make_label("Layer type", ""),
                 make_label("Tool/GB name", "Solvent GB"),
-                make_label("Organic", ""),
             ]
 
             for i in range(1, config.get("materials", 1) + 1):
@@ -388,7 +386,7 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False):
                 make_label("Cool down time [s]", ""),
                 make_label("Total time [s]", ""),
                 make_label("Athmosphere in chamber", ""),
-                make_label("Humidity [%%rel]", ""),
+                make_label("Humidity [%rel]", ""),
                 make_label("Stamp 1 Material", ""),
                 make_label("Stamp 1 Thickness [mm]", ""),
                 make_label("Stamp 1 Area [mm^2]", ""),
@@ -419,18 +417,6 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False):
             ]
             return steps
 
-        if process_name == "Laser Scribing":
-            steps = [
-                make_label("Laser wavelength [nm]", ""),
-                make_label("Laser pulse time [ps]", ""),
-                make_label("Laser pulse frequency [kHz]", ""),
-                make_label("Speed [mm/s]", ""),
-                make_label("Fluence [J/cm2]", ""),
-                make_label("Power [%]", ""),
-                make_label("Recipe file", ""),
-            ]
-            return steps
-
         if process_name == "ALD":
             steps = [
                 make_label("Material name", ""),
@@ -456,7 +442,7 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False):
             steps = [
                 make_label("Annealing time [min]", ""),
                 make_label("Annealing temperature [°C]", ""),
-                make_label("Annealing athmosphere", ""),
+                make_label("Annealing atmosphere", ""),
                 make_label("Relative humidity [%]", ""),
                 make_label("Notes", ""),
             ]
