@@ -36,6 +36,12 @@ ENTRY_TYPES = {
     # Process classes whose archive steps carry no 'method' value; smart_databaser
     # recognises them by their m_def suffix instead (nomad_perotf perotf_package.py).
     "process": "peroTF_Process",
+    # Entries nomad_perotf's experiment parser writes from the experiment Excel; the
+    # experiment entry lists the process entries it created in data.processed_archive.
+    "experiment": "RawHySprintExperiment",
+    "evaporation": "peroTF_Evaporation",
+    "spin_coating": "peroTF_SpinCoating",
+    "inkjet_printing": "peroTF_InkjetPrinting",
     "thermal_annealing": "peroTF_ThermalAnnealing",
     "lamination": "peroTF_Lamination",
     "jv": "peroTF_JVmeasurement",

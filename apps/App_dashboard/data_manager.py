@@ -148,6 +148,15 @@ CATEGORIES: dict[str, list[AppEntry]] = {
             "fa-chart-pie",
             admin_only=True,
         ),
+        AppEntry(
+            "Reprocess_Uploads",
+            "reprocess_uploads.ipynb",
+            "Reprocess Uploads",
+            "Let the current experiment parser write the process entries of unpublished "
+            "uploads again, e.g. evaporation steps that were stored without sources.",
+            "fa-redo",
+            admin_only=True,
+        ),
     ],
 }
 

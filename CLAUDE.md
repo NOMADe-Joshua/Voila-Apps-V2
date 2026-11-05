@@ -81,7 +81,7 @@ Two app shapes exist after the migration from the old flat repo
 
 - **Modular apps** (JV-Analysis, Process_JV_Overview, EQE_Analysis,
   AbsPL_Analysis, UVVis_Analyzer, XRD_PF, DesignOfExperiments, Excel_creator,
-  smart_databaser):
+  smart_databaser, Reprocess_Uploads):
   `app.py` plus modules, and a notebook with exactly 3 code cells (bootstrap,
   `log_notebook_usage()`, start the app).
 - **Notebook apps** (all others): the analysis code still lives in the
@@ -392,7 +392,10 @@ side.
   in nomad-perotf's own parser (`parsers/perotf_mapping.py`, uncommitted as of
   2026-11-03). Existing uploads keep their entries without sources: the parser
   never overwrites a process entry it already created
-  (`create_archive(..., overwrite=False)`).
+  (`create_archive(..., overwrite=False)`). The admin app `apps/Reprocess_Uploads`
+  deletes such entries (only those the experiment entry lists in
+  `processed_archive`) and reprocesses the upload, so the current parser writes
+  them again; unpublished uploads only.
 - Still open, as at HZB: whether this repo should become an installable NOMAD
   plugin (NORTH tool entry points, Docker images). Nothing of that exists; don't
   scaffold it without explicit sign-off.
