@@ -7,6 +7,7 @@ __author__ = "Joshua Damm"
 __institution__ = "KIT"
 __created__ = "December 2025"
 
+import html as html_lib
 import os
 
 import ipywidgets as widgets
@@ -24,6 +25,7 @@ from perotf_utils.api_calls import get_all_batches_wth_data
 from perotf_utils.auth_manager import AuthenticationManager
 from perotf_utils.batch_selection import sort_by_date_desc
 from perotf_utils.config import API_ENDPOINT, ENTRY_TYPES, URL_BASE
+from perotf_utils.table_utils import csv_safe
 
 
 class UVVisAnalysisApp:
@@ -384,7 +386,7 @@ class UVVisAnalysisApp:
 
         for _, row in df.iterrows():
             html += "<tr>"
-            html += f'<td style="padding: 8px; border: 1px solid #ddd;">{row["Sample"]}</td>'
+            html += f'<td style="padding: 8px; border: 1px solid #ddd;">{html_lib.escape(str(row["Sample"]))}</td>'
             html += f'<td style="padding: 8px; border: 1px solid #ddd; font-family: monospace;">{row["Bandgap(s) [eV]"]}</td>'
             html += f'<td style="padding: 8px; border: 1px solid #ddd; text-align: center;">{row["# Peaks"]}</td>'
             html += "</tr>"
@@ -397,7 +399,7 @@ class UVVisAnalysisApp:
 
         # Prepare downloads (FileDownload may be missing on older ipywidgets)
         csv_buffer = io.StringIO()
-        df.to_csv(csv_buffer, index=False, sep=";")
+        csv_safe(df).to_csv(csv_buffer, index=False, sep=";")
         csv_bytes = csv_buffer.getvalue().encode("utf-8")
         csv_dl = None
         try:
@@ -506,7 +508,7 @@ class UVVisAnalysisApp:
 
         # CSV download
         csv_buffer = io.StringIO()
-        df.to_csv(csv_buffer, index=False, sep=";")
+        csv_safe(df).to_csv(csv_buffer, index=False, sep=";")
         csv_bytes = csv_buffer.getvalue().encode("utf-8")
         csv_widget = None
         try:

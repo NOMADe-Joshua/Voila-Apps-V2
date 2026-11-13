@@ -22,6 +22,7 @@ from plot_manager import create_eqe_figure
 from resizable_plot_utility import ResizablePlotManager
 
 from perotf_utils.config import API_ENDPOINT, URL_BASE
+from perotf_utils.table_utils import csv_safe
 
 
 class SimpleAuthManager:
@@ -49,10 +50,8 @@ class SimpleAuthManager:
         token_url = f"{self.url}/auth/token"
         auth_dict = dict(username=username, password=password)
 
-        # NOMAD instances can differ: some accept GET, some require POST.
-        response = requests.get(token_url, params=auth_dict, timeout=15)
-        if response.status_code == 405:
-            response = requests.post(token_url, data=auth_dict, timeout=15)
+        # NOMAD takes the login as form data; query params would leak the password into URLs.
+        response = requests.post(token_url, data=auth_dict, timeout=15)
         response.raise_for_status()
         token_data = response.json()
         token = token_data.get("access_token")
@@ -834,7 +833,7 @@ class EQEAnalysisApp:
         assets.append(
             {
                 "path": "table/eqe_summary.csv",
-                "bytes": summary_df.to_csv(index=False).encode("utf-8"),
+                "bytes": csv_safe(summary_df).to_csv(index=False).encode("utf-8"),
             }
         )
         png_bytes = self._render_summary_table_image_bytes(summary_df, "png")

@@ -36,10 +36,12 @@ from resizable_plot_utility import display_resizable_plot
 
 from perotf_utils import process_handling
 from perotf_utils.api_calls import (
+    REQUEST_TIMEOUT,
     get_all_batches_wth_data,
     get_ids_in_batch,
     get_processing_steps,
     get_sample_description,
+    query_all,
 )
 from perotf_utils.auth_ui import AuthenticationUI
 from perotf_utils.batch_selection import extract_date, get_batch_ids, sort_by_date_desc
@@ -103,8 +105,9 @@ class SimpleAuthManager:
     def authenticate_with_credentials(self, username, password):
         if not username or not password:
             raise ValueError("Username and Password are required.")
-        response = requests.get(
-            f"{self.url}/auth/token", params=dict(username=username, password=password), timeout=10
+        # NOMAD takes the login as form data; query params would leak the password into URLs.
+        response = requests.post(
+            f"{self.url}/auth/token", data=dict(username=username, password=password), timeout=10
         )
         response.raise_for_status()
         token_data = response.json()
@@ -225,12 +228,8 @@ def get_batches_with_uploads(url, token, batch_type=ENTRY_TYPES["batch"]):
         "query": {"entry_type": batch_type},
         "pagination": {"page_size": 10000},
     }
-    response = requests.post(
-        f"{url}/entries/archive/query", headers={"Authorization": f"Bearer {token}"}, json=query
-    )
-    response.raise_for_status()
     batches = {}
-    for entry in response.json()["data"]:
+    for entry in query_all(url, token, "entries/archive/query", query):
         archive = entry.get("archive", {})
         lab_id = archive.get("data", {}).get("lab_id")
         if not lab_id:
@@ -254,7 +253,10 @@ def get_upload_ids_with_entries(url, token, entry_type):
         },
     }
     response = requests.post(
-        f"{url}/entries/query", headers={"Authorization": f"Bearer {token}"}, json=query
+        f"{url}/entries/query",
+        headers={"Authorization": f"Bearer {token}"},
+        json=query,
+        timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
     buckets = response.json()["aggregations"]["uploads"]["terms"]["data"]

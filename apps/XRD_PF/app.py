@@ -48,9 +48,10 @@ class SimpleAuthManager:
     def authenticate_with_credentials(self, username: str, password: str) -> str:
         if not username or not password:
             raise ValueError("Username and password are required.")
-        resp = requests.get(
+        # NOMAD takes the login as form data; query params would leak the password into URLs.
+        resp = requests.post(
             f"{self.url}/auth/token",
-            params=dict(username=username, password=password),
+            data=dict(username=username, password=password),
             timeout=10,
         )
         resp.raise_for_status()

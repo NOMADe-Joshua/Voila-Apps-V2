@@ -1,6 +1,6 @@
 [project]
 name = "uvvis-analyzer"
-version = "1.0.0"
+version = "1.0.1"
 description = "Load UV-Vis measurements from NOMAD, plot spectra and extract bandgaps (derivative and Tauc)"
 requires-python = ">=3.10"
 dependencies = [

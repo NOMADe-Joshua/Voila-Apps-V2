@@ -1,6 +1,6 @@
 [project]
 name = "xrd-pf"
-version = "1.0.0"
+version = "1.0.1"
 description = "Load XRD diffractograms from NOMAD, overlay patterns, detect peaks and fit peak profiles"
 requires-python = ">=3.10"
 dependencies = [

@@ -9,45 +9,21 @@ __created__ = "December 2025"
 
 import numpy as np
 import pandas as pd
-import requests
 
-from perotf_utils.api_calls import get_entryid, get_ids_in_batch, get_sample_description
+from perotf_utils import api_calls
+from perotf_utils.api_calls import get_ids_in_batch, get_sample_description
 from perotf_utils.config import ENTRY_TYPES
 
 
 def get_specific_data_of_sample(sample_id, entry_type, nomad_url, token, with_meta=False):
-    """Get specific measurement data for a sample"""
+    """Get specific measurement data for a sample: api_calls.get_specific_data_of_sample with
+    this module's argument order, and [] for a sample NOMAD does not know."""
     try:
-        entry_id = get_entryid(nomad_url, token, sample_id)
-    except Exception:
+        return api_calls.get_specific_data_of_sample(
+            nomad_url, token, sample_id, entry_type, with_meta=with_meta
+        )
+    except api_calls.EntryLookupError:
         return []
-
-    query = {
-        "required": {
-            "metadata": "*",
-            "data": "*",
-        },
-        "owner": "visible",
-        "query": {"entry_references.target_entry_id": entry_id},
-        "pagination": {"page_size": 100},
-    }
-    response = requests.post(
-        f"{nomad_url}/entries/archive/query",
-        headers={"Authorization": f"Bearer {token}"},
-        json=query,
-    )
-    response.raise_for_status()
-    linked_data = response.json()["data"]
-    res = []
-
-    for ldata in linked_data:
-        if entry_type not in ldata["archive"]["metadata"]["entry_type"]:
-            continue
-        if with_meta:
-            res.append((ldata["archive"]["data"], ldata["archive"]["metadata"]))
-        else:
-            res.append(ldata["archive"]["data"])
-    return res
 
 
 class UVVisDataManager:

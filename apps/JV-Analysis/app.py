@@ -38,6 +38,7 @@ from perotf_utils.api_calls import get_all_measurements_except_JV, get_ids_in_ba
 from perotf_utils.batch_selection import create_batch_selection
 from perotf_utils.config import API_ENDPOINT, GUI_ENDPOINT, URL_BASE
 from perotf_utils.error_handler import ErrorHandler
+from perotf_utils.table_utils import csv_safe, keep_text_as_text
 
 # ── PptxGenJS library loader ──────────────────────────────────────────────────
 # The library is downloaded ONCE from the CDN by the Python server and cached
@@ -113,7 +114,8 @@ class SimpleAuthManager:
         auth_dict = dict(username=username, password=password)
         token_url = f"{self.url}/auth/token"
 
-        response = requests.get(token_url, params=auth_dict, timeout=10)
+        # NOMAD takes the login as form data; query params would leak the password into URLs.
+        response = requests.post(token_url, data=auth_dict, timeout=10)
         response.raise_for_status()
 
         token_data = response.json()
@@ -700,7 +702,7 @@ If you tested specific variables or conditions for each sample, please write the
         """Download JV data as CSV"""
         jvc_data, _ = self.data_manager.get_export_data()
         if jvc_data is not None:
-            jvc_csv = jvc_data.to_csv(index=False)
+            jvc_csv = csv_safe(jvc_data).to_csv(index=False)
             self.save_ui.trigger_download(jvc_csv, "export_jvc.csv", "text/plain")
         else:
             print("No JV data available for download")
@@ -709,7 +711,7 @@ If you tested specific variables or conditions for each sample, please write the
         """Download curves data as CSV"""
         _, curves_data = self.data_manager.get_export_data()
         if curves_data is not None:
-            curves_csv = curves_data.to_csv(index=False)
+            curves_csv = csv_safe(curves_data).to_csv(index=False)
             self.save_ui.trigger_download(curves_csv, "export_curves.csv", "text/plain")
         else:
             print("No curves data available for download")
@@ -1303,7 +1305,8 @@ If you tested specific variables or conditions for each sample, please write the
             # Store plot data
             self.global_plot_data["figs"] = figs
             self.global_plot_data["names"] = names
-            self.global_plot_data["workbook"] = wb
+            # NOMAD text starting with "=" stays text instead of becoming a formula
+            self.global_plot_data["workbook"] = keep_text_as_text(wb)
             self.global_plot_data["titles"] = titles
             self.global_plot_data["subtitles"] = subtitles
             self.download_zip_button.disabled = len(figs) == 0
@@ -2296,7 +2299,7 @@ If you tested specific variables or conditions for each sample, please write the
 
         assets = []
 
-        csv_bytes = summary_df.to_csv(index=False).encode("utf-8")
+        csv_bytes = csv_safe(summary_df).to_csv(index=False).encode("utf-8")
         assets.append({"path": "table/jv_variation_summary.csv", "bytes": csv_bytes})
 
         png_bytes = self._render_summary_table_image_bytes(summary_df, image_format="png")
@@ -2336,7 +2339,7 @@ If you tested specific variables or conditions for each sample, please write the
 
                 # Convert to bytes
                 detail_bytes_io = io.BytesIO()
-                detail_wb.save(detail_bytes_io)
+                keep_text_as_text(detail_wb).save(detail_bytes_io)
                 detail_bytes = detail_bytes_io.getvalue()
 
                 assets.append({"path": "table/jv_detailed_pixel_data.xlsx", "bytes": detail_bytes})

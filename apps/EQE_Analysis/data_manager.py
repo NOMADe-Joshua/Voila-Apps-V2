@@ -9,7 +9,12 @@ import numpy as np
 import pandas as pd
 import requests
 
-from perotf_utils.api_calls import get_all_eqe, get_ids_in_batch, get_sample_description
+from perotf_utils.api_calls import (
+    REQUEST_TIMEOUT,
+    get_all_eqe,
+    get_ids_in_batch,
+    get_sample_description,
+)
 from perotf_utils.config import ENTRY_TYPES
 
 API_SOURCE = "perotf_utils.api_calls"
@@ -135,6 +140,7 @@ class DataManagerEQE:
                 f"{self.auth_manager.url}/entries/archive/query",
                 headers={"Authorization": f"Bearer {self.auth_manager.current_token}"},
                 json=direct_query,
+                timeout=REQUEST_TIMEOUT,
             )
             self.last_diagnostics.setdefault("strategy2_http_status", {})[eqe_type] = (
                 direct_resp.status_code
@@ -176,6 +182,7 @@ class DataManagerEQE:
                 f"{self.auth_manager.url}/entries/query",
                 headers={"Authorization": f"Bearer {self.auth_manager.current_token}"},
                 json=upload_query,
+                timeout=REQUEST_TIMEOUT,
             )
             self.last_diagnostics["strategy3_batch_http_status"] = upload_resp.status_code
             if upload_resp.status_code == 200:
@@ -199,6 +206,7 @@ class DataManagerEQE:
                             f"{self.auth_manager.url}/entries/archive/query",
                             headers={"Authorization": f"Bearer {self.auth_manager.current_token}"},
                             json=upload_eqe_query,
+                            timeout=REQUEST_TIMEOUT,
                         )
                         self.last_diagnostics.setdefault("strategy3_http_status", {})[eqe_type] = (
                             ueqe_resp.status_code
