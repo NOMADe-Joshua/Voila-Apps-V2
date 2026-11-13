@@ -63,9 +63,11 @@ apps/<AppName>/
     <app>.ipynb             # cell 0 is always the bootstrap cell
 shared/perotf_utils/        # DO NOT DUPLICATE ANYTHING FROM HERE
     config.py               # URL_BASE, API_ENDPOINT, GUI_ENDPOINT, NORTH_ENDPOINT, ENTRY_TYPES: the ONLY place
-    api_calls.py, access_token.py, auth_manager.py, auth_ui.py,
+    api_calls.py            # every NOMAD query; query_all() reads every page, REQUEST_TIMEOUT
+    access_token.py, auth_manager.py, auth_ui.py,
     batch_selection.py, error_handler.py, plotting_utils.py, process_handling.py
-    process_specs.py        # smart_databaser's process catalog, see below
+    table_utils.py          # csv_safe / keep_text_as_text for exports, pivot_by_group
+    process_specs.py        # process catalog (Excel column labels and archive paths), see below
 shared/utils.ipynb          # admin notebook (old usage dashboard + backup zip), not an app
 tests/<AppName>/            # ONE folder per app, at repo root, never inside apps/
     conftest.py
@@ -81,7 +83,7 @@ Two app shapes exist after the migration from the old flat repo
 
 - **Modular apps** (JV-Analysis, Process_JV_Overview, EQE_Analysis,
   AbsPL_Analysis, UVVis_Analyzer, XRD_PF, DesignOfExperiments, Excel_creator,
-  smart_databaser, Reprocess_Uploads):
+  Reprocess_Uploads):
   `app.py` plus modules, and a notebook with exactly 3 code cells (bootstrap,
   `log_notebook_usage()`, start the app).
 - **Notebook apps** (all others): the analysis code still lives in the
@@ -135,8 +137,8 @@ Two app shapes exist after the migration from the old flat repo
 8. **Notebooks start with the bootstrap cell** (see gotcha below). Modular
    apps' notebooks have exactly 3 code cells. No `sys.path.append`/`insert`
    anywhere in an app file or notebook; `bootstrap.py` is the one exception.
-   An app that builds on another app's modules (smart_databaser uses
-   Excel_creator's `sheet_experiment`/`experiment_excel_builder`) declares it
+   An app that builds on another app's modules (the removed smart_databaser
+   used Excel_creator's `sheet_experiment`; no app does at the moment) declares it
    in its `pyproject.toml` instead:
    ```toml
    [tool.perotf]
@@ -157,24 +159,26 @@ Two app shapes exist after the migration from the old flat repo
 11. **No regressions.** If making a checklist item pass would break an app's
     currently-working behavior or an already-passing test, stop and flag it;
     don't force the fix through.
+12. **NOMAD queries go through `perotf_utils.api_calls`**: `query_all()` follows
+    the pagination (a single request silently stops at its page size) and every
+    request has a timeout (ruff `S113` enforces it, `api_calls.REQUEST_TIMEOUT`).
+    Logins are POST form data, never URL parameters (a structure test checks it).
+    Exports that can hold NOMAD text go through `table_utils.csv_safe` (CSV) or
+    `keep_text_as_text` (openpyxl), so a sample name starting with `=` is never
+    run as a formula; NOMAD text put into HTML goes through `html.escape`.
 
-## Smart Databaser, Excel_creator and `process_specs.py`
+## Excel_creator and `process_specs.py`
 
-`apps/smart_databaser` (ported from HZB) reads the processing steps of earlier
-NOMAD batches and autofills a new experiment Excel, which it writes through
-Excel_creator's own `sheet_experiment.add_experiment_sheet` /
-`ExperimentExcelBuilder` (declared via `[tool.perotf] uses-apps`). Its process
-catalog is `shared/perotf_utils/process_specs.py`: per process type the Excel
-column labels, test values and the archive path each label is autofilled from
-(paths follow the nomad-baseclasses `map_*` functions that nomad_perotf's
-experiment parser calls). Unlike at HZB, our Excel_creator does NOT read
-`process_specs.py`; the catalog has to mirror the labels `sheet_experiment.py`
-writes. `tests/smart_databaser` checks that for every process type, so a label
-change in Excel_creator fails there: update the catalog in the same change.
-Process classes whose archive steps carry no `method` (generic process, thermal
-annealing incl. CR_/TFL_ variants, lamination) are recognised by their m_def,
-taken from `ENTRY_TYPES`. Only confirm a path against the real `map_<type>`
-function, never guess; mark unconfirmed units `unit_verified: False`.
+`shared/perotf_utils/process_specs.py` is a process catalog: per process type
+the Excel column labels, test values and the archive path each label is
+filled from (paths follow the nomad-baseclasses `map_*` functions that
+nomad_perotf's experiment parser calls). It was the catalog of smart_databaser,
+which was removed on 2026-11-11 because nobody used it; nothing reads the
+catalog right now. Our Excel_creator writes its labels inline in
+`sheet_experiment.py` (HZB's generates its guide from the catalog); whether we
+follow HZB there is decided when Excel_creator is ported. Only confirm a path
+against the real `map_<type>` function, never guess; mark unconfirmed units
+`unit_verified: False`.
 
 ## NOMAD process data: what the archive actually holds
 
@@ -337,10 +341,6 @@ side.
 - `Process_JV_Overview` keeps its own copies of JV-Analysis modules
   (`plot_manager`, `utils`, `resizable_plot_utility`, ...) that have drifted
   slightly; consolidating them is a separate change.
-- `perotf_utils.auth_manager.AuthenticationManager.authenticate_with_token()`
-  calls `access_token.get_token(self.url_base)` with the bare host instead of
-  `URL_BASE + API_ENDPOINT`. Harmless while `NOMAD_CLIENT_ACCESS_TOKEN` is set
-  (always the case in NORTH), wrong for the interactive fallback. Pre-existing.
 - The `KIT_` lab-ID prefix is still written literally in `Excel_creator`
   (Excel ID formula) and `Data_Tools` (renamers). If it should become
   configurable, add it to `perotf_utils.config` first.
@@ -375,17 +375,6 @@ side.
   - HZB extras dropped from this fork: the `Learning/` tutorials, the
     `NOMAD_DATA_ACCESS_PROMPT.md` LLM reference with its dashboard section
     "Build Your Own", and the git hooks that reset `Learning/` on pull.
-- **Smart Databaser is untested against live peroTF data** (no token was
-  available during the port; HZB's live tests were not ported). Most numeric
-  catalog paths are `unit_verified: False`; solvent volume is probably off by
-  1000 (schema ml vs. column uL) and needs checking in the NOMAD GUI before a
-  multiplier is added. Not autofillable because nomad_perotf's parser does not
-  store the data: Seq-Evaporation (stored as an evaporation without sources, see
-  below), Multijunction Info, most Lamination columns, Inkjet waveform and
-  gas/vacuum quenching columns. Laser Scribing is no longer offered at all
-  (Excel_creator 1.1.0): the parser deliberately creates no entry for it. HZB's child-sample `_C-n`
-  ids were dropped (peroTF ids have no such suffix), so the GUI no longer
-  creates child rows.
 - **Seq-Evaporation sources are not in NOMAD**: nomad-baseclasses'
   `map_evaporation()` returns before adding any source when the "Organic"
   column is missing, which is always the case for Seq-Evaporation. Being fixed

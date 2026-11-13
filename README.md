@@ -32,7 +32,6 @@ two repos (see `CONTRIBUTING.md`).
 | Data Tools | `Data_Tools` | Converters and renamers for the ELN naming scheme |
 | Excel Creator | `Excel_creator` | Experiment planning workbooks for NOMAD uploads |
 | Usage Log | `log_view` | Who started which app when, from the usage log every app writes |
-| Smart Databaser | `smart_databaser` | Experiment workbooks for NOMAD, autofilled live from earlier batches |
 | Design of Experiments | `DesignOfExperiments` | DoE planning and sampling |
 | UV-Vis Simulator | `UVVis_Simulator` | Thin-film optics from a refractive index library |
 
@@ -46,9 +45,11 @@ Voila-Apps-V2/
 ├── shared/
 │   ├── perotf_utils/         # shared library, imported as perotf_utils.<module>
 │   │   ├── config.py         # the ONLY place for server URL, paths and NOMAD entry types
-│   │   ├── api_calls.py, access_token.py, auth_manager.py, auth_ui.py,
+│   │   ├── api_calls.py      # NOMAD queries (every page, with timeouts)
+│   │   ├── access_token.py, auth_manager.py, auth_ui.py,
 │   │   ├── batch_selection.py, error_handler.py, plotting_utils.py, process_handling.py
-│   │   └── process_specs.py  # process catalog of the Smart Databaser
+│   │   ├── table_utils.py    # safe CSV/XLSX exports
+│   │   └── process_specs.py  # process catalog (Excel labels and archive paths)
 │   └── utils.ipynb           # admin: old usage-log dashboard and backup zip
 ├── apps/<AppName>/           # one folder per app: pyproject.toml, notebook(s), modules
 ├── tests/<AppName>/          # one test folder per app, plus tests/structure and tests/shared

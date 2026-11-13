@@ -210,7 +210,7 @@ Step 2 is why `apps/<App>/pyproject.toml` is worth keeping accurate: it is the
 only thing that installs an app's third-party requirements.
 
 An app that reuses another app's modules lists it under `[tool.perotf]
-uses-apps` (the Smart Databaser lists `Excel_creator`). Bootstrap makes that
+uses-apps` (e.g. `uses-apps = ["Excel_creator"]`). Bootstrap makes that
 folder importable but does not install the other app's dependencies, so the
 calling app's own `dependencies` must cover them (e.g. `openpyxl`). Both apps
 must be in the same upload, which is automatic when the whole repo is uploaded.
@@ -218,7 +218,11 @@ must be in the same upload, which is automatic when the whole repo is uploaded.
 **It runs once per container, not once per launch.** On success bootstrap
 writes a marker into the temp directory, keyed on the app's path and the
 contents of its `pyproject.toml`. Editing the dependency list changes the key,
-so the next launch reinstalls.
+so the next launch reinstalls. The same holds for `shared/` itself: its marker is keyed
+on the contents of `shared/pyproject.toml` and every Python file in it, so a
+changed `perotf_utils` reinstalls once and an unchanged one starts without pip.
+Every pip run has a network timeout (10 s, one retry) and an overall limit of
+600 s, so an unreachable proxy or index cannot hold an app start for minutes.
 
 **A failed app install is a warning, not an error.** Most apps need nothing
 beyond what the NORTH image already provides, so pip failing here (no network)
