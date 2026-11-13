@@ -80,8 +80,10 @@ class FakeNomad:
 
     def post(self, url, headers=None, json=None, timeout=None):
         if url.endswith("/entries/archive/query"):
-            self.calls.append(("query", json["query"]))
-            data = [item for item in self.archives if self._matches(item, json["query"])]
+            assert json is not None, "an archive query always sends a JSON body"
+            query = json["query"]
+            self.calls.append(("query", query))
+            data = [item for item in self.archives if self._matches(item, query)]
             return FakeResponse({"data": copy.deepcopy(data), "pagination": {}})
         if url.endswith("/action/process"):
             self.calls.append(("process", url.split("/uploads/")[1].split("/")[0]))
