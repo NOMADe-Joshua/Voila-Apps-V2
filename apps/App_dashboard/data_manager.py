@@ -110,15 +110,6 @@ CATEGORIES: dict[str, list[AppEntry]] = {
             "that documents it for upload to NOMAD.",
             "fa-file-excel",
         ),
-        AppEntry(
-            "smart_databaser",
-            "smart_databaser.ipynb",
-            "Smart Databaser",
-            "Build the experiment Excel for NOMAD with values filled in live from earlier "
-            "batches: replicate a whole experiment or adopt single processes.",
-            "fa-magic",
-            experimental=True,
-        ),
     ],
     "Utilities & Calculators": [
         AppEntry(
