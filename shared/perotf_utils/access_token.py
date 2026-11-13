@@ -10,17 +10,21 @@ logger = logging.getLogger(__name__)
 
 
 def get_token(url, name=None):
+    """NOMAD_CLIENT_ACCESS_TOKEN, else a login prompt. url is the API url (URL_BASE +
+    API_ENDPOINT)."""
     try:
         return os.environ["NOMAD_CLIENT_ACCESS_TOKEN"]
     except KeyError:
         user = name if name is not None else input("Username")
-        print("Password:")
-        password = getpass.getpass()
+        password = getpass.getpass("Password: ")
 
-        # get token from the api:
-        response = requests.get(f"{url}/auth/token", params=dict(username=user, password=password))
+        # NOMAD takes the login as form data; query params would leak the password into URLs.
+        response = requests.post(
+            f"{url}/auth/token", data=dict(username=user, password=password), timeout=30
+        )
         if response.status_code == 401:
             raise Exception(response.json()["detail"])
+        response.raise_for_status()
         return response.json()["access_token"]
 
 

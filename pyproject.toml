@@ -5,7 +5,8 @@ markers = ["live: requires live NOMAD server (skipped in CI)"]
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "G"]
+# S113: every requests call needs a timeout, so a dead server cannot hang an app
+select = ["E", "F", "I", "G", "S113"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["perotf_utils"]

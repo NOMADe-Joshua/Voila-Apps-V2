@@ -91,7 +91,9 @@ def _apply_proxy_env(config: dict[str, str]) -> None:
     if https_proxy:
         os.environ["HTTPS_PROXY"] = https_proxy
 
-    no_proxy = config.get("NO_PROXY")
+    # Container variables win, as for every other setting: a NO_PROXY the container already
+    # sets is kept, not overwritten.
+    no_proxy = os.environ.get("NO_PROXY") or config.get("NO_PROXY")
     if no_proxy is None:
         # Loopback only. The Oasis host is deliberately NOT excluded: a
         # container that needs a proxy at all usually has no direct route to
@@ -118,29 +120,47 @@ def _build_isolation_args() -> list[str]:
     return []
 
 
+# pip's own defaults (15 s per connection, 5 retries) let an unreachable proxy or index hold
+# an app start for minutes per package; PIP_INSTALL_TIMEOUT_S caps the whole install, which
+# can legitimately take a few minutes for a fresh container.
+PIP_NETWORK_TIMEOUT_S = 10
+PIP_RETRIES = 1
+PIP_INSTALL_TIMEOUT_S = 600
+
+
 def _pip_install(target: Path) -> tuple[int, str]:
-    """Install target, returning pip's exit code and its combined output.
+    """Install target, returning pip's exit code and its combined output. An install that
+    runs past PIP_INSTALL_TIMEOUT_S is stopped and reported as failed (exit code 1), which
+    every caller already handles.
 
     Captured, not inherited: this runs as cell 0 of a Voila app, where anything
     pip writes to stdout/stderr is rendered into the app's own UI. Callers
     decide what to surface; a successful install has nothing an app user needs
     to see.
     """
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "-q",
-            "--disable-pip-version-check",
-            *_build_isolation_args(),
-            str(target),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-q",
+                "--disable-pip-version-check",
+                "--timeout",
+                str(PIP_NETWORK_TIMEOUT_S),
+                "--retries",
+                str(PIP_RETRIES),
+                *_build_isolation_args(),
+                str(target),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=PIP_INSTALL_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return 1, f"pip install of {target} stopped after {PIP_INSTALL_TIMEOUT_S} s"
     output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
     return result.returncode, output
 
@@ -151,8 +171,32 @@ def _pip_install(target: Path) -> tuple[int, str]:
 SHARED_RUNTIME_MODULES = ("perotf_utils", "requests", "pandas", "plotly")
 
 
+def _shared_install_marker(shared: Path) -> Path:
+    """Path of the once-per-container marker for the `shared/` install.
+
+    Keyed on the shared location and the contents of its pyproject.toml and
+    Python sources, so an edited shared package reinstalls while an unchanged
+    one never pays for pip on every launch.
+    """
+    digest = hashlib.sha256(str(shared).encode())
+    for path in sorted([shared / "pyproject.toml", *shared.rglob("*.py")]):
+        if path.is_file():
+            digest.update(path.relative_to(shared).as_posix().encode())
+            digest.update(path.read_bytes())
+    return Path(tempfile.gettempdir()) / f"perotf-bootstrap-shared-{digest.hexdigest()[:16]}.done"
+
+
 def _install_shared() -> None:
     shared = REPO_ROOT / "shared"
+    marker = _shared_install_marker(shared)
+    if marker.exists():
+        # A fresh kernel still needs shared/ on sys.path (see below), so only pip is skipped.
+        shared_str = str(shared)
+        if shared_str not in sys.path:
+            sys.path.insert(0, shared_str)
+        logger.info("shared package already installed for %s", shared)
+        return
+
     returncode, output = _pip_install(shared)
 
     # A fresh kernel already ran site.py before this install happened, so it
@@ -167,6 +211,11 @@ def _install_shared() -> None:
     if returncode == 0:
         if output:
             logger.info("pip install of %s reported:\n%s", shared, output)
+        try:
+            marker.write_text(f"{shared}\n", encoding="utf-8")
+        except OSError:
+            # A read-only or missing temp dir only costs a repeat install later.
+            logger.info("could not write the install marker %s", marker)
         return
 
     # The sys.path entry above is what this kernel actually imports from, so a

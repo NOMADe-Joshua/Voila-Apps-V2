@@ -33,8 +33,8 @@ ENTRY_TYPES = {
     "batch": "peroTF_Batch",
     "sample": "peroTF_Sample",
     "substrate": "peroTF_Substrate",
-    # Process classes whose archive steps carry no 'method' value; smart_databaser
-    # recognises them by their m_def suffix instead (nomad_perotf perotf_package.py).
+    # Process classes whose archive steps carry no 'method' value; code that sorts steps
+    # by type recognises them by their m_def suffix instead (nomad_perotf perotf_package.py).
     "process": "peroTF_Process",
     # Entries nomad_perotf's experiment parser writes from the experiment Excel; the
     # experiment entry lists the process entries it created in data.processed_archive.

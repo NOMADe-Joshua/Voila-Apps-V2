@@ -116,6 +116,18 @@ def test_no_hysprint_utils_imports(path):
     assert "hysprint_utils" not in path.read_text(encoding="utf-8")
 
 
+LOGIN_IN_URL = re.compile(r"params\s*=\s*(auth_dict|dict\(\s*username\s*=)")
+
+
+@pytest.mark.parametrize("path", PY_FILES + NOTEBOOKS, ids=_rel)
+def test_login_credentials_never_go_into_the_url(path):
+    """NOMAD's /auth/token takes the login as POST form data; query params would leak the
+    password into server and proxy logs."""
+    text = path.read_text(encoding="utf-8")
+    if "auth/token" in text:
+        assert not LOGIN_IN_URL.search(text), f"{_rel(path)} sends the login as URL parameters"
+
+
 def test_no_tests_inside_apps():
     assert not [p for p in APPS_DIR.rglob("tests") if p.is_dir()]
     assert not list(APPS_DIR.rglob("test_*.py"))

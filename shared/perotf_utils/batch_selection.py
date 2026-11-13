@@ -1,8 +1,13 @@
+import html
+import logging
 import re
 
 import ipywidgets as widgets
+import requests
 
 from perotf_utils.api_calls import get_batch_ids
+
+logger = logging.getLogger(__name__)
 
 
 def extract_date(s):
@@ -16,13 +21,20 @@ def sort_by_date_desc(data_list):
 
 
 def create_batch_selection(url, token, load_data_function):
-    # Get batch IDs
-    batch_ids_list_tmp = list(get_batch_ids(url, token))
-    batch_ids_list = []
-    for b in batch_ids_list_tmp:
-        if "_".join(b.split("_")[:-1]) in batch_ids_list_tmp:
-            continue
-        batch_ids_list.append(b)
+    # Get batch IDs. Without network or a valid token the app must still start, so its
+    # demo mode stays reachable: the panel shows the error and an empty list instead.
+    load_error = None
+    try:
+        batch_ids_list_tmp = list(get_batch_ids(url, token))
+    except requests.RequestException as error:
+        logger.warning("Could not load the batch list: %s", error)
+        load_error = error
+        batch_ids_list_tmp = []
+    # A set, not the list: the sub-batch check runs once per batch
+    all_batch_ids = set(batch_ids_list_tmp)
+    batch_ids_list = [
+        b for b in batch_ids_list_tmp if "_".join(b.split("_")[:-1]) not in all_batch_ids
+    ]
     batch_ids_list = sort_by_date_desc(batch_ids_list)
 
     # Create widgets
@@ -46,5 +58,14 @@ def create_batch_selection(url, token, load_data_function):
     search_field.observe(on_search_enter, names="value")
     load_batch_button.on_click(lambda b: load_data_function(batch_ids_selector))
 
-    # Return the widget container
-    return widgets.VBox([search_field, batch_ids_selector, load_batch_button])
+    # Return the widget container. children[1] stays the SelectMultiple (apps rely on it).
+    children = [search_field, batch_ids_selector, load_batch_button]
+    if load_error is not None:
+        children.append(
+            widgets.HTML(
+                "<p style='color:#b33'>Could not load the batch list from NOMAD "
+                f"({html.escape(type(load_error).__name__)}). Check the connection or your "
+                "token; demo data still works.</p>"
+            )
+        )
+    return widgets.VBox(children)
