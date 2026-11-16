@@ -215,3 +215,6 @@ graphify-out/20*/
 
 # Machine-specific Claude Code settings (graphify hooks with local paths)
 .claude/settings.local.json
+
+# Written at runtime by apps/SEM_crystal_counter ("Save as reviewed"): grain maps and user names
+shared/perotf_utils/sem_training_log/

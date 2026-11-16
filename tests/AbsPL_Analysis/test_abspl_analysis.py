@@ -22,6 +22,28 @@ def test_app_constructs_offline(mods, monkeypatch):
     assert app.auth_manager.url == f"{URL_BASE}{API_ENDPOINT}"
 
 
+def test_the_app_shows_its_manual_above_the_tabs(mods, monkeypatch):
+    from perotf_utils.manual import read_manual
+
+    app_mod = mods["app"]
+    monkeypatch.delenv("JUPYTERHUB_USER", raising=False)
+    monkeypatch.delenv("NOMAD_CLIENT_ACCESS_TOKEN", raising=False)
+    app = app_mod.AbsPLAppController()
+    shown = []
+    monkeypatch.setattr(app_mod, "display", shown.append)
+    app.display()
+
+    def widgets_in(widget):
+        yield widget
+        for child in getattr(widget, "children", ()) or ():
+            yield from widgets_in(child)
+
+    assert len(shown) == 1
+    assert "📖 Manual" in [getattr(w, "description", None) for w in widgets_in(shown[0])]
+    assert app.main_layout in shown[0].children
+    assert "Ideality factor" in read_manual(app_mod.__file__)
+
+
 def _entry(n_results, notes="", flux=True):
     results = [
         {
@@ -86,19 +108,26 @@ def test_sweep_heatmap_uses_sweep_steps(mods, monkeypatch):
     assert fig.layout.yaxis.title.text == "Sweep step"
 
 
-def test_search_for_abspl_filters_batches(mods, monkeypatch):
+def test_batch_panel_offers_the_shared_abspl_filter(mods, monkeypatch):
+    from perotf_utils.config import ENTRY_TYPES
+
     app_mod = mods["app"]
     monkeypatch.delenv("JUPYTERHUB_USER", raising=False)
     monkeypatch.delenv("NOMAD_CLIENT_ACCESS_TOKEN", raising=False)
     app = app_mod.AbsPLAppController()
-    app._batch_selector = app_mod.widgets.SelectMultiple(options=["a", "b", "c"])
-    app._all_batch_options = ["a", "b", "c"]
-    monkeypatch.setattr(app_mod, "get_ids_in_batch", lambda url, tok, ids: list(ids))
-    monkeypatch.setattr(
-        app_mod, "get_all_eqe", lambda url, tok, ids, eqe_type: {"S": [1]} if ids == ["b"] else {}
-    )
-    app._on_search_for_abspl()
-    assert list(app._batch_selector.options) == ["b"]
+    app.auth_manager.current_token = "tok"
+    app.auth_manager.current_user_info = {"name": "test"}
+    seen = {}
+
+    def fake_selection(url, token, load, **kwargs):
+        seen.update(kwargs)
+        return app_mod.widgets.VBox([app_mod.widgets.Text(), app_mod.widgets.SelectMultiple()])
+
+    monkeypatch.setattr(app_mod, "create_batch_selection", fake_selection)
+    monkeypatch.setattr(app, "_on_refresh_diagnostics", lambda _b: None)
+    app._init_batch_selection()
+    assert seen == {"filter_label": "AbsPL", "filter_entry_type": ENTRY_TYPES["abspl"]}
+    assert app._batch_selector is not None
 
 
 def test_trace_order_sorts_traces_and_legend(mods, monkeypatch):
@@ -142,3 +171,24 @@ def test_extract_cycle_ignores_px_prefix(mods):
     assert extract("pxACycle_6") == 6
     assert extract("sample, px1Cycle_7, laser on") == 7
     assert extract("no cycle here") is None
+
+
+def test_plot_legend_and_titles_escape_sample_names(mods, monkeypatch):
+    import plotly.graph_objects as go
+
+    rpu = mods["resizable_plot_utility"]
+    fig = go.Figure(go.Scatter(x=[0, 1], y=[0, 1], name="KIT_<script>x</script>"))
+    legend = rpu.ResizablePlotManager._build_legend_table(fig)
+    assert "<script>" not in legend and "&lt;script&gt;" in legend
+
+    shown = []
+    monkeypatch.setattr(rpu, "display", lambda obj: shown.append(obj.data))
+    rpu.ResizablePlotWidget(fig, title="Batch <b>1</b>", subtitle="a & b").display()
+    assert "Batch &lt;b&gt;1&lt;/b&gt;" in shown[0] and "a &amp; b" in shown[0]
+
+
+def test_changing_the_color_scheme_does_not_raise(mods):
+    """The callback called a preview method that no longer exists; Voila hid the error."""
+    selector = mods["gui_components"].ColorSchemeSelector()
+    selector._on_color_change({"new": "Plasma"})
+    assert selector.selected_scheme == "Plasma"

@@ -1,5 +1,16 @@
+import logging
+
 from openpyxl.styles import Alignment, PatternFill
 from openpyxl.utils import get_column_letter
+
+logger = logging.getLogger(__name__)
+
+# The Nomad ID formula builds <LAB_ID_PREFIX><Project_Name>_<Date>_<Batch>_<Subbatch>_<Sample>
+# from columns B, A, C, D and E; nomad_prefill.parse_lab_id reads a lab_id back the same way.
+LAB_ID_PREFIX = "KIT_"
+
+# Last row that gets the Nomad ID formula (rows 3 and up are the data rows).
+NOMAD_ID_LAST_ROW = 500
 
 TABLEAU_COLORS = {
     "tab:blue": "1F77B4",
@@ -25,11 +36,35 @@ def lighten_color(hex_color, factor=0.50):
     return f"{r:02x}{g:02x}{b:02x}".upper()
 
 
-def add_experiment_sheet(workbook, process_sequence, is_testing=False):
+def nomad_id_formula(row):
+    """The Nomad ID of one data row; empty while the row has no Project_Name."""
+    parts = f'B{row},"_",A{row},"_",C{row},"_",D{row},"_",E{row}'
+    return f'=IF(B{row}="","",CONCATENATE("{LAB_ID_PREFIX}",{parts}))'
+
+
+def write_samples(ws, samples, info_columns, first_row):
+    """Write one sample per row from first_row on. A sample is {Experiment Info header:
+    value}; its "Nomad ID" replaces that row's formula. info_columns maps the Experiment Info
+    headers to their column numbers; a value whose column the sheet does not have is not
+    written (it would land in another process's columns)."""
+    if "Nomad ID" not in info_columns:
+        raise ValueError("the sheet has no Experiment Info 'Nomad ID' column to prefill")
+    for row, sample in enumerate(samples, start=first_row):
+        for header, value in sample.items():
+            column = info_columns.get(header)
+            if column is not None and value is not None:
+                ws.cell(row=row, column=column, value=value)
+
+
+def add_experiment_sheet(workbook, process_sequence, is_testing=False, samples=None):
+    """is_testing: row 3 gets example values. samples: optional {Experiment Info header:
+    value} rows, one per sample (see write_samples); they start below the example row when
+    there is one."""
     ws = workbook.active
     ws.title = "Experiment Data"
     start_col = 1
     incremental_number = 0
+    info_columns = {}  # Experiment Info header -> column number
 
     def make_label(label, test_val=None):
         if is_testing:
@@ -456,8 +491,9 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False):
             return steps
 
         else:
-            print(
-                f"Warning: Process '{process_name}' not defined in generate_steps_for_process. Using default steps."
+            logger.warning(
+                "Process '%s' not defined in generate_steps_for_process. Using default steps.",
+                process_name,
             )
             return [make_label("Undefined Process", "")]
 
@@ -493,18 +529,20 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False):
             cell = ws.cell(row=2, column=col_index)
             cell.value = step_label
             cell.fill = PatternFill(start_color=row2_color, end_color=row2_color, fill_type="solid")
+            if process_name == "Experiment Info":
+                info_columns.setdefault(step_label, col_index)
             if is_testing:
                 ws.cell(row=3, column=col_index, value=test_val)
         start_col = end_col + 1
         incremental_number += 1
 
-    # Example: Apply a custom formula for the "Nomad ID" column (example only)
-    if is_testing:
-        for row in range(3, 4):
-            nomad_id_formula = (
-                f'=CONCATENATE("KIT_",B{row},"_",A{row},"_",C{row},"_",D{row},"_",E{row})'
-            )
-            ws[f"F{row}"].value = nomad_id_formula
+    # Every data row the user can use gets the Nomad ID formula (it used to be row 3 only).
+    # A row whose Project_Name is empty stays empty, and the parser skips it.
+    for row in range(3, NOMAD_ID_LAST_ROW + 1):
+        ws[f"F{row}"].value = nomad_id_formula(row)
+
+    if samples:
+        write_samples(ws, samples, info_columns, first_row=4 if is_testing else 3)
 
     # Adjust column widths
     for col in ws.columns:

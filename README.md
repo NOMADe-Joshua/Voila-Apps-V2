@@ -23,14 +23,16 @@ two repos (see `CONTRIBUTING.md`).
 | App Dashboard | `App_dashboard` | Entry point with a card for every app |
 | JV Analysis | `JV-Analysis` | JV curve analysis: statistics, hysteresis, best devices, PPTX and Excel export |
 | Process JV Overview | `Process_JV_Overview` | Processing steps of a batch next to its JV results |
-| MPPT Analysis | `MPPT_Analysis` | Maximum power point tracking curves and fits |
+| Global Analyzer | `Global_analyzer` | Results against process parameters across batches, correlations, Random Forest, next-experiment suggestions |
+| MPPT Analysis | `MPPT_Analysis` | MPPT curves, per-pixel fits, T80/T95 and lifetime energy yield, write-back to NOMAD |
 | EQE Analysis | `EQE_Analysis` | EQE spectra and integrated Jsc against AM1.5G |
 | AbsPL Analysis | `AbsPL_Analysis` | Absolute PL spectra, peak fits, QFLS and PLQY |
 | UV-Vis Analyzer | `UVVis_Analyzer` | UV-Vis spectra from NOMAD |
 | XRD Peak Fitting | `XRD_PF` | XRD pattern peak detection and fitting |
-| SEM Grain Size Analysis | `SEM_crystal_counter` | Grain size distribution of perovskite films from SEM images |
+| SEM Crystal Counter | `SEM_crystal_counter` | Grain size and film thickness from SEM images, with manual correction |
 | Data Tools | `Data_Tools` | Converters and renamers for the ELN naming scheme |
 | Excel Creator | `Excel_creator` | Experiment planning workbooks for NOMAD uploads |
+| Entry Auditor | `Entry_Auditor` | Inconsistent values across a batch's entries, corrected in NOMAD with backups |
 | Usage Log | `log_view` | Who started which app when, from the usage log every app writes |
 | Design of Experiments | `DesignOfExperiments` | DoE planning and sampling |
 | UV-Vis Simulator | `UVVis_Simulator` | Thin-film optics from a refractive index library |

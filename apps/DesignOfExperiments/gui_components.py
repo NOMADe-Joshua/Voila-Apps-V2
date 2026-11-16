@@ -4,23 +4,27 @@ Reusable UI components, widgets, forms, and buttons using ipywidgets.
 """
 
 import base64
+import html
 import io
 import json
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import logging
+from typing import Any, Dict, List, Optional
 
 import ipywidgets as widgets
 import numpy as np
 import pandas as pd
-from data_manager import DataManager, Variable, VariableType
-from IPython.display import HTML, clear_output, display
-from utils import Constants, ValidationUtils
+from data_manager import Variable, VariableType
+from IPython.display import display
+from utils import ValidationUtils
 
 try:
-    import openpyxl
+    import openpyxl  # noqa: F401
 
     HAS_OPENPYXL = True
 except ImportError:
     HAS_OPENPYXL = False
+
+logger = logging.getLogger(__name__)
 
 
 class GUIComponents:
@@ -36,6 +40,7 @@ class GUIComponents:
         self.current_metrics = {}
         self.current_algorithm = ""
         self.current_random_seed = 42
+        self.variable_errors: list[str] = []
 
         # Styling constants
         self.BUTTON_STYLE = {"description_width": "initial"}
@@ -43,7 +48,7 @@ class GUIComponents:
         self.WIDE_INPUT_STYLE = {"description_width": "150px"}
 
     def _parse_float(self, value_str):
-        """Parse float value handling comma as decimal separator."""
+        """Parse float value handling comma as decimal separator; None if it is not a number."""
         if isinstance(value_str, (int, float)):
             return float(value_str)
 
@@ -52,18 +57,57 @@ class GUIComponents:
             clean_str = str(value_str).replace(",", ".")
             return float(clean_str)
         except (ValueError, TypeError):
-            return 0.0
+            return None  # a typo such as "1O0" must not become 0.0 and silently change the range
 
     def create_algorithm_selector(self) -> widgets.Widget:
         """Create algorithm selection interface."""
         # Algorithm dropdown with lab-focused descriptions
         algorithms = {
-            "Latin Hypercube Sampling": "Ensures each experimental parameter is tested across its full range with minimal overlap. Ideal for screening studies and response surface methodology in materials research.",
-            "Sobol Sequences": "Generates highly uniform experimental designs that efficiently explore parameter space. Particularly useful for computational experiments and sensitivity analysis of process variables.",
-            "Halton Sequences": "Creates systematic experimental designs that avoid clustering of test conditions. Well-suited for optimization studies where you need consistent coverage of factor combinations.",
-            "Random Sampling": "Simple random selection of experimental conditions. Best for baseline comparisons or when you need unbiased sampling without assumptions about parameter relationships.",
-            "Uniform Grid Sampling": "Tests all combinations at regular intervals across parameter ranges. Perfect for fundamental studies mapping complete response surfaces with systematic precision.",
-            "Maximin Distance Design": "Optimizes spacing between experimental points to maximize information gain. Excellent for expensive experiments where each test must provide maximum insight.",
+            "Latin Hypercube Sampling": (
+                "Ensures each experimental parameter is tested across its full range with "
+                "minimal overlap. Ideal for screening studies and response surface "
+                "methodology in materials research."
+            ),
+            "Sobol Sequences": (
+                "Generates highly uniform experimental designs that efficiently explore "
+                "parameter space. Particularly useful for computational experiments and "
+                "sensitivity analysis of process variables."
+            ),
+            "Halton Sequences": (
+                "Creates systematic experimental designs that avoid clustering of test "
+                "conditions. Well-suited for optimization studies where you need "
+                "consistent coverage of factor combinations."
+            ),
+            "Random Sampling": (
+                "Simple random selection of experimental conditions. Best for baseline "
+                "comparisons or when you need unbiased sampling without assumptions "
+                "about parameter relationships."
+            ),
+            "Uniform Grid Sampling": (
+                "Tests all combinations at regular intervals across parameter ranges. "
+                "Perfect for fundamental studies mapping complete response surfaces "
+                "with systematic precision."
+            ),
+            "Maximin Distance Design": (
+                "Optimizes spacing between experimental points to maximize information "
+                "gain. Excellent for expensive experiments where each test must provide "
+                "maximum insight."
+            ),
+            "Orthogonal Arrays": (
+                "Classical screening design (Taguchi L4, L8, L9, L16, L25, L27, ...): every "
+                "pair of levels of every two variables appears equally often. The number of "
+                "runs is fixed by the number of variables and levels."
+            ),
+            "Definitive Screening Design": (
+                "Three-level screening for numeric variables in about 2 x variables + 1 "
+                "runs: main effects are not confused with two-factor interactions, and "
+                "curvature shows. The number of runs is fixed by the design."
+            ),
+            "Augment Existing Design": (
+                "Adds runs to a design you already measured (upload it as CSV under "
+                "Advanced Options), placed as far as possible from the existing points: for "
+                "the next round of experiments."
+            ),
         }
 
         self.algorithm_dropdown = widgets.Dropdown(
@@ -76,13 +120,19 @@ class GUIComponents:
 
         # Algorithm description
         self.algorithm_description = widgets.HTML(
-            value=f"<i>{algorithms['Latin Hypercube Sampling']}</i>",
+            value=(
+                f"<span style='color: #555; font-size: 13px;'>"
+                f"<b>Description:</b> {algorithms['Latin Hypercube Sampling']}</span>"
+            ),
             layout=widgets.Layout(margin="5px 0"),
         )
 
         # Update description when algorithm changes
         def update_description(change):
-            self.algorithm_description.value = f"<i>{algorithms[change['new']]}</i>"
+            self.algorithm_description.value = (
+                f"<span style='color: #555; font-size: 13px;'>"
+                f"<b>Description:</b> {algorithms[change['new']]}</span>"
+            )
 
         self.algorithm_dropdown.observe(update_description, names="value")
 
@@ -147,19 +197,28 @@ class GUIComponents:
         protocol_lines.append("EXPERIMENTAL CONDITIONS:")
         protocol_lines.append("-" * 25)
 
-        # Get experimental order
+        # The protocol lists the runs in the order of the exported table, with the same numbers.
+        # (It used to shuffle again with a fixed seed of 42 and renumber "Experiment 1..N", so
+        # "Experiment 3" was not row 3 of the CSV and results were filed under the wrong
+        # settings. The design's own run order and seed are set in the design options.)
         samples = self.current_samples.copy()
-        if self.randomize_order.value:
-            samples = samples.sample(frac=1, random_state=42).reset_index(drop=True)
-            protocol_lines.append("Execution order: RANDOMIZED")
+        if "run_order" in samples.columns:
+            protocol_lines.append(
+                f"Execution order: RANDOMIZED (seed {self.current_random_seed}); run in the "
+                "order listed, numbers are the run_order column of the exported table"
+            )
         else:
-            protocol_lines.append("Execution order: SEQUENTIAL")
+            protocol_lines.append("Execution order: SEQUENTIAL (as in the exported table)")
 
         protocol_lines.append("")
 
         # Sample details
-        for idx, (_, row) in enumerate(samples.iterrows(), 1):
-            protocol_lines.append(f"Experiment {idx}:")
+        for position, (_, row) in enumerate(samples.iterrows(), 1):
+            run = int(row["run_order"]) if "run_order" in row else position
+            label = f"Run {run}"
+            if "experiment_id" in row:
+                label += f" (experiment_id {int(row['experiment_id'])})"
+            protocol_lines.append(f"{label}:")
             for var in self.current_variables:
                 if var.name in row:
                     protocol_lines.append(f"  {var.name}: {row[var.name]}")
@@ -211,7 +270,10 @@ class GUIComponents:
             elif format_type == "excel":
                 # Check if openpyxl is available
                 if not HAS_OPENPYXL:
-                    self.export_download_area.value = "<p style='color: red;'>Excel export requires openpyxl. Install with: pip install openpyxl</p>"
+                    self.export_download_area.value = (
+                        "<p style='color: red;'>Excel export requires openpyxl. "
+                        "Install with: pip install openpyxl</p>"
+                    )
                     return
 
                 # Export as Excel with multiple sheets
@@ -249,8 +311,9 @@ class GUIComponents:
                 excel_content = base64.b64encode(buffer.getvalue()).decode()
                 download_link = f"""
                 <p>Complete data package exported as Excel</p>
-                <a download="doe_complete.xlsx" href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{excel_content}" 
-                   style="background-color: #28a745; color: white; padding: 10px 15px; 
+                <a download="doe_complete.xlsx"
+                   href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{excel_content}"
+                   style="background-color: #28a745; color: white; padding: 10px 15px;
                           text-decoration: none; border-radius: 4px; display: inline-block;">
                     📥 Download doe_complete.xlsx
                 </a>
@@ -320,7 +383,8 @@ class GUIComponents:
             <div style='margin: 10px 0; font-weight: bold; color: #555;'>
                 <span style='display: inline-block; width: 150px;'>Variable Name</span>
                 <span style='display: inline-block; width: 120px;'>Type</span>
-                <span style='display: inline-block; width: 200px;'>Parameters (Min, Max, Step/Categories)</span>
+                <span style='display: inline-block; width: 200px;'>
+                    Parameters (Min, Max, Step/Categories)</span>
                 <span style='display: inline-block; width: 150px;'>Description</span>
                 <span style='display: inline-block; width: 40px;'></span>
             </div>
@@ -329,13 +393,20 @@ class GUIComponents:
         # Initialize display
         self._update_variable_display()
 
+        variable_scroll = widgets.Box(
+            children=[self.variable_list],
+            layout=widgets.Layout(
+                max_height="320px", overflow_y="auto", border="1px solid #eeeeee", padding="4px"
+            ),
+        )
+
         return widgets.VBox(
-            [controls, headers, widgets.HTML("<hr style='margin: 5px 0;'>"), self.variable_list]
+            [controls, headers, widgets.HTML("<hr style='margin: 5px 0;'>"), variable_scroll]
         )
 
     def create_sample_size_configurator(self) -> widgets.Widget:
         """Create sample size configuration interface."""
-        # Sample size slider
+        # Sample size slider - bar spans from the recommended minimum to 100.
         self.sample_size_slider = widgets.IntSlider(
             value=25,
             min=4,
@@ -346,12 +417,42 @@ class GUIComponents:
             layout=widgets.Layout(width="400px"),
         )
 
+        # Free-typing number box kept in sync with the slider. Unlike the
+        # slider it has no min/max, so a user can type a value above 100 or
+        # below the recommended minimum and it is used as-is.
+        self.sample_size_input = widgets.IntText(value=25, layout=widgets.Layout(width="80px"))
+
+        self._syncing_sample_size = False
+
+        def _on_slider_change(change: Dict[str, Any]) -> None:
+            if self._syncing_sample_size:
+                return
+            self._syncing_sample_size = True
+            self.sample_size_input.value = change["new"]
+            self._syncing_sample_size = False
+
+        def _on_input_change(change: Dict[str, Any]) -> None:
+            if self._syncing_sample_size:
+                return
+            self._syncing_sample_size = True
+            # Only move the bar; the bar can't visually go below its
+            # recommended-minimum floor or above 100, but the typed value
+            # itself is left untouched either way.
+            slider = self.sample_size_slider
+            self.sample_size_slider.value = max(slider.min, min(change["new"], slider.max))
+            self._syncing_sample_size = False
+
+        self.sample_size_slider.observe(_on_slider_change, names="value")
+        self.sample_size_input.observe(_on_input_change, names="value")
+
         # Minimum size label
         self.min_size_label = widgets.HTML(
             value="<i>Minimum recommended: 4 samples</i>", layout=widgets.Layout(margin="5px 0")
         )
 
-        return widgets.VBox([self.sample_size_slider, self.min_size_label])
+        return widgets.VBox(
+            [widgets.HBox([self.sample_size_slider, self.sample_size_input]), self.min_size_label]
+        )
 
     def create_seed_configurator(self) -> widgets.Widget:
         """Create random seed configuration interface."""
@@ -372,12 +473,15 @@ class GUIComponents:
 
         # Add explanation text
         seed_explanation = widgets.HTML(
-            value="<i style='color: #666; font-size: 11px;'>Seed controls randomization - same seed produces identical results</i>",
+            value=(
+                "<i style='color: #666; font-size: 11px;'>Seed controls randomization - "
+                "same seed produces identical results</i>"
+            ),
             layout=widgets.Layout(margin="5px 0px 0px 10px"),
         )
 
         def generate_new_seed(button):
-            self.random_seed.value = np.random.randint(1, 10000)
+            self.random_seed.value = int(np.random.randint(1, 2**31))
 
         new_seed_button.on_click(generate_new_seed)
 
@@ -398,6 +502,70 @@ class GUIComponents:
 
         return self.advanced_accordion
 
+    def create_design_options(self) -> widgets.Widget:
+        """Replicates, centre points, blocks and run order: what turns a set of
+        points into a run sheet you can analyse (pure error, curvature, day or
+        lot effects, drift)."""
+        style = {"description_width": "150px"}
+        self.center_points_input = widgets.BoundedIntText(
+            value=0, min=0, max=50, description="Centre points:", style=style
+        )
+        self.replicates_input = widgets.BoundedIntText(
+            value=1, min=1, max=10, description="Replicates of each run:", style=style
+        )
+        self.blocks_input = widgets.BoundedIntText(
+            value=1, min=1, max=20, description="Blocks (days / lots):", style=style
+        )
+        self.randomize_input = widgets.Checkbox(
+            value=False, description="Randomize run order (uses the seed)", indent=False
+        )
+        panel = widgets.VBox(
+            [
+                widgets.HTML(
+                    "<i style='color:#666;'>Centre points (all variables at their middle) "
+                    "and replicates show the measurement scatter and curvature. Blocks split "
+                    "the runs over days or precursor lots; a random run order keeps drift "
+                    "from lining up with a variable. With the defaults the design is left "
+                    "unchanged.</i>"
+                ),
+                self.center_points_input,
+                self.replicates_input,
+                self.blocks_input,
+                self.randomize_input,
+            ]
+        )
+        accordion = widgets.Accordion(children=[panel], selected_index=None)
+        accordion.set_title(0, "Design Options (centre points, replicates, blocks, run order)")
+        return accordion
+
+    def get_design_options(self) -> Dict[str, Any]:
+        if not hasattr(self, "center_points_input"):
+            return {}
+        return {
+            "n_center": self.center_points_input.value,
+            "n_replicates": self.replicates_input.value,
+            "n_blocks": self.blocks_input.value,
+            "randomize": self.randomize_input.value,
+        }
+
+    def create_design_notes(self) -> widgets.HTML:
+        """Notes about the last generated design (actual run count, balance, ...)."""
+        self.design_notes = widgets.HTML("")
+        return self.design_notes
+
+    def set_design_notes(self, notes: List[str]) -> None:
+        if not hasattr(self, "design_notes"):
+            return
+        if not notes:
+            self.design_notes.value = ""
+            return
+        items = "".join(f"<li>{html.escape(note)}</li>" for note in notes)
+        self.design_notes.value = (
+            "<div style='background:#f5f8fc; border-left:3px solid #2E86AB; "
+            "padding:6px 12px; margin:6px 0; font-size:13px; color:#333;'>"
+            f"<b>About this design</b><ul style='margin:4px 0;'>{items}</ul></div>"
+        )
+
     def create_generation_controls(self) -> widgets.Widget:
         """Create sample generation control interface."""
         # Generate button
@@ -417,8 +585,16 @@ class GUIComponents:
         )
 
         # Store reference to generation controls for event binding
-        self._generation_controls = widgets.HBox(
-            [self.generate_button, widgets.HTML("&nbsp;" * 3), self.regenerate_button]
+        # Errors of a generation appear right below the buttons, where the user is looking
+        # (they used to show only in the status line under the page title, far above).
+        self.generation_message = widgets.HTML("")
+        self._generation_controls = widgets.VBox(
+            [
+                widgets.HBox(
+                    [self.generate_button, widgets.HTML("&nbsp;" * 3), self.regenerate_button]
+                ),
+                self.generation_message,
+            ]
         )
 
         return self._generation_controls
@@ -440,18 +616,29 @@ class GUIComponents:
     def create_metrics_section(self) -> widgets.Widget:
         """Create quality metrics display section."""
         self.metrics_display = widgets.HTML()
-        return self.metrics_display
+        return widgets.Box(
+            children=[self.metrics_display],
+            layout=widgets.Layout(
+                height="180px", overflow_y="scroll", border="1px solid #ddd", padding="8px"
+            ),
+        )
 
     def create_summary_section(self) -> widgets.Widget:
         """Create summary statistics section."""
         self.summary_display = widgets.HTML()
-        return self.summary_display
+        return widgets.Box(
+            children=[self.summary_display],
+            layout=widgets.Layout(
+                height="200px", overflow_y="scroll", border="1px solid #ddd", padding="8px"
+            ),
+        )
 
     def create_protocol_section(self) -> widgets.Widget:
         """Create experimental protocol section."""
-        # Randomization options
-        self.randomize_order = widgets.Checkbox(
-            value=True, description="Randomize experimental order", style=self.INPUT_STYLE
+        order_note = widgets.HTML(
+            "<i>The protocol follows the run order of the design. Tick 'Randomize run order' "
+            "in the design options to randomize it (seeded, recorded in the run_order "
+            "column).</i>"
         )
 
         # Export protocol button
@@ -467,7 +654,7 @@ class GUIComponents:
 
         self.protocol_display = widgets.HTML()
 
-        return widgets.VBox([self.randomize_order, export_protocol_button, self.protocol_display])
+        return widgets.VBox([order_note, export_protocol_button, self.protocol_display])
 
     def create_visualization_controls(self) -> widgets.Widget:
         """Create visualization control interface."""
@@ -528,7 +715,7 @@ class GUIComponents:
 
         # Export button
         export_button = widgets.Button(
-            description="Export Data",
+            description="Export Table",
             button_style="success",
             icon="download",
             layout=widgets.Layout(width="150px"),
@@ -564,19 +751,25 @@ class GUIComponents:
 
         # Parameter inputs using Text widgets to allow comma input
         min_input = widgets.Text(
-            value=str(variable.min_value) if variable and variable.min_value else "1.0",
+            value=(
+                str(variable.min_value) if variable and variable.min_value is not None else "1.0"
+            ),
             placeholder="Min",
             layout=widgets.Layout(width="80px"),
         )
 
         max_input = widgets.Text(
-            value=str(variable.max_value) if variable and variable.max_value else "10.0",
+            value=(
+                str(variable.max_value) if variable and variable.max_value is not None else "10.0"
+            ),
             placeholder="Max",
             layout=widgets.Layout(width="80px"),
         )
 
         step_input = widgets.Text(
-            value=str(variable.step_size) if variable and variable.step_size else "1.0",
+            value=(
+                str(variable.step_size) if variable and variable.step_size is not None else "1.0"
+            ),
             placeholder="Step",
             layout=widgets.Layout(width="80px"),
         )
@@ -584,12 +777,12 @@ class GUIComponents:
         # Add validation handlers that trigger on Enter or when losing focus
         def create_validator(widget, default_val):
             def on_submit(sender):
-                try:
-                    # Parse using your existing method that handles commas
-                    parsed_val = self._parse_float(widget.value)
+                parsed_val = self._parse_float(widget.value)
+                if parsed_val is None:
+                    widget.layout.border = "2px solid #c0392b"  # keep the text, mark the typo
+                else:
+                    widget.layout.border = ""
                     widget.value = str(parsed_val)
-                except:
-                    widget.value = str(default_val)
 
             return on_submit
 
@@ -597,6 +790,14 @@ class GUIComponents:
         min_input.on_submit(create_validator(min_input, 1.0))
         max_input.on_submit(create_validator(max_input, 10.0))
         step_input.on_submit(create_validator(step_input, 1.0))
+
+        log_input = widgets.Checkbox(
+            value=bool(variable and variable.log_scale),
+            description="log",
+            indent=False,
+            tooltip="Sample evenly in log10 space (min must be above 0)",
+            layout=widgets.Layout(width="60px"),
+        )
 
         categories_input = widgets.Text(
             value=",".join(variable.categories) if variable and variable.categories else "A,B,C",
@@ -623,7 +824,7 @@ class GUIComponents:
         def update_parameters(change):
             var_type = change["new"]
             if var_type == "continuous":
-                param_container.children = [min_input, max_input]
+                param_container.children = [min_input, max_input, log_input]
             elif var_type == "discrete":
                 param_container.children = [min_input, max_input, step_input]
             else:  # categorical
@@ -643,12 +844,29 @@ class GUIComponents:
             layout=widgets.Layout(margin="2px 0"),
         )
 
+        # Inline validation: red border when min >= max
+        def _validate_range(change=None):
+            try:
+                if type_selector.value == "categorical":
+                    widget_row.layout.border = ""
+                    return
+                min_val = float(str(min_input.value).replace(",", "."))
+                max_val = float(str(max_input.value).replace(",", "."))
+                widget_row.layout.border = "2px solid #d32f2f" if min_val >= max_val else ""
+            except (ValueError, TypeError):
+                pass
+
+        min_input.observe(lambda c: _validate_range(), names="value")
+        max_input.observe(lambda c: _validate_range(), names="value")
+        type_selector.observe(lambda c: _validate_range(), names="value")
+
         # Store references for data extraction
         widget_row.name_input = name_input
         widget_row.type_selector = type_selector
         widget_row.min_input = min_input
         widget_row.max_input = max_input
         widget_row.step_input = step_input
+        widget_row.log_input = log_input
         widget_row.categories_input = categories_input
         widget_row.desc_input = desc_input
 
@@ -688,48 +906,89 @@ class GUIComponents:
 
         # Update counter
         count = len(self.variable_widgets)
-        min_samples = max(count**2, 4)
-        self.variable_count_label.value = f"<b>Variables: {count}</b> (Min samples: {min_samples})"
+        # Floor: enough runs to estimate one effect per variable. The
+        # recommendation for fitting a model is ~10 runs per variable;
+        # fixed-size designs (orthogonal arrays, DSD) ignore the size anyway.
+        min_samples = max(count + 1, 4)
+        recommended = 10 * count
+        self.variable_count_label.value = (
+            f"<b>Variables: {count}</b> (about {recommended} runs to fit a model)"
+        )
 
-        # Update minimum sample size if slider exists
+        # Update minimum sample size if slider exists. This only moves the
+        # bar's floor/position - it never overwrites a value the user has
+        # typed into sample_size_input, so a deliberately-smaller typed
+        # value keeps working.
         if hasattr(self, "sample_size_slider") and count > 0:
-            self.sample_size_slider.min = min_samples
-            if self.sample_size_slider.value < min_samples:
-                self.sample_size_slider.value = min_samples
+            self._syncing_sample_size = True
+            try:
+                # If the recommended minimum exceeds the bar's cap, raise the
+                # cap so the recommended value stays reachable on the bar.
+                if min_samples > self.sample_size_slider.max:
+                    self.sample_size_slider.max = min_samples
+                self.sample_size_slider.min = min_samples
+                if self.sample_size_slider.value < min_samples:
+                    self.sample_size_slider.value = min_samples
+            finally:
+                self._syncing_sample_size = False
             # Update the label too
             if hasattr(self, "min_size_label"):
-                self.min_size_label.value = f"<i>Minimum recommended: {min_samples} samples</i>"
+                self.min_size_label.value = (
+                    f"<i>About {recommended} samples (10 per variable) to fit a model to "
+                    "the results; fewer is fine for a first screening. Orthogonal arrays and "
+                    "definitive screening designs set their own size.</i>"
+                )
 
     def get_variables_from_widgets(self) -> List[Variable]:
-        """Extract variables from current widget state."""
+        """Extract variables from current widget state.
+
+        Anything that cannot be turned into a valid variable (a number that does not parse, a
+        range that fails validation) is listed in self.variable_errors; the caller must not
+        generate a design while it is not empty."""
         variables = []
+        self.variable_errors = []
 
         for widget in self.variable_widgets:
+            name = widget.name_input.value.strip()
             try:
-                name = widget.name_input.value.strip()
                 if not name:
                     continue
 
                 var_type = VariableType(widget.type_selector.value)
                 description = widget.desc_input.value.strip()
 
+                def number(field, label, _widget=widget, _name=name):
+                    value = self._parse_float(getattr(_widget, field).value)
+                    if value is None:
+                        shown = getattr(_widget, field).value
+                        self.variable_errors.append(f"{_name}: {label} {shown!r} is not a number")
+                    return value
+
                 if var_type == VariableType.CONTINUOUS:
+                    minimum, maximum = number("min_input", "Min"), number("max_input", "Max")
+                    if None in (minimum, maximum):
+                        continue
                     variable = Variable(
                         name=name,
                         type=var_type,
                         description=description,
-                        min_value=self._parse_float(widget.min_input.value),
-                        max_value=self._parse_float(widget.max_input.value),
+                        min_value=minimum,
+                        max_value=maximum,
+                        log_scale=widget.log_input.value,
                     )
 
                 elif var_type == VariableType.DISCRETE:
+                    minimum, maximum = number("min_input", "Min"), number("max_input", "Max")
+                    step = number("step_input", "Step")
+                    if None in (minimum, maximum, step):
+                        continue
                     variable = Variable(
                         name=name,
                         type=var_type,
                         description=description,
-                        min_value=self._parse_float(widget.min_input.value),
-                        max_value=self._parse_float(widget.max_input.value),
-                        step_size=self._parse_float(widget.step_input.value),
+                        min_value=minimum,
+                        max_value=maximum,
+                        step_size=step,
                     )
 
                 elif var_type == VariableType.CATEGORICAL:
@@ -747,27 +1006,33 @@ class GUIComponents:
                 if is_valid:
                     variables.append(variable)
                 else:
-                    print(f"Warning: Invalid variable '{name}': {error_msg}")
+                    logger.warning("Invalid variable %r: %s", name, error_msg)
+                    self.variable_errors.append(f"{name}: {error_msg}")
 
             except Exception as e:
-                print(f"Warning: Error processing variable: {str(e)}")
+                logger.warning("Error processing variable: %s", e)
+                self.variable_errors.append(f"{name or 'a variable'}: {e}")
 
         return variables
 
     def get_sampling_parameters(self) -> Dict[str, Any]:
         """Get sampling parameters from UI."""
         params = {
-            "n_samples": self.sample_size_slider.value
-            if hasattr(self, "sample_size_slider")
-            else 25,
+            "n_samples": self.sample_size_input.value if hasattr(self, "sample_size_input") else 25,
             "random_state": self.random_seed.value if hasattr(self, "random_seed") else 42,
         }
 
         # Add advanced options if available
         if hasattr(self, "advanced_options_container"):
             for child in self.advanced_options_container.children:
-                if hasattr(child, "value"):
-                    params[child.description.replace(":", "")] = child.value
+                name = getattr(child, "_param", None)
+                if name is None:
+                    continue
+                if isinstance(child, widgets.FileUpload):
+                    if child.value:
+                        params[name] = pd.read_csv(io.BytesIO(bytes(child.value[0]["content"])))
+                    continue
+                params[name] = child.value
 
         return params
 
@@ -793,31 +1058,44 @@ class GUIComponents:
 
     def update_data_table(self, container: widgets.Widget, data: pd.DataFrame):
         """Update data table display."""
-        # Find the Output widget in the container
         output_widget = None
         if hasattr(container, "children") and len(container.children) > 1:
-            output_widget = container.children[1]  # Second child should be the Output widget
+            output_widget = container.children[1]
 
         if output_widget and hasattr(output_widget, "clear_output"):
             with output_widget:
                 output_widget.clear_output(wait=True)
 
                 if len(data) > 0:
-                    # Show more rows and make it scrollable
-                    display_data = data.head(50)  # Show first 50 rows
+                    display_data = data.head(50)
+
+                    # Smart decimal formatting per column:
+                    # - all integer-valued → no decimals
+                    # - any fractional value → 2 decimal places
+                    fmt = {}
+                    for col in display_data.columns:
+                        if pd.api.types.is_numeric_dtype(display_data[col]):
+                            numeric = pd.to_numeric(display_data[col], errors="coerce").dropna()
+                            if len(numeric) > 0:
+                                fmt[col] = "{:.0f}" if (numeric % 1 == 0).all() else "{:.2f}"
+
+                    # Display with 1-based index
+                    display_copy = display_data.copy()
+                    display_copy.index = range(1, len(display_copy) + 1)
 
                     display(
-                        display_data.style.set_table_attributes(
+                        display_copy.style.set_table_attributes(
                             'style="font-size: 12px; width: 100%;"'
-                        ).format(precision=3)
+                        ).format(fmt)
                     )
 
                     if len(data) > 50:
-                        print(
-                            f"\nShowing first 50 of {len(data)} samples. Full data available for export."
+                        logger.info(
+                            "Showing first 50 of %d samples; full data available for export.",
+                            len(data),
                         )
                 else:
-                    print("No samples generated yet")
+                    logger.info("No samples generated yet.")
 
     def update_summary_statistics(
         self, container: widgets.Widget, data: pd.DataFrame, variables: List[Variable]
@@ -840,7 +1118,12 @@ class GUIComponents:
         html_parts.append("<h4>Variable Statistics:</h4>")
         html_parts.append("<table style='border-collapse: collapse; margin: 10px 0;'>")
         html_parts.append(
-            "<tr style='border-bottom: 1px solid #ddd;'><th style='padding: 5px; text-align: left;'>Variable</th><th style='padding: 5px;'>Type</th><th style='padding: 5px;'>Min</th><th style='padding: 5px;'>Max</th><th style='padding: 5px;'>Unique</th></tr>"
+            "<tr style='border-bottom: 1px solid #ddd;'>"
+            "<th style='padding: 5px; text-align: left;'>Variable</th>"
+            "<th style='padding: 5px;'>Type</th>"
+            "<th style='padding: 5px;'>Min</th>"
+            "<th style='padding: 5px;'>Max</th>"
+            "<th style='padding: 5px;'>Unique</th></tr>"
         )
 
         for var in variables:
@@ -935,6 +1218,9 @@ class GUIComponents:
         # Clear existing options
         options_widgets = []
 
+        # Each option widget carries the keyword its algorithm reads in ._param
+        # (the label is for people; it used to be the keyword, so these
+        # options never reached the algorithms).
         if algorithm_name == "Latin Hypercube Sampling":
             optimization_dropdown = widgets.Dropdown(
                 options=[("None", None), ("Random-CD", "random-cd"), ("Lloyd", "lloyd")],
@@ -942,13 +1228,38 @@ class GUIComponents:
                 description="Optimization:",
                 style=self.INPUT_STYLE,
             )
+            optimization_dropdown._param = "optimization"
             options_widgets.append(optimization_dropdown)
 
         elif algorithm_name in ["Sobol Sequences", "Halton Sequences"]:
             scramble_checkbox = widgets.Checkbox(
                 value=True, description="Apply scrambling", style=self.INPUT_STYLE
             )
+            scramble_checkbox._param = "scramble"
             options_widgets.append(scramble_checkbox)
+
+        elif algorithm_name == "Orthogonal Arrays":
+            levels_dropdown = widgets.Dropdown(
+                options=[2, 3, 5, 7],
+                value=3,
+                description="Levels for continuous variables:",
+                style={"description_width": "220px"},
+            )
+            levels_dropdown._param = "continuous_levels"
+            options_widgets.append(levels_dropdown)
+
+        elif algorithm_name == "Augment Existing Design":
+            upload = widgets.FileUpload(
+                accept=".csv", multiple=False, description="Existing design (CSV)"
+            )
+            upload._param = "existing"
+            options_widgets += [
+                widgets.HTML(
+                    "<i>CSV with one column per variable (same names), e.g. this app's "
+                    "export or a Global_analyzer table. Extra columns are ignored.</i>"
+                ),
+                upload,
+            ]
 
         # Set content
         if options_widgets:

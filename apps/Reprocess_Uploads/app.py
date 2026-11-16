@@ -18,6 +18,7 @@ from data_manager import PROCESS_TYPES, find_plans, repair_upload
 from perotf_utils.auth_manager import AuthenticationManager
 from perotf_utils.auth_ui import AuthenticationUI
 from perotf_utils.config import ADMIN_USERS, API_ENDPOINT, URL_BASE
+from perotf_utils.manual import manual_panel
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,7 @@ class ReprocessUploadsApp:
         self.dashboard = widgets.VBox(
             [
                 widgets.HTML(INTRO),
+                manual_panel(__file__),
                 self.auth_ui.get_widget(),
                 self.status_html,
                 widgets.HTML("<h4 style='margin:10px 0 4px 0'>1. Search</h4>"),

@@ -155,21 +155,73 @@ def get_samples_with_substrates(url, token, upload_id, sample_type=ENTRY_TYPES["
 BATCH_LOOKUP_UPLOAD_CHUNK = 200
 
 
+# Buckets of the upload_id aggregation in upload_ids_with_entries; a full answer may have
+# been cut off, so the lookup then reads the entries instead.
+UPLOAD_AGGREGATION_SIZE = 10000
+
+
+def _entry_type_query(entry_type):
+    """Search query for one entry type or several (list, tuple or set)."""
+    if isinstance(entry_type, (list, tuple, set)):
+        return {"entry_type:any": sorted(entry_type)}
+    return {"entry_type": entry_type}
+
+
+def upload_ids_with_entries(url, token, entry_type):
+    """Ids of the uploads that hold at least one entry of entry_type (one type or a list).
+
+    One terms aggregation over upload_id downloads no entries at all, whatever their number
+    (KIT addition, as Process_JV_Overview did it). When the aggregation fails or may be cut
+    off, the upload_id of every entry is read instead (HZB's way, slower for JV)."""
+    query = _entry_type_query(entry_type)
+    try:
+        response = requests.post(
+            f"{url}/entries/query",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "owner": "visible",
+                "query": query,
+                "pagination": {"page_size": 0},
+                "aggregations": {
+                    "uploads": {
+                        "terms": {
+                            "quantity": "upload_id",
+                            "pagination": {"page_size": UPLOAD_AGGREGATION_SIZE},
+                        }
+                    }
+                },
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        buckets = response.json()["aggregations"]["uploads"]["terms"]["data"]
+        if len(buckets) < UPLOAD_AGGREGATION_SIZE:
+            return {bucket["value"] for bucket in buckets}
+    except (requests.RequestException, KeyError, TypeError, ValueError) as error:
+        logger.info("upload_id aggregation failed (%s); reading the entries instead", error)
+    entries = query_all(
+        url,
+        token,
+        "entries/query",
+        {
+            "owner": "visible",
+            "query": query,
+            "required": {"include": ["upload_id"]},
+            "pagination": {"page_size": 10000},
+        },
+    )
+    return {e["upload_id"] for e in entries if "upload_id" in e}
+
+
 def get_all_batches_wth_data(url, token, entry_type):
-    """Lab ids of the batches in every upload that has an entry of entry_type.
+    """Lab ids of the batches in every upload that has an entry of entry_type (one type or a
+    list of types).
 
     Asks only for what it needs, so the answers stay small even for JV, the technique with
-    the most entries: the upload_id of each measurement (metadata endpoint; the archive
-    endpoint answered with an HTTP error for JV and MPPT), then the lab_id of the batches in
-    those uploads, a chunk of uploads at a time. A batch entry without lab_id is skipped."""
-    query = {
-        "owner": "visible",
-        "query": {"entry_type": entry_type},
-        "required": {"include": ["upload_id"]},
-        "pagination": {"page_size": 10000},
-    }
-    entries = query_all(url, token, "entries/query", query)
-    upload_ids = sorted({e["upload_id"] for e in entries if "upload_id" in e})
+    the most entries: the uploads that hold such entries (upload_ids_with_entries), then the
+    lab_id of the batches in those uploads, a chunk of uploads at a time. A batch entry
+    without lab_id is skipped."""
+    upload_ids = sorted(upload_ids_with_entries(url, token, entry_type))
     batch_ids = set()
     for start in range(0, len(upload_ids), BATCH_LOOKUP_UPLOAD_CHUNK):
         query = {
@@ -477,6 +529,142 @@ def download_raw_file(url, token, upload_id, path):
     return response.content
 
 
+# --- Changing files in an upload (Entry_Auditor's corrections) ----------------------------
+
+
+class UploadConflictError(RuntimeError):
+    """NOMAD refused a write that would have lost data: the entry changed since it was read
+    (entry_hash), or a file that must not be overwritten already exists."""
+
+
+def _safe_raw_parts(folder, filename):
+    """(folder, filename) checked for path tricks: no '..' or absolute parts, and a plain
+    file name. NOMAD checks this too; the app must never even ask for it."""
+    folder = (folder or "").strip("/")
+    parts = [part for part in folder.split("/") if part]
+    if any(part in (".", "..") or "\\" in part for part in parts):
+        raise ValueError(f"unsafe folder {folder!r}")
+    if not filename or "/" in filename or "\\" in filename or filename in (".", ".."):
+        raise ValueError(f"unsafe file name {filename!r}")
+    return "/".join(parts), filename
+
+
+def get_upload(url, token, upload_id):
+    """NOMAD's metadata of one upload (the `data` of GET /uploads/{id}): process_running,
+    process_status, published, publish_time, main_author, ..."""
+    response = requests.get(
+        f"{url}/uploads/{upload_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json()["data"]
+
+
+def get_entry_hashes(url, token, entry_ids):
+    """{entry_id: entry_hash}. NOMAD changes an entry's hash whenever its file changes; passed
+    to put_raw_file, it makes NOMAD refuse the write if someone changed the entry meanwhile."""
+    entry_ids = list(entry_ids)
+    if not entry_ids:
+        return {}
+    query = {
+        "required": {"include": ["entry_id", "entry_hash"]},
+        "owner": "visible",
+        "query": {"entry_id:any": entry_ids},
+        "pagination": {"page_size": DEFAULT_PAGE_SIZE},
+    }
+    return {
+        entry["entry_id"]: entry.get("entry_hash")
+        for entry in query_all(url, token, "entries/query", query)
+        if entry.get("entry_id")
+    }
+
+
+def put_raw_file(
+    url,
+    token,
+    upload_id,
+    folder,
+    filename,
+    content,
+    mime_type,
+    *,
+    overwrite=True,
+    trigger_processing=True,
+    entry_hash=None,
+):
+    """Write one file into `folder` ('' is the upload root) of an unpublished upload.
+
+    overwrite=False: NOMAD refuses to replace an existing file (for backups).
+    trigger_processing=False: the file is stored without reprocessing the upload (for files
+    NOMAD never parses, such as hidden backups).
+    entry_hash: the hash of the entry whose mainfile this is, read before the file was
+    changed; NOMAD then refuses the write if the entry changed in between.
+    An uploaded archive is never unpacked. Raises UploadConflictError when NOMAD refuses for
+    one of these reasons, ValueError for an unsafe path, requests.HTTPError otherwise."""
+    folder, filename = _safe_raw_parts(folder, filename)
+    params = {
+        "overwrite_if_exists": "true" if overwrite else "false",
+        "trigger_processing": "true" if trigger_processing else "false",
+        "auto_decompress": "false",
+    }
+    if entry_hash:
+        params["entry_hash"] = entry_hash
+    target = f"{url}/uploads/{upload_id}/raw/" + (f"{quote(folder, safe='/')}/" if folder else "")
+    response = requests.put(
+        target,
+        params=params,
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": (filename, content, mime_type)},
+        timeout=REQUEST_TIMEOUT,
+    )
+    refused_existing = (
+        not overwrite and response.status_code == 400 and "already exists" in response.text
+    )
+    if response.status_code == 409 or refused_existing:
+        raise UploadConflictError(
+            f"NOMAD refused to write {folder + '/' if folder else ''}{filename}: "
+            f"{response.text[:300]}"
+        )
+    response.raise_for_status()
+
+
+def wait_for_upload(url, token, upload_id, timeout=120.0, poll_interval=1.5):
+    """Poll until the upload is no longer processing. Returns its process_status ("SUCCESS",
+    "FAILURE", ...), or None when it still runs after `timeout` seconds."""
+    waited = 0.0
+    while True:
+        upload = get_upload(url, token, upload_id)
+        if not upload.get("process_running"):
+            return upload.get("process_status")
+        if waited >= timeout:
+            logger.warning("Upload %s still processing after %.0f s", upload_id, waited)
+            return None
+        time.sleep(poll_interval)
+        waited += poll_interval
+
+
+def list_raw_folder(url, token, upload_id, folder, page_size=1000):
+    """Names of the files directly inside `folder` of an upload; [] when it does not exist."""
+    folder, _ = _safe_raw_parts(folder, "x")
+    names = []
+    for page in range(1, MAX_PAGES + 1):
+        response = requests.get(
+            f"{url}/uploads/{upload_id}/rawdir/{quote(folder, safe='/')}",
+            params={"page": page, "page_size": page_size},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        if response.status_code == 404:
+            return names
+        response.raise_for_status()
+        content = (response.json().get("directory_metadata") or {}).get("content") or []
+        names.extend(item["name"] for item in content if item.get("is_file"))
+        if len(content) < page_size:
+            return names
+    raise RuntimeError(f"listing {folder} of upload {upload_id} did not end")
+
+
 def get_sample_entry_links(url, token, sample_ids):
     """
     Batch query: returns {lab_id: full_gui_url} for all sample_ids in one API call.
@@ -677,7 +865,10 @@ def get_all_eqe(url, token, sample_ids, eqe_type=ENTRY_TYPES["eqe"]):
             "metadata": "*",
         },
         "owner": "visible",
-        "query": {"entry_references.target_entry_id:any": entry_ids, "entry_type": eqe_type},
+        "query": {
+            "entry_references.target_entry_id:any": entry_ids,
+            **_entry_type_query(eqe_type),  # one type, or a list (ENTRY_TYPE_FAMILIES)
+        },
         "pagination": {"page_size": 10000},
     }
     linked_data = query_all(url, token, "entries/archive/query", query)
@@ -701,7 +892,10 @@ def get_all_mppt(url, token, sample_ids, mppt_type=ENTRY_TYPES["mppt"]):
             "metadata": "*",
         },
         "owner": "visible",
-        "query": {"entry_references.target_entry_id:any": entry_ids, "entry_type": mppt_type},
+        "query": {
+            "entry_references.target_entry_id:any": entry_ids,
+            **_entry_type_query(mppt_type),  # one type, or a list (ENTRY_TYPE_FAMILIES)
+        },
         "pagination": {"page_size": 100},
     }
     linked_data = query_all(url, token, "entries/archive/query", query)

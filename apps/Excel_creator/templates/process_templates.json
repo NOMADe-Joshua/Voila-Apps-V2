@@ -42,7 +42,7 @@
         {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 1, "spinsteps": 1, "antisolvent": false}},
         {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 0, "spinsteps": 1, "antisolvent": false}},
         {"process": "Seq-Evaporation", "config": {"materials": 2}},
-        {"process": "Close Space Sublimation", "config": {"materials": 1, "milling": true, "mixing_ratio": false}},
+        {"process": "Close Space Sublimation", "config": {"materials": 1, "milling": true}},
         {"process": "Annealing"},
         {"process": "Spin Coating", "config": {"solvents": 1, "solutes": 0, "spinsteps": 1, "antisolvent": false}},
         {"process": "Seq-Evaporation", "config": {"materials": 2}},

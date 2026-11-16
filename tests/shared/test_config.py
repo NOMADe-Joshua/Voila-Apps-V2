@@ -78,3 +78,42 @@ def test_api_calls_defaults_come_from_entry_types():
     for func_name, (param, key) in defaults.items():
         sig = inspect.signature(getattr(api_calls, func_name))
         assert sig.parameters[param].default == config.ENTRY_TYPES[key], func_name
+
+
+def test_entry_type_families_are_lists_holding_the_single_types():
+    families = config.ENTRY_TYPE_FAMILIES
+    for kind, types in families.items():
+        assert isinstance(types, list) and all(isinstance(t, str) for t in types), kind
+        assert len(set(types)) == len(types), kind
+    for kind, key in [
+        ("jv", "jv"),
+        ("eqe", "eqe"),
+        ("eqe", "eqe_tfl_gammabox"),
+        ("mppt", "mppt"),
+        ("sem", "sem"),
+        ("xrd", "xrd"),
+        ("abspl", "abspl"),
+        ("uvvis", "uvvis"),
+        ("substrate", "substrate"),
+        ("spin_coating", "spin_coating"),
+        ("evaporation", "evaporation"),
+        ("inkjet_printing", "inkjet_printing"),
+        ("annealing", "thermal_annealing"),
+    ]:
+        assert config.ENTRY_TYPES[key] in families[kind], (kind, key)
+
+
+def test_get_all_eqe_asks_for_a_whole_family_with_entry_type_any(monkeypatch):
+    from perotf_utils import api_calls
+
+    queries = []
+
+    def fake_query_all(url, token, endpoint, query):
+        queries.append(query["query"])
+        return [{"entry_id": "S"}] if endpoint == "entries/query" else []
+
+    monkeypatch.setattr(api_calls, "query_all", fake_query_all)
+    api_calls.get_all_eqe("u", "t", ["S1"], eqe_type=config.ENTRY_TYPE_FAMILIES["jv"])
+    assert queries[1]["entry_type:any"] == sorted(config.ENTRY_TYPE_FAMILIES["jv"])
+    api_calls.get_all_eqe("u", "t", ["S1"])
+    assert queries[3]["entry_type"] == config.ENTRY_TYPES["eqe"]

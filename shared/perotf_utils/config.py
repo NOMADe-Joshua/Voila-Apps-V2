@@ -51,11 +51,68 @@ ENTRY_TYPES = {
     "abspl": "peroTF_AbsPLMeasurement",
     "xrd": "peroTF_XRD_XY",
     "uvvis": "peroTF_UVvisMeasurement",
+    # SEM images (Zeiss TIFFs); data.detector_data lists the image files of the entry.
+    "sem": "peroTF_SEM",
     # Base sections from nomad-baseclasses, matched via section_defs.definition_qualified_name
     "base_measurement": "baseclasses.BaseMeasurement",
     "base_process": "baseclasses.BaseProcess",
     "layer_deposition": "baseclasses.LayerDeposition",
     "jv_baseclass": "baseclasses.solar_energy.jvmeasurement.JVMeasurement",
+}
+
+# Every schema class of one kind of process step or measurement. nomad_perotf has a
+# device-specific subclass per tool (CR_SpinBox_SpinCoating, TFL_PEROvap_Evaporation, ...),
+# each its own entry type, so "every spin coating" is a list (classes as in nomad_perotf's
+# perotf_package.py on 2026-11-14; add a new tool class here). api_calls queries a list with
+# entry_type:any. Read by Global_analyzer.
+ENTRY_TYPE_FAMILIES = {
+    "cleaning": ["peroTF_Cleaning", "peroTF_CR_Wetbench_Cleaning", "peroTF_CR_Plasma_Cleaning"],
+    "substrate": ["peroTF_Substrate"],
+    "evaporation": [
+        "peroTF_Evaporation",
+        "peroTF_TFL_Ebeam_Evaporation",
+        "peroTF_CR_Angstrom_Evaporation",
+        "peroTF_TFL_BellJar_Evaporation",
+        "peroTF_UP_PEROvap_Evaporation",
+        "peroTF_TFL_PEROvap_Evaporation",
+        "peroTF_UP_OPTIvap_Evaporation",
+    ],
+    "slot_die_coating": ["peroTF_SlotDieCoating", "peroTF_UP_SlotDieBox_SlotDieCoating"],
+    "spin_coating": [
+        "peroTF_SpinCoating",
+        "peroTF_CR_SpinBox_SpinCoating",
+        "peroTF_CR_ChemistryBox_SpinCoating",
+        "peroTF_CR_MixBox_SpinCoating",
+        "peroTF_CR_OmegaBox_SpinCoating",
+        "peroTF_TFL_AlphaBox_SpinCoating",
+        "peroTF_CR_BetaBox_SpinCoating",
+    ],
+    "inkjet_printing": ["peroTF_InkjetPrinting"],
+    "ald": ["peroTF_ALD"],
+    "blade_coating": ["peroTF_BladeCoating"],
+    "dip_coating": ["peroTF_DipCoating"],
+    "laser_scribing": [],  # no such step in nomad_perotf
+    "annealing": [
+        "peroTF_ThermalAnnealing",
+        "peroTF_CR_ThermalAnnealing",
+        "peroTF_TFL_ThermalAnnealing",
+    ],
+    "sputtering": ["peroTF_Sputtering", "peroTF_TFL_SputterSystem_Sputtering"],
+    "close_space_sublimation": ["peroTF_CloseSpaceSublimation"],
+    "lamination": ["peroTF_Lamination"],
+    "jv": [
+        "peroTF_JVmeasurement",
+        "peroTF_CR_SolSimBox_JVmeasurement",
+        "peroTF_TFL_GammaBox_JVmeasurement",
+    ],
+    # peroTF_EQEmeasurement is ENTRY_TYPES["eqe"]: no longer a class, but older entries have it
+    "eqe": ["peroTF_EQEmeasurement", "peroTF_TFL_GammaBox_EQEmeasurement"],
+    "mppt": ["peroTF_MPPTracking", "peroTF_CR_SolSimBox_MPPTracking"],
+    "sem": ["peroTF_SEM"],
+    "abspl": ["peroTF_AbsPLMeasurement"],
+    "xrd": ["peroTF_XRD_XY"],
+    "uvvis": ["peroTF_UVvisMeasurement"],
+    "pl_imaging": ["peroTF_PLImaging"],
 }
 
 # NOMAD usernames (NOMAD_CLIENT_USER) that see admin-only apps such as the Usage Log.

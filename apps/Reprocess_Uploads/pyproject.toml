@@ -1,6 +1,6 @@
 [project]
 name = "reprocess-uploads"
-version = "1.0.0"
+version = "1.1.0"
 description = "Admin tool: let the current experiment parser write the process entries of unpublished uploads again"
 requires-python = ">=3.10"
 dependencies = [

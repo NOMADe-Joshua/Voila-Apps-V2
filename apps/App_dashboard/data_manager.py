@@ -4,6 +4,11 @@ from dataclasses import dataclass
 
 from perotf_utils.access_token import log_button_usage
 from perotf_utils.config import ADMIN_USERS, NORTH_ENDPOINT
+from perotf_utils.north import (  # noqa: F401 (used through this module by app.py)
+    get_current_user,
+    get_upload_id,
+    get_uploads_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +49,19 @@ CATEGORIES: dict[str, list[AppEntry]] = {
             "fa-project-diagram",
         ),
         AppEntry(
+            "Global_analyzer",
+            "global_analyzer.ipynb",
+            "Global Analyzer",
+            "Plot any result against any process parameter across many batches; correlations, "
+            "Random Forest and suggestions for the next experiments.",
+            "fa-globe",
+        ),
+        AppEntry(
             "MPPT_Analysis",
-            "mppt_plotting.ipynb",
+            "MPPT_analyzer.ipynb",
             "MPPT Analysis",
-            "Plot maximum power point tracking data from NOMAD, fit decay models to the "
-            "curves and download the results.",
+            "Fit degradation models to every MPPT measurement, get T80/T95 and lifetime "
+            "energy yield, and write the fits back to NOMAD.",
             "fa-chart-line",
         ),
         AppEntry(
@@ -86,11 +99,11 @@ CATEGORIES: dict[str, list[AppEntry]] = {
         ),
         AppEntry(
             "SEM_crystal_counter",
-            "image_analysis.ipynb",
-            "SEM Grain Size Analysis",
-            "Estimate the grain size distribution of perovskite films in SEM images via "
-            "edge detection and region analysis.",
-            "fa-image",
+            "SEM_Analyzer.ipynb",
+            "SEM Crystal Counter",
+            "Grain size and film thickness of perovskite films from SEM images, with manual "
+            "correction.",
+            "fa-microscope",
         ),
     ],
     "Data Management": [
@@ -109,6 +122,14 @@ CATEGORIES: dict[str, list[AppEntry]] = {
             "Configure the process sequence of an experiment and generate the Excel file "
             "that documents it for upload to NOMAD.",
             "fa-file-excel",
+        ),
+        AppEntry(
+            "Entry_Auditor",
+            "entry_auditor.ipynb",
+            "Entry Auditor",
+            "Find values spelled differently across the entries of a batch and correct them "
+            "in NOMAD, with a preview and a backup of every changed entry.",
+            "fa-clipboard-check",
         ),
     ],
     "Utilities & Calculators": [
@@ -152,28 +173,106 @@ CATEGORIES: dict[str, list[AppEntry]] = {
 }
 
 
-def get_current_user() -> str:
-    """Return the NOMAD username of the person running this notebook, or '' if unknown."""
-    return os.environ.get("NOMAD_CLIENT_USER", "")
-
-
 def is_admin(user: str) -> bool:
     """Whether this NOMAD user may see admin-only apps (perotf_utils.config.ADMIN_USERS)."""
     return bool(user) and user in ADMIN_USERS
 
 
+HIDE_APPS_ENV = "PEROTF_DASHBOARD_HIDE_APPS"
+SHOW_APPS_ENV = "PEROTF_DASHBOARD_SHOW_APPS"
+GROUP_ORDER_ENV = "PEROTF_DASHBOARD_GROUP_ORDER"
+"""Per-deployment app selection (ported from HZB), set like every other per-Oasis override
+(usually in oasis_local_config.py): comma-separated app folder names or card names to hide,
+or, if SHOW is set, the only ones to show; GROUP_ORDER names the groups to list first. Names
+ignore case and spaces; an unknown name logs a warning and is otherwise ignored. Hidden apps
+stay in the upload and can still be opened directly."""
+
+
+def _normalize_name(name: str) -> str:
+    return "".join(name.split()).lower()
+
+
+def parse_name_list(value: str | None) -> set[str]:
+    """Normalized names from a comma-separated environment value ('' or None gives an empty set)."""
+    return {_normalize_name(part) for part in (value or "").split(",") if part.strip()}
+
+
+def parse_name_order(value: str | None) -> list[str]:
+    """The normalized names of a comma-separated list, in the order given."""
+    return [_normalize_name(part) for part in (value or "").split(",") if part.strip()]
+
+
+def _entry_keys(entry: AppEntry) -> set[str]:
+    return {key for key in (_normalize_name(entry.folder), _normalize_name(entry.name)) if key}
+
+
+def order_categories(
+    categories: dict[str, list[AppEntry]], order: list[str] | None
+) -> dict[str, list[AppEntry]]:
+    """The categories in the order named by `order` (normalized names); categories it does not
+    name follow in their default order. An unknown name logs a warning and is ignored."""
+    if not order:
+        return categories
+    by_key = {_normalize_name(name): name for name in categories}
+    first = []
+    for key in order:
+        if key not in by_key:
+            logger.warning("Dashboard group order: unknown group %r is ignored", key)
+        elif by_key[key] not in first:
+            first.append(by_key[key])
+    rest = [name for name in categories if name not in first]
+    return {name: categories[name] for name in [*first, *rest]}
+
+
+def select_categories(
+    categories: dict[str, list[AppEntry]],
+    hide: set[str] | None = None,
+    show: set[str] | None = None,
+    order: list[str] | None = None,
+) -> dict[str, list[AppEntry]]:
+    """Apply a hide list, an optional allow-list (both normalized names) and a group order.
+    With none of them set the result is exactly `categories`."""
+    hide, show = hide or set(), show or set()
+    known = set()
+    for entries in CATEGORIES.values():
+        for entry in entries:
+            known |= _entry_keys(entry)
+    for unknown in sorted((hide | show) - known):
+        logger.warning("Dashboard app selection: unknown name %r is ignored", unknown)
+
+    def visible(entry: AppEntry) -> bool:
+        keys = _entry_keys(entry)
+        if keys & hide:
+            return False
+        return not show or bool(keys & show)
+
+    return order_categories(
+        {
+            category: [entry for entry in entries if visible(entry)]
+            for category, entries in categories.items()
+        },
+        order,
+    )
+
+
 def visible_categories(user: str) -> dict[str, list[AppEntry]]:
-    """CATEGORIES as this user should see them: admin-only cards are dropped for
-    everyone else, and a category left without cards disappears entirely.
+    """CATEGORIES as this user should see them on this deployment: admin-only cards are
+    dropped for everyone else, the PEROTF_DASHBOARD_* selection is applied, and a category
+    left without cards disappears entirely.
 
     This only hides the card; the app itself checks the user again, since anyone who
     knows the notebook URL could still open it."""
     admin = is_admin(user)
-    visible = {
-        category: [entry for entry in entries if admin or not entry.admin_only]
-        for category, entries in CATEGORIES.items()
-    }
-    return {category: entries for category, entries in visible.items() if entries}
+    selected = select_categories(
+        {
+            category: [entry for entry in entries if admin or not entry.admin_only]
+            for category, entries in CATEGORIES.items()
+        },
+        hide=parse_name_list(os.environ.get(HIDE_APPS_ENV)),
+        show=parse_name_list(os.environ.get(SHOW_APPS_ENV)),
+        order=parse_name_order(os.environ.get(GROUP_ORDER_ENV)),
+    )
+    return {category: entries for category, entries in selected.items() if entries}
 
 
 def log_navigation(action: str) -> None:
@@ -183,68 +282,6 @@ def log_navigation(action: str) -> None:
     this app's Python kernel and can be written to perotf_utils' button usage log.
     """
     log_button_usage(action, user=get_current_user())
-
-
-UPLOADS_DIR_NAME = "uploads"
-
-
-def _cwd_parts() -> list[str]:
-    """The current working directory as path segments, separator-agnostic."""
-    return [part for part in os.getcwd().replace("\\", "/").split("/") if part]
-
-
-def _uploads_index(parts: list[str]) -> int | None:
-    """Index of the NOMAD 'uploads' mount in parts, or None if cwd is not under one.
-
-    The leftmost match wins: the mount lives at a fixed prefix (/home/jovyan/uploads),
-    so a later segment of the same name is an upload or folder that happens to be
-    called "uploads", not the mount point.
-    """
-    for index, part in enumerate(parts):
-        # Needs at least <upload_id>/<AppFolder> after it to be usable.
-        if part == UPLOADS_DIR_NAME and index + 2 < len(parts):
-            return index
-    return None
-
-
-def get_upload_id() -> str:
-    """Derive this dashboard's own NOMAD upload ID from the current working directory.
-
-    Under a NOMAD north tool the cwd is .../uploads/<upload_id>/.../<AppFolder>, so the
-    upload ID is the segment right after 'uploads'. Read from cwd rather than hardcoded
-    so this keeps working if the upload is ever re-uploaded under a different ID.
-
-    Anchored on the 'uploads' segment rather than counting directories up from the cwd,
-    because how deep the repo sits inside the upload varies with how it was deployed:
-    unpacking the repo at the top of an upload gives <upload_id>/apps/<AppFolder>, while
-    `git clone` inside the upload adds the repo directory, giving
-    <upload_id>/Voila-Apps-V2/apps/<AppFolder>. Fixed-depth walking silently returned
-    the repo folder as the upload ID in the latter case, producing links with the upload
-    name missing entirely.
-    """
-    parts = _cwd_parts()
-    index = _uploads_index(parts)
-    if index is None:
-        # Not under an uploads mount (local dev, tests): best-effort, previous behaviour.
-        return os.path.basename(os.path.dirname(os.path.dirname(os.getcwd())))
-    return parts[index + 1]
-
-
-def get_uploads_path() -> str:
-    """Derive 'uploads/<upload_id>/.../<container>' from the current working directory.
-
-    <container> is the folder holding all app folders ("apps" for this repo). Everything
-    between the upload ID and the app folder is preserved, so a repo cloned into a
-    subdirectory of the upload keeps that subdirectory in the path. See get_upload_id
-    for why this is not a fixed number of levels.
-    """
-    parts = _cwd_parts()
-    index = _uploads_index(parts)
-    if index is None:
-        container = os.path.basename(os.path.dirname(os.getcwd()))
-        return f"{UPLOADS_DIR_NAME}/{get_upload_id()}/{container}"
-    # From 'uploads' up to, but not including, this app's own folder.
-    return "/".join(parts[index:-1])
 
 
 def build_voila_url(entry: AppEntry, user: str, uploads_path: str) -> str:

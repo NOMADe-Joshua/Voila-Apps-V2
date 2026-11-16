@@ -9,6 +9,7 @@ __created__ = "August 2025"
 # adjusted by Joshua from KIT :)
 
 import base64
+import html
 import io
 import json
 import zipfile
@@ -21,6 +22,7 @@ from diagnostic_helper import debug_logger
 from IPython.display import HTML, Javascript, Markdown, clear_output, display
 
 from perotf_utils.auth_ui import AuthenticationUI  # noqa: F401  (re-exported for app.py)
+from perotf_utils.downloads import start_download
 
 
 class WidgetFactory:
@@ -72,7 +74,7 @@ class WidgetFactory:
     @staticmethod
     def create_filter_row():
         dropdown1 = widgets.Dropdown(
-            options=["Voc(V)", "Jsc(mA/cm2)", "FF(%)", "PCE(%)", "V_MPP(V)", "J_MPP(mA/cm2)"],
+            options=["Voc(V)", "Jsc(mA/cm2)", "FF(%)", "PCE(%)", "V_mpp(V)", "J_mpp(mA/cm2)"],
             layout=widgets.Layout(width="66%"),
         )
         dropdown2 = widgets.Dropdown(
@@ -501,7 +503,7 @@ class FilterUI:
                     display_batch = batch_df["display_batch"].iloc[0]
 
                 # Create batch header
-                batch_header = widgets.HTML(f"<h5>📁 Batch: {display_batch}</h5>")
+                batch_header = widgets.HTML(f"<h5>📁 Batch: {html.escape(str(display_batch))}</h5>")
 
                 # Create sample checkboxes for this batch
                 sample_widgets = []
@@ -1810,20 +1812,8 @@ class SaveUI:
         self.download_output = WidgetFactory.create_output()
 
     def trigger_download(self, content, filename, content_type="text/json"):
-        """Trigger file download"""
-        content_b64 = base64.b64encode(
-            content if isinstance(content, bytes) else content.encode()
-        ).decode()
-        data_url = f"data:{content_type};charset=utf-8;base64,{content_b64}"
-        js_code = f"""
-            var a = document.createElement('a');
-            a.setAttribute('download', '{filename}');
-            a.setAttribute('href', '{data_url}');
-            a.click()
-        """
-        with self.download_output:
-            clear_output()
-            display(HTML(f"<script>{js_code}</script>"))
+        """Start the download of content as filename (perotf_utils.downloads)."""
+        start_download(self.download_output, content, filename, content_type)
 
     def create_plots_zip(self, figures, names):
         """Create zip file with plots"""
@@ -2151,91 +2141,3 @@ class ColorSchemeSelector:
                 self.widget,
             ]
         )
-
-
-class InfoUI:
-    """What's New and Manual UI component"""
-
-    def __init__(self):
-        self._create_widgets()
-
-    def _create_widgets(self):
-        """Create info widgets"""
-        self.whats_new_button = widgets.Button(
-            description="🎉 What's New",
-            button_style="info",
-            layout=widgets.Layout(width="140px", margin="0 5px 0 0"),
-            tooltip="See the latest features and improvements",
-        )
-
-        self.manual_button = widgets.Button(
-            description="📖 Manual",
-            button_style="success",
-            layout=widgets.Layout(width="120px", margin="0 5px 0 0"),
-            tooltip="User manual and guide",
-        )
-
-        self.content_output = widgets.Output(
-            layout=widgets.Layout(
-                display="none",
-                border="1px solid #ddd",
-                border_radius="6px",
-                padding="0px",
-                margin="10px 0",
-                max_height="500px",
-                overflow_y="auto",
-                background_color="white",
-                width="100%",
-            )
-        )
-
-        self.current_content = None
-
-        self.whats_new_button.on_click(self._show_whats_new)
-        self.manual_button.on_click(self._show_manual)
-
-        self.widget = widgets.VBox(
-            [widgets.HBox([self.whats_new_button, self.manual_button]), self.content_output]
-        )
-
-    def _show_whats_new(self, b):
-        """Show what's new content"""
-        if self.current_content == "whats_new" and self.content_output.layout.display == "block":
-            self.content_output.layout.display = "none"
-            self.whats_new_button.description = "🎉 What's New"
-            self.whats_new_button.button_style = "info"
-            self.current_content = None
-        else:
-            self.content_output.layout.display = "block"
-            self.whats_new_button.description = "🔽 Hide What's New"
-            self.whats_new_button.button_style = "warning"
-            self.manual_button.description = "📖 Manual"
-            self.manual_button.button_style = "success"
-            self.current_content = "whats_new"
-
-            with self.content_output:
-                clear_output(wait=True)
-                display(HTML("<p>What's new content would go here.</p>"))
-
-    def _show_manual(self, b):
-        """Show manual content"""
-        if self.current_content == "manual" and self.content_output.layout.display == "block":
-            self.content_output.layout.display = "none"
-            self.manual_button.description = "📖 Manual"
-            self.manual_button.button_style = "success"
-            self.current_content = None
-        else:
-            self.content_output.layout.display = "block"
-            self.manual_button.description = "🔽 Hide Manual"
-            self.manual_button.button_style = "warning"
-            self.whats_new_button.description = "🎉 What's New"
-            self.whats_new_button.button_style = "info"
-            self.current_content = "manual"
-
-            with self.content_output:
-                clear_output(wait=True)
-                display(HTML("<p>Manual content would go here.</p>"))
-
-    def get_widget(self):
-        """Get the info widget"""
-        return self.widget

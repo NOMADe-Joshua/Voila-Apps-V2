@@ -496,10 +496,10 @@ class PlotManager:
     def apply_font_sizes_to_axes(self, fig):
         """Apply current font size settings to a figure's axes"""
         fig.update_xaxes(
-            titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+            title_font=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
         )
         fig.update_yaxes(
-            titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+            title_font=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
         )
         return fig
 
@@ -932,12 +932,12 @@ class PlotManager:
             yaxis_title="Current Density [mA/cm²]",
             xaxis=dict(
                 range=[-0.2, x_max],
-                titlefont=dict(size=self.font_size_axis),
+                title_font=dict(size=self.font_size_axis),
                 tickfont=dict(size=self.font_size_axis),
             ),
             yaxis=dict(
                 range=[-5, 25],
-                titlefont=dict(size=self.font_size_axis),
+                title_font=dict(size=self.font_size_axis),
                 tickfont=dict(size=self.font_size_axis),
             ),
             template="plotly_white",
@@ -1126,12 +1126,12 @@ class PlotManager:
             yaxis_title="Current Density [mA/cm²]",
             xaxis=dict(
                 range=[-0.2, x_max],
-                titlefont=dict(size=self.font_size_axis),
+                title_font=dict(size=self.font_size_axis),
                 tickfont=dict(size=self.font_size_axis),
             ),
             yaxis=dict(
                 range=[-5, 25],
-                titlefont=dict(size=self.font_size_axis),
+                title_font=dict(size=self.font_size_axis),
                 tickfont=dict(size=self.font_size_axis),
             ),
             template="plotly_white",
@@ -1401,12 +1401,12 @@ class PlotManager:
                     yaxis_title="Current Density [mA/cm²]",
                     xaxis=dict(
                         range=[-0.2, x_max],
-                        titlefont=dict(size=self.font_size_axis),
+                        title_font=dict(size=self.font_size_axis),
                         tickfont=dict(size=self.font_size_axis),
                     ),
                     yaxis=dict(
                         range=[-5, 25],
-                        titlefont=dict(size=self.font_size_axis),
+                        title_font=dict(size=self.font_size_axis),
                         tickfont=dict(size=self.font_size_axis),
                     ),
                     template="plotly_white",
@@ -1435,12 +1435,12 @@ class PlotManager:
                     yaxis_title="Current Density [mA/cm²]",
                     xaxis=dict(
                         range=[-0.2, x_max],
-                        titlefont=dict(size=self.font_size_axis),
+                        title_font=dict(size=self.font_size_axis),
                         tickfont=dict(size=self.font_size_axis),
                     ),
                     yaxis=dict(
                         range=[-5, 25],
-                        titlefont=dict(size=self.font_size_axis),
+                        title_font=dict(size=self.font_size_axis),
                         tickfont=dict(size=self.font_size_axis),
                     ),
                     template="plotly_white",
@@ -1591,12 +1591,12 @@ class PlotManager:
                     yaxis_title="Current Density [mA/cm²]",
                     xaxis=dict(
                         range=[-0.2, x_max],
-                        titlefont=dict(size=self.font_size_axis),
+                        title_font=dict(size=self.font_size_axis),
                         tickfont=dict(size=self.font_size_axis),
                     ),
                     yaxis=dict(
                         range=[-5, 25],
-                        titlefont=dict(size=self.font_size_axis),
+                        title_font=dict(size=self.font_size_axis),
                         tickfont=dict(size=self.font_size_axis),
                     ),
                     template="plotly_white",
@@ -1625,12 +1625,12 @@ class PlotManager:
                     yaxis_title="Current Density [mA/cm²]",
                     xaxis=dict(
                         range=[-0.2, x_max],
-                        titlefont=dict(size=self.font_size_axis),
+                        title_font=dict(size=self.font_size_axis),
                         tickfont=dict(size=self.font_size_axis),
                     ),
                     yaxis=dict(
                         range=[-5, 25],
-                        titlefont=dict(size=self.font_size_axis),
+                        title_font=dict(size=self.font_size_axis),
                         tickfont=dict(size=self.font_size_axis),
                     ),
                     template="plotly_white",
@@ -1924,7 +1924,7 @@ class PlotManager:
             fig.update_yaxes(
                 title_text=y_axis_label,
                 title_standoff=5,
-                titlefont=dict(size=self.font_size_axis),
+                title_font=dict(size=self.font_size_axis),
                 tickfont=dict(size=self.font_size_axis),
                 showgrid=True,
                 gridwidth=1,
@@ -1949,10 +1949,10 @@ class PlotManager:
 
         # Apply font sizes to all axes
         fig.update_xaxes(
-            titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+            title_font=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
         )
         fig.update_yaxes(
-            titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+            title_font=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
         )
 
         # Tilt x-axis tick labels for many categories (bottom row only)
@@ -2220,10 +2220,10 @@ class PlotManager:
             paper_bgcolor="white",
             hovermode="closest",
             xaxis=dict(
-                titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+                title_font=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
             ),
             yaxis=dict(
-                titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+                title_font=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
             ),
         )
 
@@ -2398,11 +2398,11 @@ class PlotManager:
             paper_bgcolor="white",
             hovermode="closest",
             xaxis=dict(
-                titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+                title_font=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
             ),
             yaxis=dict(
                 title="Hysteresis (%)",
-                titlefont=dict(size=self.font_size_axis),
+                title_font=dict(size=self.font_size_axis),
                 tickfont=dict(size=self.font_size_axis),
             ),
         )
@@ -2726,11 +2726,11 @@ class PlotManager:
             yaxis_title="Current Density [mA/cm²]",
             xaxis=dict(
                 range=[-0.2, x_max],
-                titlefont=dict(size=self.font_size_axis),
+                title_font=dict(size=self.font_size_axis),
                 tickfont=dict(size=self.font_size_axis),
             ),
             yaxis=dict(
-                titlefont=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
+                title_font=dict(size=self.font_size_axis), tickfont=dict(size=self.font_size_axis)
             ),
             template="plotly_white",
             legend=dict(

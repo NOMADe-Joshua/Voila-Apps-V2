@@ -1,26 +1,36 @@
 [project]
 name = "sem-crystal-counter"
-version = "1.0.0"
-description = "Crystal and grain size analysis of SEM images"
+version = "2.0.0"
+description = "Grain size and film thickness analysis of SEM images of perovskite films"
 requires-python = ">=3.10"
 dependencies = [
     "perotf-utils",
-    "ipython>=8.0",
-    "ipywidgets>=8.0",
-    "matplotlib>=3.5",
     "numpy>=1.24",
-    "pandas>=2.0",
-    "scikit-image>=0.19",
-    "scikit-learn>=1.0",
     "scipy>=1.10",
+    "pandas>=2.0",
+    "pillow>=10.0",
+    "pydantic>=2.0",
+    "scikit-image>=0.22",
+    "ipywidgets>=8.0",
+    "plotly>=5.0",
+    "anywidget>=0.9",  # go.FigureWidget needs it
+    "openpyxl>=3.1",  # Excel export
 ]
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+[project.optional-dependencies]
+# Dev tools only (tuner.py with click editing, legacy.py baseline); never installed on the Oasis.
+dev = [
+    "streamlit>=1.40",
+    "opencv-python-headless>=4.8",
+    "streamlit-image-coordinates>=0.4",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
 
-[tool.hatch.metadata]
-allow-direct-references = true
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

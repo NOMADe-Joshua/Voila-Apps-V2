@@ -13,6 +13,7 @@ import requests
 from IPython.display import HTML, clear_output, display
 
 from perotf_utils.config import API_ENDPOINT, URL_BASE
+from perotf_utils.downloads import start_download
 
 
 class AuthenticationUI:
@@ -171,19 +172,8 @@ class SaveUI:
         )
 
     def trigger_download(self, content, filename, content_type="text/json"):
-        content_b64 = base64.b64encode(
-            content if isinstance(content, bytes) else content.encode()
-        ).decode()
-        data_url = f"data:{content_type};charset=utf-8;base64,{content_b64}"
-        js_code = (
-            "var a = document.createElement('a');"
-            f"a.setAttribute('download', '{filename}');"
-            f"a.setAttribute('href', '{data_url}');"
-            "a.click();"
-        )
-        with self.download_output:
-            clear_output()
-            display(HTML(f"<script>{js_code}</script>"))
+        """Start the download of content as filename (perotf_utils.downloads)."""
+        start_download(self.download_output, content, filename, content_type)
 
     def create_plots_zip(self, figures, names):
         zip_buffer = io.BytesIO()

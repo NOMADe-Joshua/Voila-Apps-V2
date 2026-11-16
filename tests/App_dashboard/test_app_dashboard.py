@@ -173,3 +173,42 @@ def test_a_category_with_only_hidden_cards_disappears(dm, monkeypatch):
     # Everything that is not admin-only stays visible to everyone.
     public = {e.name for es in dm.CATEGORIES.values() for e in es if not e.admin_only}
     assert _visible_names(dm, TEST_USER) == public
+
+
+def test_deployment_can_hide_apps_by_folder_or_card_name(dm, monkeypatch):
+    monkeypatch.setenv("PEROTF_DASHBOARD_HIDE_APPS", "Excel_creator, data tools")
+    visible = [e for es in dm.visible_categories(TEST_USER).values() for e in es]
+    assert "Excel_creator" not in {e.folder for e in visible}
+    assert "Data_Tools" not in {e.folder for e in visible}
+    assert "JV-Analysis" in {e.folder for e in visible}
+
+
+def test_deployment_allow_list_shows_only_those_apps(dm, monkeypatch):
+    monkeypatch.setenv("PEROTF_DASHBOARD_SHOW_APPS", "JV-Analysis")
+    visible = [e for es in dm.visible_categories(TEST_USER).values() for e in es]
+    assert [e.folder for e in visible] == ["JV-Analysis"]
+
+
+def test_unknown_names_are_ignored_with_a_warning(dm, monkeypatch, caplog):
+    monkeypatch.setenv("PEROTF_DASHBOARD_HIDE_APPS", "no_such_app")
+    with caplog.at_level("WARNING"):
+        names = _visible_names(dm, TEST_USER)
+    public = {e.name for es in dm.CATEGORIES.values() for e in es if not e.admin_only}
+    assert names == public
+    assert "no_such_app" in caplog.text
+
+
+def test_group_order_puts_the_named_groups_first(dm, monkeypatch):
+    last = list(dm.visible_categories(TEST_USER))[-1]
+    monkeypatch.setenv("PEROTF_DASHBOARD_GROUP_ORDER", last.lower())
+    assert list(dm.visible_categories(TEST_USER))[0] == last
+
+
+def test_a_group_closes_and_opens(mods):
+    gui = mods["gui_components"]
+    section = gui.create_category_section("Device Characterization", [])
+    header, grid = section.children
+    header.click()
+    assert grid.layout.display == "none" and header.icon == "chevron-right"
+    header.click()
+    assert grid.layout.display is None and header.icon != "chevron-right"

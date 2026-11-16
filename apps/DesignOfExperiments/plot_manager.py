@@ -3,31 +3,19 @@ Plot Manager for the Design of Experiments application.
 All visualization functions and plot generation using plotly and matplotlib.
 """
 
-import warnings
-from typing import Any, Dict, List, Optional, Tuple, Union
+import logging
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-
-warnings.filterwarnings("ignore")
-
-# Plotting libraries
 import plotly.express as px
-import plotly.figure_factory as ff
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
-# Optional matplotlib for some plots
-try:
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
-
 from data_manager import Variable, VariableType
+from plotly.subplots import make_subplots
+from scipy.spatial.distance import pdist
 from utils import ValidationUtils
+
+logger = logging.getLogger(__name__)
 
 
 class PlotManager:
@@ -99,11 +87,11 @@ class PlotManager:
                     plot_data, variables, algorithm=algorithm, **kwargs
                 )
             else:
-                print(f"Unknown plot type: {plot_type}")
+                logger.warning("Unknown plot type: %s", plot_type)
                 return None
 
         except Exception as e:
-            print(f"Error creating plot: {str(e)}")
+            logger.error("Error creating plot: %s", e)
             return None
 
     def create_scatter_matrix(
@@ -111,7 +99,6 @@ class PlotManager:
     ) -> go.Figure:
         """Create a scatter plot matrix (SPLOM) for all variable pairs."""
         algorithm = kwargs.get("algorithm", "")
-        color_by = kwargs.get("color_by", None)
         numeric_vars = [
             var for var in variables if var.type in [VariableType.CONTINUOUS, VariableType.DISCRETE]
         ]
@@ -127,40 +114,55 @@ class PlotManager:
         for col in numeric_columns:
             splom_data[col] = pd.to_numeric(splom_data[col], errors="coerce")
 
-        # Color mapping
-        color_col = None
-        if color_by and color_by in data.columns:
-            color_col = data[color_by]
-
-        # Create SPLOM
-        fig = go.Figure(
-            data=go.Splom(
-                dimensions=[
-                    {"label": var.name, "values": splom_data[var.name]} for var in numeric_vars
-                ],
-                text=data.index,
-                marker=dict(
-                    color=self.colors["primary"],  # Fixed color
-                    line=dict(color="white", width=0.8),
-                    size=5,
-                ),
-            )
+        # Built from ordinary 2D subplots, not go.Splom: Splom needs WebGL, which some browsers
+        # (hardware acceleration off, remote desktops) do not have. Diagonal: each variable's
+        # histogram; elsewhere: row variable against column variable.
+        n_vars = len(numeric_vars)
+        fig = make_subplots(
+            rows=n_vars, cols=n_vars, horizontal_spacing=0.03, vertical_spacing=0.03
         )
+        hover_text = [str(i) for i in data.index]
+        for row, y_var in enumerate(numeric_columns, start=1):
+            for col, x_var in enumerate(numeric_columns, start=1):
+                if row == col:
+                    trace = go.Histogram(
+                        x=splom_data[x_var], marker_color=self.colors["primary"], nbinsx=10
+                    )
+                else:
+                    trace = go.Scatter(
+                        x=splom_data[x_var],
+                        y=splom_data[y_var],
+                        mode="markers",
+                        text=hover_text,
+                        hovertemplate=f"{x_var}: %{{x}}<br>{y_var}: %{{y}}<br>run %{{text}}"
+                        "<extra></extra>",
+                        marker=dict(
+                            color=self.colors["primary"],  # Fixed color
+                            line=dict(color="white", width=0.8),
+                            size=5,
+                        ),
+                    )
+                fig.add_trace(trace, row=row, col=col)
+                if row == n_vars:
+                    fig.update_xaxes(title_text=x_var, row=row, col=col)
+                if col == 1:
+                    fig.update_yaxes(title_text=y_var, row=row, col=col)
 
         # Medium sizing
-        n_vars = len(numeric_vars)
         plot_size = max(180, min(250, 900 // n_vars))
         total_size = plot_size * n_vars
 
         fig.update_layout(
             title={
-                "text": f"Scatter Plot Matrix (SPLOM) - {algorithm}",
+                "text": f"Scatter Plot Matrix - {algorithm}",
                 "x": 0.5,
                 "font": {"size": 16},
             },
             height=min(800, total_size + 100),
             width=min(800, total_size + 100),
             plot_bgcolor="#fafafa",
+            showlegend=False,
+            bargap=0.05,
             **self.default_layout,
         )
 
@@ -560,8 +562,6 @@ class PlotManager:
 
     def _calculate_pairwise_distances(self, points: np.ndarray) -> np.ndarray:
         """Calculate all pairwise distances between points."""
-        from scipy.spatial.distance import pdist
-
         if len(points) < 2:
             return np.array([])
 
@@ -647,14 +647,3 @@ class PlotManager:
             uniformity_scores[var.name] = uniformity
 
         return uniformity_scores
-
-    def get_available_plot_types(self) -> Dict[str, str]:
-        """Get available plot types with descriptions."""
-        return {
-            "splom": "Scatter Plot Matrix - All variable pairs",
-            "parallel": "Parallel Coordinates - Multi-dimensional view",
-            "distributions": "Distribution Plots - Individual variable histograms",
-            "3d_scatter": "3D Scatter Plot - Three-dimensional visualization",
-            "correlation": "Correlation Heatmap - Variable relationships",
-            "quality": "Space-Filling Quality - Design assessment plots",
-        }

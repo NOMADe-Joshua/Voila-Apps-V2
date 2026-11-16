@@ -36,16 +36,17 @@ from resizable_plot_utility import display_resizable_plot
 
 from perotf_utils import process_handling
 from perotf_utils.api_calls import (
-    REQUEST_TIMEOUT,
     get_all_batches_wth_data,
     get_ids_in_batch,
     get_processing_steps,
     get_sample_description,
     query_all,
+    upload_ids_with_entries,
 )
 from perotf_utils.auth_ui import AuthenticationUI
 from perotf_utils.batch_selection import extract_date, get_batch_ids, sort_by_date_desc
 from perotf_utils.config import API_ENDPOINT, ENTRY_TYPES, URL_BASE
+from perotf_utils.manual import manual_panel
 
 JV_ENTRY_TYPE = ENTRY_TYPES["jv"]
 
@@ -240,27 +241,6 @@ def get_batches_with_uploads(url, token, batch_type=ENTRY_TYPES["batch"]):
             "upload_name": metadata.get("upload_name") or "",
         }
     return batches
-
-
-def get_upload_ids_with_entries(url, token, entry_type):
-    """Upload ids containing at least one entry of entry_type (one aggregation request, no entries downloaded)."""
-    query = {
-        "owner": "visible",
-        "query": {"entry_type": entry_type},
-        "pagination": {"page_size": 0},
-        "aggregations": {
-            "uploads": {"terms": {"quantity": "upload_id", "pagination": {"page_size": 10000}}}
-        },
-    }
-    response = requests.post(
-        f"{url}/entries/query",
-        headers={"Authorization": f"Bearer {token}"},
-        json=query,
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-    buckets = response.json()["aggregations"]["uploads"]["terms"]["data"]
-    return {bucket["value"] for bucket in buckets}
 
 
 def get_upload_name(url, token, upload_id):
@@ -512,6 +492,7 @@ class ProcessJVOverviewApp:
         self.dashboard = widgets.VBox(
             [
                 widgets.HTML("<h2 style='margin:4px 0'>Process &amp; JV Overview</h2>"),
+                manual_panel(__file__),
                 self.auth_ui.get_widget(),
                 self.status_html,
                 self.selection_box,
@@ -606,7 +587,7 @@ class ProcessJVOverviewApp:
         Returns None if neither lookup works."""
         try:
             if self.upload_info:
-                jv_uploads = get_upload_ids_with_entries(url, token, JV_ENTRY_TYPE)
+                jv_uploads = upload_ids_with_entries(url, token, JV_ENTRY_TYPE)
                 if jv_uploads:
                     return [
                         b

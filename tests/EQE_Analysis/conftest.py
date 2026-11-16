@@ -4,7 +4,6 @@ import pytest
 
 MODULES = [
     "app",
-    "batch_selection",
     "data_manager",
     "diagnostic_helper",
     "font_size_ui",

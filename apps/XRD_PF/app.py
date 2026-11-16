@@ -222,10 +222,8 @@ class XRDAnalysisApp:
         self._peak_y_norm = None
         self._last_fit_result = None  # most recent lmfit ModelResult, used to seed 2θ calibration
 
-        # Batch selection / XRD-availability search state
+        # Batch selection state
         self._batch_selector = None  # the inner SelectMultiple from create_batch_selection
-        self._all_batch_options = []  # unfiltered batch id list
-        self._xrd_search_status = None
 
         # Pattern selector keeps (display_label, key) tuples; this list holds the plain keys
         self._pattern_option_values: list = []
@@ -629,87 +627,19 @@ class XRDAnalysisApp:
             if not self.auth_manager.is_authenticated():
                 return
             try:
+                # "Show XRD only" asks NOMAD once for the uploads with XRD entries
                 widget = create_batch_selection(
                     self.auth_manager.url,
                     self.auth_manager.current_token,
                     self._load_xrd_from_selection,
+                    filter_label="XRD",
+                    filter_entry_type=ENTRY_TYPES["xrd"],
                 )
-                # widget.children == (search_field, batch_ids_selector, load_batch_button)
+                # children[1] is the batch list (perotf_utils.batch_selection)
                 self._batch_selector = widget.children[1]
-                self._all_batch_options = list(self._batch_selector.options)
-
-                search_xrd_btn = widgets.Button(
-                    description="🔬 Search for XRD",
-                    button_style="info",
-                    tooltip="Scan all listed batches and keep only those that contain XRD data",
-                    layout=widgets.Layout(width="170px"),
-                )
-                search_xrd_btn.on_click(self._on_search_for_xrd)
-                self._xrd_search_status = widgets.Output(layout=widgets.Layout(margin="4px 0"))
-
-                display(
-                    widgets.VBox(
-                        [
-                            widget,
-                            widgets.HBox([search_xrd_btn], layout=widgets.Layout(margin="6px 0")),
-                            self._xrd_search_status,
-                        ]
-                    )
-                )
+                display(widget)
             except Exception as exc:
                 print(f"⚠  Could not create batch selector: {exc}")
-
-    def _on_search_for_xrd(self, button=None):
-        """Filter the batch list down to batches that actually contain XRD data.
-
-        Mirrors the proven approach used in MPPT_Analysis: reuse the existing
-        get_ids_in_batch / get_all_xrd calls per batch instead of custom queries.
-        """
-        from perotf_utils.api_calls import get_all_xrd, get_ids_in_batch
-
-        if (
-            self._batch_selector is None
-            or self._xrd_search_status is None
-            or not self._all_batch_options
-        ):
-            return
-
-        url = self.auth_manager.url
-        token = self.auth_manager.current_token
-        all_batch_ids = list(self._all_batch_options)
-        total = len(all_batch_ids)
-
-        if button is not None:
-            button.disabled = True
-            button.description = "🔄 Searching…"
-
-        valid_batches = []
-        for i, batch_id in enumerate(all_batch_ids):
-            if i % 5 == 0 or i == total - 1:
-                with self._xrd_search_status:
-                    clear_output(wait=True)
-                    print(f"🔍  Progress: {i + 1}/{total} — found {len(valid_batches)} so far")
-                    print(f"   Currently testing: {batch_id}")
-            try:
-                sample_ids = get_ids_in_batch(url, token, [batch_id])
-                if sample_ids and get_all_xrd(url, token, sample_ids):
-                    valid_batches.append(batch_id)
-            except Exception:
-                continue
-
-        self._batch_selector.options = valid_batches
-        self._batch_selector.value = ()
-
-        with self._xrd_search_status:
-            clear_output(wait=True)
-            if valid_batches:
-                print(f"✅  {len(valid_batches)} of {total} batch(es) contain XRD data.")
-            else:
-                print("❌  None of the listed batches contain XRD data.")
-
-        if button is not None:
-            button.disabled = False
-            button.description = "🔬 Search for XRD"
 
     def _load_xrd_from_selection(self, batch_selector):
         """Fetch XRD entries for all selected batches and populate the app."""

@@ -8,6 +8,7 @@ __institution__ = "HZb -> KIT"
 __created__ = "September 2025"
 
 import base64
+import html
 import io
 import json
 import os
@@ -15,6 +16,7 @@ import time
 import zipfile
 from datetime import datetime
 from typing import Any, cast
+from urllib.parse import quote
 
 import ipywidgets as widgets
 import openpyxl
@@ -26,7 +28,7 @@ from diagnostic_helper import debug_logger
 from font_size_ui import FontSizeUI
 
 # Import the new organized modules
-from gui_components import AuthenticationUI, ColorSchemeSelector, FilterUI, InfoUI, PlotUI, SaveUI
+from gui_components import AuthenticationUI, ColorSchemeSelector, FilterUI, PlotUI, SaveUI
 from IPython.display import HTML, Javascript, Markdown, clear_output, display
 from jv_curve_analysis_ui_NEW import EnhancedJVCurveAnalysisUI
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -36,8 +38,10 @@ from utils import save_combined_excel_data, save_full_data_frame
 
 from perotf_utils.api_calls import get_all_measurements_except_JV, get_ids_in_batch
 from perotf_utils.batch_selection import create_batch_selection
-from perotf_utils.config import API_ENDPOINT, GUI_ENDPOINT, URL_BASE
+from perotf_utils.config import API_ENDPOINT, ENTRY_TYPES, GUI_ENDPOINT, URL_BASE
+from perotf_utils.downloads import start_download
 from perotf_utils.error_handler import ErrorHandler
+from perotf_utils.manual import manual_panel
 from perotf_utils.table_utils import csv_safe, keep_text_as_text
 
 # ── PptxGenJS library loader ──────────────────────────────────────────────────
@@ -86,6 +90,17 @@ def _load_pptxgenjs():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def measurement_link_html(gui_root, entry_id, entry_type):
+    """An <a> tag opening one measurement entry in the NOMAD GUI, labelled with the last part
+    of its entry type (SEM entries open on their image preview). gui_root is URL_BASE +
+    GUI_ENDPOINT; entry_id and entry_type come from NOMAD and are escaped (from HZB)."""
+    path = f"{gui_root}/entry/id/{quote(str(entry_id), safe='')}/data/data"
+    if "SEM" in str(entry_type):
+        path += "/images:0/image_preview/preview"
+    label = html.escape(str(entry_type).split("_")[-1])
+    return f'<a href="{html.escape(path)}" rel="noopener noreferrer" target="_blank">{label}</a>'
 
 
 class SimpleAuthManager:
@@ -189,8 +204,7 @@ class JVAnalysisApp:
         self.jv_curve_analysis_ui = EnhancedJVCurveAnalysisUI()
         self.save_ui = SaveUI()
         self.color_selector = ColorSchemeSelector()
-        self.font_size_ui = FontSizeUI(callback=self._on_font_size_change)  # ADD this line
-        self.info_ui = InfoUI()  # ADD this line
+        self.font_size_ui = FontSizeUI(callback=self._on_font_size_change)
 
         # Give FilterUI access to DataManager for preview functionality
         # Use a typed cast to Any so static analyzers (Pylance) won't flag unknown attributes
@@ -455,7 +469,11 @@ class JVAnalysisApp:
                 token = self.auth_manager.current_token
                 # print("📊 Initializing batch selection...")
                 batch_selection_widget = create_batch_selection(
-                    url, token, self._load_data_from_selection
+                    url,
+                    token,
+                    self._load_data_from_selection,
+                    filter_label="JV",
+                    filter_entry_type=ENTRY_TYPES["jv"],
                 )
                 display(batch_selection_widget)
             except requests.exceptions.RequestException as e:
@@ -750,14 +768,19 @@ If you tested specific variables or conditions for each sample, please write the
                     df = pd.DataFrame()
 
                     def make_clickable(r):
-                        base_url = self.auth_manager.base_url
-                        if "SEM" in r[1]["entry_type"]:
-                            return f'<a href="{base_url}{GUI_ENDPOINT}/entry/id/{r[1]["entry_id"]}/data/data/images:0/image_preview/preview" rel="noopener noreferrer" target="_blank">{r[1]["entry_type"].split("_")[-1]}</a>'
-                        return f'<a href="{base_url}{GUI_ENDPOINT}/entry/id/{r[1]["entry_id"]}/data/data" rel="noopener noreferrer" target="_blank">{r[1]["entry_type"].split("_")[-1]}</a>'
+                        return measurement_link_html(
+                            f"{self.auth_manager.base_url}{GUI_ENDPOINT}",
+                            r[1]["entry_id"],
+                            r[1]["entry_type"],
+                        )
 
+                    # The table is rendered with escape=False (its cells are links), so the
+                    # sample ids and every link part are escaped here (ported from HZB).
                     for key, value in measurements_data.items():
                         if value:
-                            df[key] = pd.Series([make_clickable(r) for r in value])
+                            df[html.escape(str(key))] = pd.Series(
+                                [make_clickable(r) for r in value]
+                            )
 
                     if df.empty:
                         print("No additional measurements found.")
@@ -1346,7 +1369,7 @@ If you tested specific variables or conditions for each sample, please write the
                 <div style="text-align: center; padding: 40px; background-color: #f8d7da; border-radius: 8px;">
                     <div style="font-size: 24px; margin-bottom: 15px;">❌</div>
                     <h3 style="color: #dc3545;">Plot Creation Failed</h3>
-                    <p>Error: {str(e)}</p>
+                    <p>Error: {html.escape(str(e))}</p>
                 </div>
                 """)
                 )
@@ -1517,7 +1540,7 @@ If you tested specific variables or conditions for each sample, please write the
                     widgets.HTML(f"""
                 <div style="text-align: center; padding: 24px; background-color: #f8d7da; border-radius: 8px;">
                     <h4 style="margin: 0; color: #dc3545;">JV Curve Analysis failed</h4>
-                    <p style="margin: 8px 0 0 0;">{str(e)}</p>
+                    <p style="margin: 8px 0 0 0;">{html.escape(str(e))}</p>
                 </div>
                 """)
                 )
@@ -2764,25 +2787,13 @@ If you tested specific variables or conditions for each sample, please write the
                 self.global_plot_data["figs"], self.global_plot_data["names"]
             )
 
-            b64 = base64.b64encode(zip_content).decode()
-            js_code = f"""
-            var link = document.createElement('a');
-            link.href = 'data:application/zip;base64,{b64}';
-            link.download = 'plots.zip';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            """
-
-            with self.save_ui.download_output:
-                display(
-                    widgets.HTML(
-                        f'<button onclick="{js_code}">Click to download all plots</button>'
-                    )
-                )
-                print(
-                    "Download initiated. If the download doesn't start automatically, click the button above."
-                )
+            start_download(
+                self.save_ui.download_output,
+                zip_content,
+                "plots.zip",
+                "application/zip",
+                note="<p>Download of plots.zip started.</p>",
+            )
 
         except Exception as e:
             ErrorHandler.log_error("saving plots", e, self.save_ui.download_output)
@@ -2799,23 +2810,13 @@ If you tested specific variables or conditions for each sample, please write the
             self.global_plot_data["workbook"].save(excel_buffer)
             excel_buffer.seek(0)
 
-            b64 = base64.b64encode(excel_buffer.getvalue()).decode()
-            js_code = f"""
-            var link = document.createElement('a');
-            link.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}';
-            link.download = 'collected_data.xlsx';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            """
-
-            with self.save_ui.download_output:
-                display(
-                    widgets.HTML(f'<button onclick="{js_code}">Click to download data</button>')
-                )
-                print(
-                    "Download initiated. If the download doesn't start automatically, click the button above."
-                )
+            start_download(
+                self.save_ui.download_output,
+                excel_buffer.getvalue(),
+                "collected_data.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                note="<p>Download of collected_data.xlsx started.</p>",
+            )
 
         except Exception as e:
             ErrorHandler.log_error("saving data", e, self.save_ui.download_output)
@@ -2846,25 +2847,13 @@ If you tested specific variables or conditions for each sample, please write the
                 zip_file.writestr("collected_data.xlsx", excel_buffer.getvalue())
 
             zip_buffer.seek(0)
-            b64 = base64.b64encode(zip_buffer.getvalue()).decode()
-            js_code = f"""
-            var link = document.createElement('a');
-            link.href = 'data:application/zip;base64,{b64}';
-            link.download = 'results.zip';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            """
-
-            with self.save_ui.download_output:
-                display(
-                    widgets.HTML(
-                        f'<button onclick="{js_code}">Click to download all files</button>'
-                    )
-                )
-                print(
-                    "Download initiated. If the download doesn't start automatically, click the button above."
-                )
+            start_download(
+                self.save_ui.download_output,
+                zip_buffer.getvalue(),
+                "results.zip",
+                "application/zip",
+                note="<p>Download of results.zip started.</p>",
+            )
 
         except Exception as e:
             ErrorHandler.log_error("saving all files", e, self.save_ui.download_output)
@@ -2877,24 +2866,10 @@ If you tested specific variables or conditions for each sample, please write the
         """Get the main dashboard widget"""
         app_layout = widgets.Layout(max_width="1200px", margin="0 auto", padding="15px")
 
-        # Create header with title and info buttons
-        header = widgets.HBox(
-            [
-                widgets.HTML("<h1 style='margin: 0; flex-grow: 1;'>JV Analysis Dashboard</h1>"),
-                self.info_ui.get_widget(),
-            ],
-            layout=widgets.Layout(
-                justify_content="space-between", align_items="flex-start", margin="0 0 20px 0"
-            ),
-        )
+        header = widgets.HTML("<h1 style='margin: 0 0 10px 0;'>JV Analysis Dashboard</h1>")
 
-        return widgets.VBox(
-            [
-                header,  # Header with What's New and Manual buttons
-                self.tabs,
-            ],
-            layout=app_layout,
-        )
+        # The Manual button sits in the displayed tree (Voila drops displays from callbacks)
+        return widgets.VBox([header, manual_panel(__file__), self.tabs], layout=app_layout)
 
     def get_current_color_scheme(self):
         """Get currently selected color scheme"""

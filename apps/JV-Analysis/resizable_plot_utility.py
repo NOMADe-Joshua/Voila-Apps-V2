@@ -7,6 +7,7 @@ __author__ = "Edgar Nandayapa"
 __institution__ = "Helmholtz-Zentrum Berlin"
 __created__ = "August 2025"
 
+import html
 import json
 import uuid
 
@@ -63,11 +64,11 @@ class ResizablePlotWidget:
         fig_json = json.dumps(self.fig, cls=plotly.utils.PlotlyJSONEncoder)
 
         # CRITICAL: Create title HTML OUTSIDE the plot container
-        title_html = f'<h3 style="margin: 20px 0 5px 0; color: #2c3e50;">{self.title}</h3>'
+        title_html = (
+            f'<h3 style="margin: 20px 0 5px 0; color: #2c3e50;">{html.escape(str(self.title))}</h3>'
+        )
         if self.subtitle:
-            title_html += (
-                f'<p style="margin: 0 0 10px 0; color: #666; font-size: 12px;">{self.subtitle}</p>'
-            )
+            title_html += f'<p style="margin: 0 0 10px 0; color: #666; font-size: 12px;">{html.escape(str(self.subtitle))}</p>'
 
         resize_hint = '<p style="color: #666; font-size: 12px; margin: 5px 0;">💡 Drag the bottom-right corner to resize the plot</p>'
 
@@ -502,12 +503,12 @@ class ResizablePlotManager:
         for entry_name, entry_color in entries:
             swatch = (
                 f'<span style="display:inline-block;width:24px;height:3px;'
-                f"background:{entry_color};vertical-align:middle;"
+                f"background:{html.escape(str(entry_color))};vertical-align:middle;"
                 f'border-radius:2px;margin-right:6px;"></span>'
             )
             rows_html += (
                 f'<tr><td style="padding:3px 0;white-space:nowrap;font-size:12px;">'
-                f"{swatch}{entry_name}</td></tr>"
+                f"{swatch}{html.escape(str(entry_name))}</td></tr>"
             )
 
         return (
@@ -563,7 +564,7 @@ class ResizablePlotManager:
                 print(f"❌ Error displaying plot {i + 1} ({name}): {e}")
                 # Fallback to regular display
                 try:
-                    display(widgets.HTML(f"<h4>{name} (Fallback Display)</h4>"))
+                    display(widgets.HTML(f"<h4>{html.escape(str(name))} (Fallback Display)</h4>"))
                     if hasattr(fig, "show"):
                         fig.show()
                     else:

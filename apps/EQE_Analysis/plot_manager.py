@@ -595,16 +595,16 @@ def create_eqe_figure(
             borderwidth=1,
         ),
     )
-    fig.update_xaxes(titlefont=dict(size=font_size_axis), tickfont=dict(size=font_size_axis))
+    fig.update_xaxes(title_font=dict(size=font_size_axis), tickfont=dict(size=font_size_axis))
     if show_jsc_cumulative:
         fig.update_yaxes(
-            titlefont=dict(size=font_size_axis),
+            title_font=dict(size=font_size_axis),
             tickfont=dict(size=font_size_axis),
             rangemode="tozero",
             secondary_y=False,
         )
     else:
-        fig.update_yaxes(titlefont=dict(size=font_size_axis), tickfont=dict(size=font_size_axis))
+        fig.update_yaxes(title_font=dict(size=font_size_axis), tickfont=dict(size=font_size_axis))
     if show_jsc_cumulative and cum_jsc_traces:
         fig.update_layout(
             yaxis2=dict(
@@ -612,7 +612,7 @@ def create_eqe_figure(
                 overlaying="y",
                 side="right",
                 showgrid=False,
-                titlefont=dict(size=font_size_axis),
+                title_font=dict(size=font_size_axis),
                 tickfont=dict(size=font_size_axis),
                 rangemode="tozero",
             )

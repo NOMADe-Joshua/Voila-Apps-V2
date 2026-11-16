@@ -12,7 +12,6 @@ import ipywidgets as widgets
 import numpy as np
 import pandas as pd
 import requests
-from batch_selection import create_batch_selection
 from data_manager import DataManagerEQE
 from diagnostic_helper import add_diagnostic_button_to_app, diagnose_eqe_loading
 from font_size_ui import FontSizeUI
@@ -21,7 +20,9 @@ from IPython.display import HTML, Javascript, clear_output, display
 from plot_manager import create_eqe_figure
 from resizable_plot_utility import ResizablePlotManager
 
-from perotf_utils.config import API_ENDPOINT, URL_BASE
+from perotf_utils.batch_selection import create_batch_selection
+from perotf_utils.config import API_ENDPOINT, ENTRY_TYPES, URL_BASE
+from perotf_utils.manual import manual_panel
 from perotf_utils.table_utils import csv_safe
 
 
@@ -213,7 +214,9 @@ class EQEAnalysisApp:
         self.LEGEND_ANNOTATIONS = [
             ("bandgap_eqe", "Eg", "eV", 1.0),
             ("integrated_jsc", "Jsc", "mA/cm²", 1.0),
-            ("integrated_j0rad", "J0rad", "mA/cm²", 0.1),
+            # NOMAD stores J0rad in mA/cm² (the schema's unit; baseclasses assign it in A/m²
+            # and NOMAD converts), like Jsc: no extra factor.
+            ("integrated_j0rad", "J0rad", "mA/cm²", 1.0),
             ("voc_rad", "Vocrad", "V", 1.0),
             ("urbach_energy", "UE", "meV", 1000.0),
             ("light_bias", "LB", "", 1.0),
@@ -342,6 +345,8 @@ class EQEAnalysisApp:
                 widgets.HTML("<h3>Download</h3>"),
                 widgets.HBox([self.download_data_button, self.download_zip_button]),
                 self.download_zip_output,
+                # The JSON download's script runs from this Output, so it must be in the tree.
+                self.save_ui.download_output,
             ]
         )
 
@@ -421,6 +426,8 @@ class EQEAnalysisApp:
                 self.auth_manager.url,
                 self.auth_manager.current_token,
                 self._load_data_from_selection,
+                filter_label="EQE",
+                filter_entry_type=[ENTRY_TYPES["eqe"], ENTRY_TYPES["eqe_tfl_gammabox"]],
             )
             display(selector_widget)
 
@@ -748,7 +755,7 @@ class EQEAnalysisApp:
                     "Position": pos,
                     "Eg (eV)": round(float(eg), 3) if pd.notna(eg) else "",
                     "Jsc (mA/cm²)": round(float(jsc), 2) if pd.notna(jsc) else "",
-                    "J0rad (mA/cm²)": f"{float(j0raw) * 0.1:.2e}" if pd.notna(j0raw) else "",
+                    "J0rad (mA/cm²)": f"{float(j0raw):.2e}" if pd.notna(j0raw) else "",
                     "Vocrad (V)": round(float(vocrad), 3) if pd.notna(vocrad) else "",
                     "UE (meV)": round(float(ue_raw) * 1000, 1) if pd.notna(ue_raw) else "",
                     "LB": str(lb) if lb else "",
@@ -1052,4 +1059,7 @@ class EQEAnalysisApp:
                 margin="0 0 20px 0",
             ),
         )
-        return widgets.VBox([header, self.auth_ui.get_widget(), self.tabs], layout=app_layout)
+        return widgets.VBox(
+            [header, manual_panel(__file__), self.auth_ui.get_widget(), self.tabs],
+            layout=app_layout,
+        )

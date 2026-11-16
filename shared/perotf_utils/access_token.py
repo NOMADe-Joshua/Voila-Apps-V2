@@ -28,6 +28,13 @@ def get_token(url, name=None):
         return response.json()["access_token"]
 
 
+def usage_log_dir() -> Path:
+    """Folder the usage logs are written to: this package's folder in the upload, where
+    log_view reads them. Apps that keep shared records next to them (SEM_crystal_counter's
+    training log) use it too."""
+    return Path(__file__).resolve().parent
+
+
 def log_notebook_usage(log_filename="notebook_usage.log"):
     """
     Log notebook usage to a file at the same level as this .py file.
@@ -36,9 +43,7 @@ def log_notebook_usage(log_filename="notebook_usage.log"):
         log_filename (str): Name of the log file (default: "notebook_usage.log")
     """
     try:
-        # Get the directory where this .py file is located
-        script_dir = Path(__file__).parent
-        log_path = script_dir / log_filename
+        log_path = usage_log_dir() / log_filename
 
         # Get current date and time
         now = datetime.datetime.now()
@@ -117,8 +122,7 @@ def log_button_usage(action: str, user: str | None = None, log_filename="button_
         log_filename (str): Name of the log file (default: "button_usage.log")
     """
     try:
-        script_dir = Path(__file__).parent
-        log_path = script_dir / log_filename
+        log_path = usage_log_dir() / log_filename
 
         now = datetime.datetime.now()
         date_str = now.strftime("%Y-%m-%d")

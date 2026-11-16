@@ -3,6 +3,8 @@ Diagnostic Helper
 Quick checks for data structure and values
 """
 
+from html import escape  # (a local variable here is called html)
+
 
 class DebugLogger:
     """Collect debug messages for display in UI"""
@@ -41,7 +43,10 @@ class DebugLogger:
             else:
                 color = "#333333"  # Dark gray
 
-            html += f"<div style='color: {color}; margin: 2px 0;'>[{category}] {text}</div>"
+            html += (
+                f"<div style='color: {color}; margin: 2px 0;'>"
+                f"[{escape(str(category))}] {escape(str(text))}</div>"
+            )
 
         html += "</div>"
         return html

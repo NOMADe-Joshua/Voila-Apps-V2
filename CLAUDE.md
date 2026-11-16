@@ -63,11 +63,19 @@ apps/<AppName>/
     <app>.ipynb             # cell 0 is always the bootstrap cell
 shared/perotf_utils/        # DO NOT DUPLICATE ANYTHING FROM HERE
     config.py               # URL_BASE, API_ENDPOINT, GUI_ENDPOINT, NORTH_ENDPOINT, ENTRY_TYPES: the ONLY place
-    api_calls.py            # every NOMAD query; query_all() reads every page, REQUEST_TIMEOUT
+    api_calls.py            # every NOMAD query; query_all() reads every page, REQUEST_TIMEOUT;
+                            # put_raw_file/get_entry_hashes/wait_for_upload for writes (Entry_Auditor)
     access_token.py, auth_manager.py, auth_ui.py,
-    batch_selection.py, error_handler.py, plotting_utils.py, process_handling.py
+    batch_selection.py      # batch list + "Show <technique> only" filter (create_batch_selection)
+    downloads.py            # start_download(): a file straight to the browser from a callback
+    manual.py               # manual_panel(__file__): the app's manual.md behind a Manual button
+    error_handler.py, plotting_utils.py, process_handling.py
+    widget_cleanup.py       # close_widgets/live_widgets/UiRebuild: close what a refresh replaces
+    north.py                # get_current_user/get_upload_id/get_uploads_path under a NORTH tool
+    consistency.py          # field-consistency helpers (Entry_Auditor)
+    upload_backups.py       # backups + change logs in the changed entry's own upload (hidden names)
     table_utils.py          # csv_safe / keep_text_as_text for exports, pivot_by_group
-    process_specs.py        # process catalog (Excel column labels and archive paths), see below
+    process_specs.py        # process catalog (Excel labels, archive paths, Excel_creator controls), see below
 shared/utils.ipynb          # admin notebook (old usage dashboard + backup zip), not an app
 tests/<AppName>/            # ONE folder per app, at repo root, never inside apps/
     conftest.py
@@ -83,7 +91,8 @@ Two app shapes exist after the migration from the old flat repo
 
 - **Modular apps** (JV-Analysis, Process_JV_Overview, EQE_Analysis,
   AbsPL_Analysis, UVVis_Analyzer, XRD_PF, DesignOfExperiments, Excel_creator,
-  Reprocess_Uploads):
+  Reprocess_Uploads, SEM_crystal_counter, Global_analyzer, Entry_Auditor,
+  MPPT_Analysis):
   `app.py` plus modules, and a notebook with exactly 3 code cells (bootstrap,
   `log_notebook_usage()`, start the app).
 - **Notebook apps** (all others): the analysis code still lives in the
@@ -111,7 +120,9 @@ Two app shapes exist after the migration from the old flat repo
    `try/except` fallback literal**: `bootstrap.py` guarantees the package, and a
    fallback would scatter the address across the repo again (HZB uses a
    fallback; we deliberately don't). A new entry type gets a key in
-   `ENTRY_TYPES` first. `tests/structure/test_repo_structure.py` fails on
+   `ENTRY_TYPES` first; a new tool class of an existing kind (nomad_perotf has
+   one class per tool: `CR_SpinBox_SpinCoating`, ...) also goes into its list in
+   `ENTRY_TYPE_FAMILIES`, which `api_calls` queries with `entry_type:any`. `tests/structure/test_repo_structure.py` fails on
    `elnserver`, `/nomad-oasis`, `peroTF_`, `HySprint_` or `baseclasses.` outside
    `config.py`, comments and display strings included (the HZB pattern is the host
    `nomad-hzb-se.`, so a GitHub link to an HZB repo is fine).
@@ -166,17 +177,35 @@ Two app shapes exist after the migration from the old flat repo
     Exports that can hold NOMAD text go through `table_utils.csv_safe` (CSV) or
     `keep_text_as_text` (openpyxl), so a sample name starting with `=` is never
     run as a formula; NOMAD text put into HTML goes through `html.escape`.
+13. **Batch lists, downloads and manuals are shared.** An app that lists batches
+    uses `batch_selection.create_batch_selection` and, to narrow the list to one
+    technique, its `filter_label`/`filter_entry_type` (one NOMAD lookup for all
+    batches; never a loop that loads every batch's data to see whether it has
+    any). A file download from a callback goes through `downloads.start_download`
+    into an `Output` in the widget tree. Every app has `apps/<App>/manual.md`,
+    shown with `manual.manual_panel(__file__)`; `tests/structure` enforces it,
+    with `NO_MANUAL_YET` listing the apps still without one (remove an app there
+    when its manual lands). A user-visible change updates the manual in the same
+    change.
 
 ## Excel_creator and `process_specs.py`
 
 `shared/perotf_utils/process_specs.py` is a process catalog: per process type
-the Excel column labels, test values and the archive path each label is
-filled from (paths follow the nomad-baseclasses `map_*` functions that
-nomad_perotf's experiment parser calls). It was the catalog of smart_databaser,
-which was removed on 2026-11-11 because nobody used it; nothing reads the
-catalog right now. Our Excel_creator writes its labels inline in
-`sheet_experiment.py` (HZB's generates its guide from the catalog); whether we
-follow HZB there is decided when Excel_creator is ported. Only confirm a path
+the Excel column labels, test values, the archive path each label is filled
+from (paths follow the nomad-baseclasses `map_*` functions that nomad_perotf's
+experiment parser calls) and the `meta` of Excel_creator's process rows
+(numeric, choice and boolean controls, defaults). Excel_creator (ported from
+HZB on 2026-11-13) takes from it its process list, the row controls and the
+Experiment Info paths that `nomad_prefill.py` fills a new sheet from.
+
+Unlike HZB, the column labels stay inline in `sheet_experiment.py` (they are
+what nomad_perotf's parser reads), and the "Data Entry Guide" sheet stays
+hand-written (`sheet_data_entry_guide.py`; HZB generates it from the catalog).
+So a column change touches `sheet_experiment.py`, the catalog and the guide;
+`test_the_catalog_lists_the_columns_the_sheet_writes` fails when the first two
+drift apart. The catalog's `config_defaults` are the fallbacks the sheet uses
+for a missing config key (one solvent, two co-evaporation materials, ...),
+and the app writes them into a step that lacks them. Only confirm a path
 against the real `map_<type>` function, never guess; mark unconfirmed units
 `unit_verified: False`.
 
@@ -329,8 +358,7 @@ side.
 
 ## Known gaps (tracked, not silently fixed)
 
-- **Notebook apps are still monolithic** (MPPT_Analysis,
-  Data_Tools, SEM_crystal_counter, UVVis_Simulator). Next step per app: move
+- **Notebook apps are still monolithic** (Data_Tools, UVVis_Simulator). Next step per app: move
   the code into
   `app.py` + modules and reduce the notebook to 3 cells, following
   `UNIFICATION_PROMPT.md`.
@@ -342,7 +370,8 @@ side.
   (`plot_manager`, `utils`, `resizable_plot_utility`, ...) that have drifted
   slightly; consolidating them is a separate change.
 - The `KIT_` lab-ID prefix is still written literally in `Excel_creator`
-  (Excel ID formula) and `Data_Tools` (renamers). If it should become
+  (`sheet_experiment.LAB_ID_PREFIX`, used by the Nomad ID formula and by
+  `nomad_prefill`) and `Data_Tools` (renamers). If it should become
   configurable, add it to `perotf_utils.config` first.
 - `apps/Excel_creator/sheet_how_to_cite.py` writes a "How to Cite" sheet into
   every generated workbook that cites HZB's `nomad-hzb/nomad-hysprint` schema
@@ -362,6 +391,9 @@ side.
   (`data_manager.visible_categories`) and `log_view` checks again itself, since
   the notebook URL still works. This is a display rule, not file access control:
   anyone with access to the upload can still open the log file itself.
+  SEM_crystal_counter's *Save as reviewed* writes its training log next to it
+  (`access_token.usage_log_dir() / "sem_training_log"`, gitignored; grain maps,
+  edits and the NOMAD user name, no images).
 - Not in this repo on purpose; all remain in `nomad-perotf-jupyter-voila-scripts`:
   - targeted the HZB server: `File_Uploader`, `Ink_Jet_Absorber_Analysis`,
     `NMR_Analysis`;
@@ -369,12 +401,60 @@ side.
     migration): `Diode_Analyzer`, `XPS-Automated`, `Wetting_envelope`,
     `Perovskite_calculator` (the latter came with the original HZB scripts and
     is no longer in HZB's repo either), `Peak_Explorer` (TRPL, not in the
-    ELN), `Data_Overview_Machines`, `Hansen_green_calculator`, and `SEM_crystal_counter`'s crystal counter
-    notebooks (`SEM_Analyzer*.ipynb`, `SEM_bad.ipynb`; only the grain size
-    analysis `image_analysis.ipynb` is kept).
+    ELN), `Data_Overview_Machines`, `Hansen_green_calculator`, and the old
+    `SEM_crystal_counter` notebooks (the crystal counters `SEM_Analyzer*.ipynb`
+    and `SEM_bad.ipynb`, and the Canny/DBSCAN `image_analysis.ipynb`, replaced
+    on 2026-11-13 by HZB's modular app; its detection is tuned on HZB's images
+    and not yet checked on peroTF films).
   - HZB extras dropped from this fork: the `Learning/` tutorials, the
     `NOMAD_DATA_ACCESS_PROMPT.md` LLM reference with its dashboard section
-    "Build Your Own", and the git hooks that reset `Learning/` on pull.
+    "Build Your Own", the git hooks that reset `Learning/` on pull, and
+    Global_analyzer's AI summary (`ai_summary.py`, `app_secrets.py`: unused at
+    HZB, and it would send unpublished data to the external Blablador service).
+- **Entry_Auditor writes to NOMAD** (ported 2026-11-14; corrections for everyone
+  with write access, user decision). Backups and per-run correction logs go into
+  the entry's own upload (`entry_auditor_backups/`, names with a leading dot, which
+  NOMAD never parses), never next to the app; `lab_id`, the plan position and time
+  stamps are locked; `apps/Entry_Auditor/CLAUDE.md` lists what must not be
+  weakened. Two NOMAD options it relies on, checked only in the dev checkout of
+  nomad-FAIR: `entry_hash` on the raw PUT (refuses a write when the entry changed
+  meanwhile) and `trigger_processing=false` (a backup does not reprocess the
+  upload). An older Oasis ignores both silently: verify on a test upload. A
+  correction changes the entry, not the experiment Excel: Reprocess_Uploads
+  brings the old value back.
+- **MPPT_Analysis writes fit results to NOMAD** (HZB's modular app, ported
+  2026-11-15 with write-back, user decision): only into
+  `ENTRY_TYPE_FAMILIES["mppt"]` entries, only below `data/results/0/`, with a
+  backup in `mppt_fit_backups/` of the entry's own upload first
+  (`perotf_utils.upload_backups`, shared with Entry_Auditor), a hash re-check
+  right before `edit_entry` (NOMAD's edit endpoint has no concurrency check) and
+  a read-back; `apps/MPPT_Analysis/CLAUDE.md` lists what must not be weakened.
+- **`bootstrap.py` installs every app's modules as top-level modules** into
+  site-packages (`packages = ["."]`: `data_manager.py`, `app.py`, ... of the
+  last installed app, also in the dev `.venv`). An app's own folder comes first
+  on `sys.path`, so the app is fine, but in tests a bare-name import inside a
+  function (after `app_loader` restored `sys.path`) silently gets another app's
+  stale module: keep app-internal imports at module level. Same design as HZB.
+- **JV-Analysis and EQE_Analysis still build some downloads in the browser**
+  (plot images via `Plotly.toImage`, the PowerPoint via pptxgenjs, HTML buttons
+  with a hidden payload), not through `downloads.start_download`. HZB rewrote
+  its JV flow; ours differs and changing it needs a browser test.
+- **Known faults in JV-Analysis, EQE_Analysis and AbsPL_Analysis**, found while
+  writing their manuals (2026-11-16) and listed under *Known limits* there, not yet
+  fixed: in JV most *JV Curve* plot options raise inside the callback (only the two
+  "Best device" ones plot), *Logarithmic ln(|J|)* changes only the title, the
+  workbook's Jsc champion takes the smallest |Jsc|, the `batch` summary column is
+  always "unknown", and the CSV/"Additional Measurements"/SaveUI widgets are never
+  in the displayed tree; EQE's median/mean bands mix multijunction sub-cells; AbsPL's
+  *Fit mode* has no effect. JV and Process_JV_Overview still have their own login
+  classes and JV its own `WidgetFactory` copy instead of the shared ones (rule 1).
+  Fixed then: `titlefont` (rejected from plotly 6 on) in JV and EQE, the V_mpp/J_mpp
+  filter names, EQE's J0rad shown 10x too small and its JSON download, AbsPL's
+  colour callback. Remove a fault from the manual when it is fixed.
+- **Global_analyzer reads HZB's field layout**: its loaders were written for
+  HZB's entries; peroTF's steps share nomad-baseclasses, but which parameters
+  appear was not checked against real peroTF batches (the Oasis was not
+  reachable). Entry types come from `ENTRY_TYPE_FAMILIES`.
 - **Seq-Evaporation sources are not in NOMAD**: nomad-baseclasses'
   `map_evaporation()` returns before adding any source when the "Organic"
   column is missing, which is always the case for Seq-Evaporation. Being fixed

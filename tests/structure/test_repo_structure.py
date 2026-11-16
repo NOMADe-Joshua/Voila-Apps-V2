@@ -116,6 +116,32 @@ def test_no_hysprint_utils_imports(path):
     assert "hysprint_utils" not in path.read_text(encoding="utf-8")
 
 
+# Apps that still have no manual.md: remove an app here when its manual lands. The test fails
+# for an app that is listed but has a manual, so this list cannot go stale (ported from HZB).
+NO_MANUAL_YET = {
+    "App_dashboard",
+    "Data_Tools",
+    "UVVis_Analyzer",
+    "UVVis_Simulator",
+    "XRD_PF",
+    "log_view",
+}
+
+
+@pytest.mark.parametrize("app_dir", APP_DIRS, ids=lambda p: p.name)
+def test_app_has_a_manual_shown_with_manual_panel(app_dir):
+    """Every app has apps/<App>/manual.md, shown with perotf_utils.manual.manual_panel."""
+    manual = app_dir / "manual.md"
+    if app_dir.name in NO_MANUAL_YET:
+        assert not manual.exists(), f"{_rel(app_dir)} has a manual.md: remove it from NO_MANUAL_YET"
+        return
+    assert manual.exists(), f"{_rel(app_dir)} has no manual.md"
+    sources = [*app_dir.glob("*.py"), *app_dir.glob("*.ipynb")]
+    assert any("manual_panel" in f.read_text(encoding="utf-8") for f in sources), (
+        f"{_rel(manual)} is never shown: call manual_panel(__file__)"
+    )
+
+
 LOGIN_IN_URL = re.compile(r"params\s*=\s*(auth_dict|dict\(\s*username\s*=)")
 
 

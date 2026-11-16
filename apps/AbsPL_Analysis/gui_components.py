@@ -921,8 +921,8 @@ class ColorSchemeSelector:
         )
 
     def _on_color_change(self, change):
+        # (There is no colour preview any more; the call to it raised on every change.)
         self.selected_scheme = change["new"]
-        self._update_preview()
 
     def _on_num_colors_change(self, change):
         """Compatibility no-op: color count control removed from UI."""

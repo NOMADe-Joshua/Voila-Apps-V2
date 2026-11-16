@@ -4,6 +4,7 @@ Adds resizable containers to Plotly figures in Jupyter notebooks / Voila.
 Ported from JV-Analysis resizable_plot_utility.py.
 """
 
+import html
 import json
 import uuid
 
@@ -52,11 +53,11 @@ class ResizablePlotWidget:
 
         fig_json = json.dumps(self.fig, cls=plotly.utils.PlotlyJSONEncoder)
 
-        title_html = f'<h3 style="margin: 20px 0 5px 0; color: #2c3e50;">{self.title}</h3>'
+        title_html = (
+            f'<h3 style="margin: 20px 0 5px 0; color: #2c3e50;">{html.escape(str(self.title))}</h3>'
+        )
         if self.subtitle:
-            title_html += (
-                f'<p style="margin: 0 0 10px 0; color: #666; font-size: 12px;">{self.subtitle}</p>'
-            )
+            title_html += f'<p style="margin: 0 0 10px 0; color: #666; font-size: 12px;">{html.escape(str(self.subtitle))}</p>'
 
         resizable_html = f'''
         <script>

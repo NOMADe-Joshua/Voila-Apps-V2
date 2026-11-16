@@ -1,20 +1,87 @@
-import base64
+import html
 import io
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
 import ipywidgets as widgets
-from IPython.display import HTML, display
+import nomad_prefill
+from IPython.display import display
 
-# DEBUG FLAG - Set to False to suppress all debug output
-DEBUG = False
+from perotf_utils.downloads import start_download
+from perotf_utils.manual import manual_panel
+from perotf_utils.process_specs import (
+    ATMOSPHERIC_CONFIG_KEY,
+    AVAILABLE_PROCESSES,
+    PROCESSES,
+    build_default_config_by_process_type,
+)
+
+logger = logging.getLogger(__name__)
+
+_APP_DIR = Path(__file__).resolve().parent
+DEFAULT_TEMPLATES_FILE = _APP_DIR / "templates" / "process_templates.json"
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-def _debug_print(msg):
-    """Helper function to conditionally print debug messages"""
-    if DEBUG:
-        print(msg)
+def default_templates() -> dict:
+    """The built-in templates, used (in memory only) when the templates file cannot be read."""
+    return {
+        "empty_template": {
+            "name": "Empty Template",
+            "description": "Start with just Experiment Info",
+            "category": "Basic",
+            "process_sequence": [{"process": "Experiment Info"}],
+        },
+        "simple_coating": {
+            "name": "Simple Coating",
+            "description": "Basic coating process",
+            "category": "Coating Processes",
+            "process_sequence": [
+                {"process": "Experiment Info"},
+                {"process": "Cleaning O2-Plasma", "config": {"solvents": 2}},
+                {
+                    "process": "Spin Coating",
+                    "config": {"solvents": 1, "solutes": 1, "spinsteps": 1},
+                },
+                {"process": "Evaporation"},
+            ],
+        },
+    }
+
+
+def _known_config_keys(process_name: str) -> set[str]:
+    meta = PROCESSES.get(process_name, {}).get("meta", {})
+    keys = {key for key, *_ in meta.get("numeric_config", [])}
+    keys |= {key for key, *_ in meta.get("boolean_config", [])}
+    keys |= {key for key, *_ in meta.get("choice_config", [])}
+    if ATMOSPHERIC_CONFIG_KEY:
+        keys.add(ATMOSPHERIC_CONFIG_KEY)
+    return keys
+
+
+def validate_template(template) -> list[str]:
+    """Why a template cannot be applied, as a list of plain sentences (empty when it can).
+
+    A template needs a name and a process sequence, and every process in it must be one the
+    app offers (an unknown name used to crash the process rows half way through applying it).
+    Config keys the process does not know are not an error here: applying the template drops
+    them."""
+    if not isinstance(template, dict):
+        return ["it is not a template entry"]
+    problems = []
+    if not template.get("name"):
+        problems.append("it has no name")
+    sequence = template.get("process_sequence")
+    if not isinstance(sequence, list) or not sequence:
+        problems.append("it has no process_sequence")
+        return problems
+    for position, step in enumerate(sequence, start=1):
+        process = step.get("process") if isinstance(step, dict) else None
+        if process not in AVAILABLE_PROCESSES:
+            problems.append(f"step {position} uses the unknown process {process!r}")
+    return problems
 
 
 try:
@@ -23,35 +90,20 @@ try:
     EXCEL_BUILDER_AVAILABLE = True
 except ImportError:
     EXCEL_BUILDER_AVAILABLE = False
-    _debug_print("ExperimentExcelBuilder not found. Install it or check the import path.")
+    logger.warning("ExperimentExcelBuilder not found. Install it or check the import path.")
 
 
 class MinimalistExperimentBuilder:
-    def __init__(self, templates_file="process_templates.json"):
-        self.templates_file = Path(templates_file)
+    PREFILL_PLACEHOLDER = "Select an upload..."
+
+    def __init__(self, templates_file=None):
+        self.templates_file = Path(templates_file) if templates_file else DEFAULT_TEMPLATES_FILE
         self.current_sequence = []
         self.templates = {}
 
-        # Available process types - updated to include Seq-Evaporation
-        processes = [
-            "Spin Coating",
-            "Evaporation",
-            "Co-Evaporation",
-            "Seq-Evaporation",
-            "Sputtering",
-            "ALD",
-            "Cleaning O2-Plasma",
-            "Cleaning UV-Ozone",
-            "Inkjet Printing",
-            "Slot Die Coating",
-            "Dip Coating",
-            "Close Space Sublimation",
-            "Lamination",
-            "Annealing",
-            "Generic Process",
-            "Multijunction Info",
-        ]
-        self.available_processes = ["Experiment Info"] + processes
+        # The process types, their config controls and defaults come from
+        # perotf_utils.process_specs, so the list and the controls cannot drift apart.
+        self.available_processes = AVAILABLE_PROCESSES
 
         self.setup_widgets()
         self.load_templates()
@@ -61,91 +113,48 @@ class MinimalistExperimentBuilder:
         self._update_process_display()
 
     def load_templates(self):
-        """Load templates from JSON file"""
+        """Load the templates from the JSON file. A file that is missing or cannot be read
+        never gets overwritten: the built-in templates are used in memory instead and the
+        reason is shown in the status area. Templates that cannot be applied are left out of
+        the dropdown, each with the reason."""
+        raw = {}
         try:
-            # Get the directory where this script is located
-            try:
-                script_dir = Path(__file__).parent
-            except NameError:
-                # __file__ not available in Jupyter, use current directory
-                script_dir = Path.cwd()
-
-            # Try multiple possible paths - prioritize script directory
-            possible_paths = [
-                script_dir / "process_templates.json",  # Same directory as script
-                script_dir / "templates" / "process_templates.json",  # Subfolder
-                Path.cwd() / "process_templates.json",  # Current working directory
-                Path.cwd() / "Excel_creator" / "process_templates.json",
-                Path.cwd() / "Excel_creator" / "templates" / "process_templates.json",
-                self.templates_file,  # Original path
-            ]
-
-            template_file = None
-            for path in possible_paths:
-                if path.exists():
-                    template_file = path
-                    break
-
-            if template_file:
-                with open(template_file, "r") as f:
-                    data = json.load(f)
-                    self.templates = data.get("templates", {})
-
-                _debug_print(f"✅ Loaded {len(self.templates)} templates from {template_file}")
-                for key in self.templates.keys():
-                    _debug_print(f"   - {self.templates[key].get('name', key)}")
+            if self.templates_file.exists():
+                with open(self.templates_file, encoding="utf-8") as f:
+                    raw = json.load(f).get("templates", {})
             else:
-                _debug_print("⚠️ Template file not found in expected locations:")
-                for path in possible_paths:
-                    _debug_print(f"   Tried: {path}")
-                _debug_print("Creating default template file...")
-                self.create_default_template()
-                return
+                self._status(
+                    f"Template file {self.templates_file} not found, using the built-in templates.",
+                    "warning",
+                )
+                raw = default_templates()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Error loading templates: %s", exc)
+            self._status(
+                f"Could not read the templates file ({exc}). Using the built-in templates; "
+                "the file was not changed.",
+                "error",
+            )
+            raw = default_templates()
 
-            self._update_template_dropdown()
-
-        except Exception as e:
-            _debug_print(f"❌ Error loading templates: {e}")
-            if DEBUG:
-                import traceback
-
-                traceback.print_exc()
-            self.create_default_template()
-
-    def create_default_template(self):
-        """Create a minimal default template file as fallback"""
-        default_data = {
-            "metadata": {
-                "version": "1.0",
-                "description": "Process templates for laboratory automation",
-                "last_updated": datetime.now().strftime("%Y-%m-%d"),
-            },
-            "templates": {
-                "empty_template": {
-                    "name": "Empty Template",
-                    "description": "Start with just Experiment Info",
-                    "category": "Basic",
-                    "process_sequence": [{"process": "Experiment Info"}],
-                }
-            },
-        }
-
-        # Try to create in script directory first
-        try:
-            script_dir = Path(__file__).parent
-        except NameError:
-            script_dir = Path.cwd()
-
-        target_file = script_dir / "process_templates.json"
-        target_file.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(target_file, "w") as f:
-            json.dump(default_data, f, indent=2)
-
-        self.templates = default_data["templates"]
-        _debug_print(f"✅ Created minimal template file at {target_file}")
-        _debug_print(f"   Please load proper templates from {target_file}")
+        self.templates = {}
+        for key, template in raw.items():
+            problems = validate_template(template)
+            if problems:
+                self._status(f"Template '{key}' skipped: {'; '.join(problems)}.", "warning")
+            else:
+                self.templates[key] = template
+        logger.info("Loaded %d templates.", len(self.templates))
         self._update_template_dropdown()
+
+    def _status(self, message, kind="info"):
+        """Show a message in the Status panel (logging alone is never rendered under Voila)."""
+        icon = {"error": "❌", "warning": "⚠️", "success": "✅"}.get(kind, "")
+        with self.status_output:
+            print(f"{icon} {message}".strip())
+        logger.log(
+            {"error": logging.ERROR, "warning": logging.WARNING}.get(kind, logging.INFO), message
+        )
 
     def setup_widgets(self):
         """Initialize all widgets"""
@@ -161,21 +170,6 @@ class MinimalistExperimentBuilder:
             description="Apply", button_style="primary", layout=widgets.Layout(width="80px")
         )
 
-        # Guide toggle button
-        self.guide_toggle = widgets.Button(
-            description="Show Guide",
-            button_style="info",
-            icon="question",
-            layout=widgets.Layout(width="140px"),
-        )
-
-        # Guide content (loaded from file, initially hidden)
-        self.guide_content = widgets.HTML(
-            value=self._load_guide_content(), layout=widgets.Layout(display="none")
-        )
-
-        self.guide_visible = False
-
         # Process sequence area
         self.process_sequence_area = widgets.VBox([])
 
@@ -186,35 +180,121 @@ class MinimalistExperimentBuilder:
             layout=widgets.Layout(width="150px"),
         )
 
-        self.download_area = widgets.HTML(value="")
+        # The download starts from here (perotf_utils.downloads.start_download).
+        self.download_output = widgets.Output()
         self.status_output = widgets.Output()
+
+        # Prefill from NOMAD: hidden in normal use, opened by its own button. Nothing is
+        # fetched until the panel is opened.
+        self.prefill_toggle = widgets.ToggleButton(
+            value=False,
+            description="Optional: prefill from NOMAD",
+            tooltip=(
+                "Only if the samples already exist in NOMAD: fill one row per sample of one of "
+                "your NOMAD uploads, with its Nomad ID and what NOMAD knows of the sample and "
+                "its substrate"
+            ),
+            # Small and grey on its own line under Generate Excel: an extra, not a second
+            # main action.
+            style={"font_size": "12px", "text_color": "#666666"},
+            # align_self: in the VBox an auto-width button would stretch across the page
+            layout=widgets.Layout(
+                width="auto", height="26px", margin="0 0 10px 0", align_self="flex-start"
+            ),
+        )
+        self.prefill_upload_dropdown = widgets.Dropdown(
+            options=[(self.PREFILL_PLACEHOLDER, None)],
+            value=None,
+            description="NOMAD upload:",
+            style={"description_width": "initial"},
+            layout=widgets.Layout(width="600px"),
+        )
+        self.prefill_info = widgets.HTML(value="")
+        # What nomad_perotf's experiment parser does with the file: it writes every entry with
+        # create_archive(..., overwrite=False), which never replaces an existing entry.
+        self.prefill_note = widgets.HTML(
+            value=(
+                "<div style='font-size: 0.9em; color: #555; max-width: 600px;'>"
+                "Upload the generated file into <b>this same upload</b>: only there are the new "
+                "processes linked to these samples. Samples and process steps that already exist "
+                "in the upload are kept as they are; new values for them in this file are "
+                "ignored. A prefilled file has no example row. Measurements need no new Excel."
+                "</div>"
+            )
+        )
+        self.prefill_panel = widgets.VBox(
+            [self.prefill_upload_dropdown, self.prefill_info, self.prefill_note],
+            layout=widgets.Layout(display="none", margin="0 0 10px 0"),
+        )
+        self.prefill_samples = []
+        self._prefill_connection = None  # (url, token) once the uploads were loaded
 
         # Event handlers
         self.apply_button.on_click(self._on_apply_template)
         self.generate_button.on_click(self._on_generate_excel)
-        self.guide_toggle.on_click(self._toggle_guide)
+        self.prefill_toggle.observe(self._on_prefill_toggle, names="value")
+        self.prefill_upload_dropdown.observe(self._on_prefill_upload_change, names="value")
 
-    def _load_guide_content(self):
-        """Load guide content from external HTML file"""
+    def _prefill_message(self, message, kind="info"):
+        color = {"error": "#c0392b", "warning": "#b9770e"}.get(kind, "#2c3e50")
+        self.prefill_info.value = f"<span style='color: {color};'>{html.escape(message)}</span>"
+
+    def _on_prefill_toggle(self, change):
+        """Open or close the prefill panel. The first opening loads the uploads; a closed
+        panel means no prefill, whatever upload was chosen in it."""
+        self.prefill_panel.layout.display = None if change["new"] else "none"
+        if change["new"] and self._prefill_connection is None:
+            self._load_prefill_uploads()
+
+    def _load_prefill_uploads(self):
+        self._prefill_message("Loading your NOMAD uploads...")
         try:
-            guide_file = Path("guide.html")
-            if guide_file.exists():
-                with open(guide_file, "r", encoding="utf-8") as f:
-                    return f.read()
-            else:
-                # Fallback content if file doesn't exist
-                return """
-                <div style="padding: 15px; background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; margin: 10px 0;">
-                    <p>Guide file not found. Create 'guide.html' in your project directory.</p>
-                </div>
-                """
-        except Exception as e:
-            return f"""
-            <div style="padding: 15px; background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; margin: 10px 0;">
-                <h4 style="color: #495057;">📖 Guide Error</h4>
-                <p>Error loading guide: {e}</p>
-            </div>
-            """
+            url, token = nomad_prefill.connect()
+            uploads = nomad_prefill.fetch_uploads(url, token)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Could not load the NOMAD uploads")
+            self._prefill_message(f"Could not load your NOMAD uploads: {exc}", "error")
+            return
+        self._prefill_connection = (url, token)
+        self.prefill_upload_dropdown.options = [
+            (self.PREFILL_PLACEHOLDER, None),
+            *nomad_prefill.upload_choices(uploads),
+        ]
+        self.prefill_upload_dropdown.value = None
+        if uploads:
+            self._prefill_message(f"{len(uploads)} uploads found. Pick the one of this batch.")
+        else:
+            self._prefill_message("You have no NOMAD uploads.", "warning")
+
+    def _on_prefill_upload_change(self, change):
+        """Fetch the samples of the chosen upload, so the user sees what will be filled."""
+        self.prefill_samples = []
+        upload_id = change["new"]
+        if upload_id is None or self._prefill_connection is None:
+            self._prefill_message("")
+            return
+        self._prefill_message("Loading the samples of this upload...")
+        try:
+            self.prefill_samples = nomad_prefill.fetch_samples_in_upload(
+                *self._prefill_connection, upload_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Could not load the samples of upload %s", upload_id)
+            self._prefill_message(f"Could not load the samples of this upload: {exc}", "error")
+            return
+        if self.prefill_samples:
+            first, last = self.prefill_samples[0].lab_id, self.prefill_samples[-1].lab_id
+            columns = ", ".join(nomad_prefill.filled_columns(self.prefill_samples))
+            self._prefill_message(
+                f"{len(self.prefill_samples)} samples ({first} to {last}). Filled columns: "
+                f"{columns}."
+            )
+        else:
+            self._prefill_message("This upload has no samples.", "warning")
+
+    def _samples_to_prefill(self):
+        """The samples to write into the sheet: only while the prefill panel is open."""
+        return self.prefill_samples if self.prefill_toggle.value else []
 
     def _update_template_dropdown(self):
         """Update template dropdown with all available templates"""
@@ -224,10 +304,9 @@ class MinimalistExperimentBuilder:
     def _on_apply_template(self, button):
         """Apply selected template"""
         template_name = self.template_dropdown.value
+        self.status_output.clear_output()
         if template_name == "Select template...":
-            with self.status_output:
-                self.status_output.clear_output()
-                _debug_print("❌ Please select a template")
+            self._status("Please select a template.", "warning")
             return
 
         # Find template
@@ -240,44 +319,27 @@ class MinimalistExperimentBuilder:
         if selected_template:
             # Deep copy the process sequence
             self.current_sequence = []
+            dropped = []
             for process in selected_template["process_sequence"]:
                 new_process = {"process": process["process"]}
                 if "config" in process:
-                    new_process["config"] = process["config"].copy()
+                    known = _known_config_keys(process["process"])
+                    new_process["config"] = {
+                        k: v for k, v in process["config"].items() if k in known
+                    }
+                    dropped += [
+                        f"{process['process']}: {k}" for k in process["config"] if k not in known
+                    ]
                 self.current_sequence.append(new_process)
 
-            # Debug: Check if Seq-Evaporation is in available processes
-            with self.status_output:
-                self.status_output.clear_output()
-                seq_evap_processes = [
-                    p for p in self.current_sequence if p["process"] == "Seq-Evaporation"
-                ]
-                if seq_evap_processes:
-                    _debug_print(f"🔍 Found {len(seq_evap_processes)} Seq-Evaporation processes")
-                    _debug_print(f"🔍 Available processes: {self.available_processes}")
-                    if "Seq-Evaporation" in self.available_processes:
-                        _debug_print("✅ Seq-Evaporation is in available processes")
-                    else:
-                        _debug_print("❌ Seq-Evaporation NOT in available processes")
-
             self._update_process_display()
-
-            with self.status_output:
-                self.status_output.clear_output()
-                # _debug_print(f"✅ Applied: {template_name} ({len(self.current_sequence)} processes)")
-
-    def _toggle_guide(self, button):
-        """Toggle guide visibility"""
-        self.guide_visible = not self.guide_visible
-
-        if self.guide_visible:
-            self.guide_content.layout.display = "block"
-            self.guide_toggle.description = "Hide Guide"
-            self.guide_toggle.icon = "times"
-        else:
-            self.guide_content.layout.display = "none"
-            self.guide_toggle.description = "Show Guide"
-            self.guide_toggle.icon = "question"
+            self._status(
+                f"Applied {template_name} ({len(self.current_sequence)} processes).", "success"
+            )
+            if dropped:
+                self._status(
+                    f"Ignored settings this process does not have: {', '.join(dropped)}.", "warning"
+                )
 
     def _update_process_display(self):
         """Update the process sequence display"""
@@ -296,11 +358,23 @@ class MinimalistExperimentBuilder:
     def _create_process_row(self, index, process_data):
         """Create a single row for a process"""
         process_name = process_data["process"]
+        # Every control shows a value, so write the value it shows into a config that lacks
+        # the key: the process's default from the catalog (the same fallback sheet_experiment
+        # uses), else the minimum or the first option. What is shown is then what is
+        # generated (at HZB a template without "spinsteps" showed "Steps: 1" and generated no
+        # rotation columns).
+        meta = PROCESSES.get(process_name, {}).get("meta", {})
+        defaults = meta.get("config_defaults", {})
+        shown_values = [(key, low) for key, _label, low, _high in meta.get("numeric_config", [])]
+        shown_values += [(key, opts[0]) for key, _label, opts in meta.get("choice_config", [])]
+        for key, fallback in shown_values:
+            if key not in process_data.get("config", {}):
+                process_data.setdefault("config", {})[key] = defaults.get(key, fallback)
         config = process_data.get("config", {})
 
         # Index label
         index_label = widgets.HTML(
-            value=f"<span style='font-weight: bold; color: #666; min-width: 25px; display: inline-block;'>{index + 1}.</span>",
+            value=f"<span style='font-weight: bold; color: #666; min-width: 25px; display: inline-block;'>{index + 1}.</span>",  # noqa: E501
             layout=widgets.Layout(width="30px"),
         )
 
@@ -368,189 +442,75 @@ class MinimalistExperimentBuilder:
             return main_row
 
     def _create_inline_config_controls(self, index, process_name, config):
-        """Create inline configuration controls - returns (numeric_controls, checkbox_controls)"""
+        """Create inline configuration controls - returns (numeric_controls, checkbox_controls)
+
+        The controls are rendered generically from PROCESSES[process_name]["meta"]
+        ("numeric_config", "choice_config", "boolean_config") in
+        perotf_utils.process_specs, instead of one hand-written if/elif block per process
+        type."""
         numeric_controls = []
         checkbox_controls = []
 
-        # Check if process has configuration options - updated list
-        configurable_processes = [
-            "Spin Coating",
-            "Cleaning O2-Plasma",
-            "Cleaning UV-Ozone",
-            "Inkjet Printing",
-            "Co-Evaporation",
-            "Seq-Evaporation",
-            "Close Space Sublimation",
-            "Slot Die Coating",
-            "Dip Coating",
-        ]
-
-        if process_name not in configurable_processes:
-            return numeric_controls, checkbox_controls
-
-        # Solvents
-        if process_name in [
-            "Spin Coating",
-            "Cleaning O2-Plasma",
-            "Cleaning UV-Ozone",
-            "Inkjet Printing",
-            "Slot Die Coating",
-            "Dip Coating",
-        ]:
-            solvents_widget = widgets.BoundedIntText(
-                value=config.get("solvents", 1),
-                min=0,
-                max=20,
-                description="Solvents:",
-                style={"description_width": "55px"},
-                layout=widgets.Layout(width="120px"),
+        # Atmospheric values for every process except Experiment Info, where the catalog
+        # has such a block (peroTF's has none, ATMOSPHERIC_CONFIG_KEY is None).
+        if ATMOSPHERIC_CONFIG_KEY and process_name != "Experiment Info":
+            atmospheric_checkbox = widgets.Checkbox(
+                value=config.get(ATMOSPHERIC_CONFIG_KEY, False),
+                description="Add Atmospheric Values",
+                style={"description_width": "initial"},
+                layout=widgets.Layout(width="190px"),
             )
-            solvents_widget.observe(
-                lambda change, idx=index: self._update_config(idx, "solvents", change["new"]),
-                names="value",
-            )
-            numeric_controls.append(solvents_widget)
-
-        # Solutes
-        if process_name in ["Spin Coating", "Inkjet Printing", "Slot Die Coating", "Dip Coating"]:
-            solutes_widget = widgets.BoundedIntText(
-                value=config.get("solutes", 1),
-                min=0,
-                max=20,
-                description="Solutes:",
-                style={"description_width": "50px"},
-                layout=widgets.Layout(width="115px"),
-            )
-            solutes_widget.observe(
-                lambda change, idx=index: self._update_config(idx, "solutes", change["new"]),
-                names="value",
-            )
-            numeric_controls.append(solutes_widget)
-
-        # Spin Steps
-        if process_name == "Spin Coating":
-            spinsteps_widget = widgets.BoundedIntText(
-                value=config.get("spinsteps", 1),
-                min=1,
-                max=5,
-                description="Steps:",
-                style={"description_width": "40px"},
-                layout=widgets.Layout(width="100px"),
-            )
-            spinsteps_widget.observe(
-                lambda change, idx=index: self._update_config(idx, "spinsteps", change["new"]),
-                names="value",
-            )
-            numeric_controls.append(spinsteps_widget)
-
-        # Materials (for co/seq evaporation and CSS)
-        if process_name in ["Co-Evaporation", "Seq-Evaporation", "Close Space Sublimation"]:
-            materials_widget = widgets.BoundedIntText(
-                value=config.get(
-                    "materials", 2 if process_name in ["Co-Evaporation", "Seq-Evaporation"] else 1
+            atmospheric_checkbox.observe(
+                lambda change, idx=index: self._update_config(
+                    idx, ATMOSPHERIC_CONFIG_KEY, change["new"]
                 ),
-                min=1,
-                max=5,
-                description="Materials:",
-                style={"description_width": "65px"},
+                names="value",
+            )
+            checkbox_controls.append(atmospheric_checkbox)
+
+        meta = PROCESSES.get(process_name, {}).get("meta", {})
+
+        for key, label, min_val, max_val in meta.get("numeric_config", []):
+            widget = widgets.BoundedIntText(
+                value=config.get(key, min_val),
+                min=min_val,
+                max=max_val,
+                description=f"{label}:",
+                style={"description_width": "initial"},
                 layout=widgets.Layout(width="130px"),
             )
-            materials_widget.observe(
-                lambda change, idx=index: self._update_config(idx, "materials", change["new"]),
+            widget.observe(
+                lambda change, idx=index, k=key: self._update_config(idx, k, change["new"]),
                 names="value",
             )
-            numeric_controls.append(materials_widget)
+            numeric_controls.append(widget)
 
-        # Optional milling preparation for CSS
-        if process_name == "Close Space Sublimation":
-            milling_checkbox = widgets.Checkbox(
-                value=config.get("milling", False),
-                description="Milling",
+        for key, label, options in meta.get("choice_config", []):
+            dropdown = widgets.Dropdown(
+                options=list(options),
+                value=config.get(key, options[0]),
+                description=f"{label}:",
                 style={"description_width": "initial"},
-                layout=widgets.Layout(width="120px"),
+                layout=widgets.Layout(width="140px"),
             )
-            milling_checkbox.observe(
-                lambda change, idx=index: self._update_config(idx, "milling", change["new"]),
+            dropdown.observe(
+                lambda change, idx=index, k=key: self._update_config(idx, k, change["new"]),
                 names="value",
             )
-            checkbox_controls.append(milling_checkbox)
+            numeric_controls.append(dropdown)
 
-        # Wf Number of Pulses (for Inkjet Printing); NOMAD's Pixdro waveform has pulses a, b, c
-        if process_name == "Inkjet Printing":
-            pulses_widget = widgets.BoundedIntText(
-                value=config.get("Wf Number of Pulses", 1),
-                min=1,
-                max=3,
-                description="Pulses:",
-                style={"description_width": "50px"},
-                layout=widgets.Layout(width="115px"),
+        for key, label in meta.get("boolean_config", []):
+            checkbox = widgets.Checkbox(
+                value=config.get(key, False),
+                description=label,
+                style={"description_width": "initial"},
+                layout=widgets.Layout(width="150px"),
             )
-            pulses_widget.observe(
-                lambda change, idx=index: self._update_config(
-                    idx, "Wf Number of Pulses", change["new"]
-                ),
+            checkbox.observe(
+                lambda change, idx=index, k=key: self._update_config(idx, k, change["new"]),
                 names="value",
             )
-            numeric_controls.append(pulses_widget)
-
-        # Checkboxes for Spin Coating
-        if process_name == "Spin Coating":
-            checkbox_options = [
-                ("antisolvent", "Antisolvent"),
-                ("gasquenching", "Gas Quenching"),
-                ("vacuumquenching", "Vacuum Quenching"),
-            ]
-
-            for option_key, option_label in checkbox_options:
-                checkbox = widgets.Checkbox(
-                    value=config.get(option_key, False),
-                    description=option_label,
-                    style={"description_width": "initial"},
-                    layout=widgets.Layout(width="140px"),
-                )
-                checkbox.observe(
-                    lambda change, idx=index, key=option_key: self._update_config(
-                        idx, key, change["new"]
-                    ),
-                    names="value",
-                )
-                checkbox_controls.append(checkbox)
-
-        # Checkboxes for Inkjet Printing
-        if process_name == "Inkjet Printing":
-            checkbox_options = [
-                ("gasquenching", "Gas Quenching"),
-                ("vacuumquenching", "Vacuum Quenching"),
-            ]
-
-            # pixORnotion dropdown
-            pixor_dropdown = widgets.Dropdown(
-                options=["Pixdro", "Notion"],
-                value=config.get("pixORnotion", "Pixdro"),
-                description="Type:",
-                style={"description_width": "40px"},
-                layout=widgets.Layout(width="120px"),
-            )
-            pixor_dropdown.observe(
-                lambda change, idx=index: self._update_config(idx, "pixORnotion", change["new"]),
-                names="value",
-            )
-            numeric_controls.append(pixor_dropdown)
-
-            for option_key, option_label in checkbox_options:
-                checkbox = widgets.Checkbox(
-                    value=config.get(option_key, False),
-                    description=option_label,
-                    style={"description_width": "initial"},
-                    layout=widgets.Layout(width="140px"),
-                )
-                checkbox.observe(
-                    lambda change, idx=index, key=option_key: self._update_config(
-                        idx, key, change["new"]
-                    ),
-                    names="value",
-                )
-                checkbox_controls.append(checkbox)
+            checkbox_controls.append(checkbox)
 
         return numeric_controls, checkbox_controls
 
@@ -590,54 +550,19 @@ class MinimalistExperimentBuilder:
         if index < len(self.current_sequence):
             self.current_sequence[index]["process"] = new_process_type
 
-            # Reset config when changing process type
-            configurable_processes = [
-                "Spin Coating",
-                "Cleaning O2-Plasma",
-                "Cleaning UV-Ozone",
-                "Inkjet Printing",
-                "Slot Die Coating",
-                "Dip Coating",
-                "Co-Evaporation",
-                "Seq-Evaporation",
-                "Close Space Sublimation",
-            ]
-
-            if new_process_type in configurable_processes:
-                self.current_sequence[index]["config"] = self._get_default_config(new_process_type)
+            # Reset config when changing process type: every type with defaults in the
+            # catalog gets them, every other type none.
+            defaults = self._get_default_config(new_process_type)
+            if defaults:
+                self.current_sequence[index]["config"] = defaults
             else:
                 self.current_sequence[index].pop("config", None)
 
             self._update_process_display()
 
     def _get_default_config(self, process_name):
-        """Get default configuration for a process"""
-        defaults = {
-            "Spin Coating": {
-                "solvents": 1,
-                "solutes": 1,
-                "spinsteps": 1,
-                "antisolvent": False,
-                "gasquenching": False,
-                "vacuumquenching": False,
-            },
-            "Cleaning O2-Plasma": {"solvents": 1},
-            "Cleaning UV-Ozone": {"solvents": 1},
-            "Inkjet Printing": {
-                "solvents": 1,
-                "solutes": 1,
-                "pixORnotion": "Pixdro",
-                "Wf Number of Pulses": 1,
-                "gasquenching": False,
-                "vacuumquenching": False,
-            },
-            "Slot Die Coating": {"solvents": 1, "solutes": 1},
-            "Dip Coating": {"solvents": 1, "solutes": 1},
-            "Co-Evaporation": {"materials": 2},
-            "Seq-Evaporation": {"materials": 2},
-            "Close Space Sublimation": {"materials": 1, "milling": False, "mixing_ratio": False},
-        }
-        return defaults.get(process_name, {})
+        """Default configuration for a process, from perotf_utils.process_specs."""
+        return build_default_config_by_process_type().get(process_name, {})
 
     def _update_config(self, process_index, key, value):
         """Update configuration for a process"""
@@ -647,227 +572,79 @@ class MinimalistExperimentBuilder:
 
             self.current_sequence[process_index]["config"][key] = value
 
-            # CSS: automatically enable mix ratio only when multiple materials are selected.
-            process_name = self.current_sequence[process_index].get("process")
-            if process_name == "Close Space Sublimation" and key == "materials":
-                materials_count = self.current_sequence[process_index]["config"].get("materials", 1)
-                self.current_sequence[process_index]["config"]["mixing_ratio"] = materials_count > 1
-
     def _add_process_below(self, index):
         """Add a new process below the current one"""
         new_process = {"process": "Generic Process"}
         self.current_sequence.insert(index + 1, new_process)
         self._update_process_display()
-
-        with self.status_output:
-            self.status_output.clear_output()
-            _debug_print(f"➕ Added process at position {index + 2}")
+        self.status_output.clear_output()
+        self._status(f"Added a process at position {index + 2}.")
 
     def _remove_process(self, index):
         """Remove a process (can't remove Experiment Info)"""
         if index > 0 and index < len(self.current_sequence):
             removed_process = self.current_sequence.pop(index)
             self._update_process_display()
-
-            with self.status_output:
-                self.status_output.clear_output()
-                _debug_print(f"🗑️ Removed: {removed_process['process']}")
+            self.status_output.clear_output()
+            self._status(f"Removed {removed_process['process']}.")
 
     def _on_generate_excel(self, button):
-        """Generate Excel file"""
+        """Generate the Excel file and start its download, or say why it could not be
+        generated (never a placeholder file: those used to be offered as "Excel Ready" and
+        uploaded to NOMAD)."""
+        self.status_output.clear_output()
+        self.download_output.clear_output()
         if not self.current_sequence:
-            with self.status_output:
-                self.status_output.clear_output()
-                _debug_print("❌ No processes configured")
+            self._status("No processes configured.", "warning")
             return
 
         try:
-            with self.status_output:
-                self.status_output.clear_output()
-                _debug_print("🔄 Generating Excel...")
-                _debug_print("🔍 Using openpyxl directly...")
-
-            excel_data = self._generate_excel_data()
-
-            with self.status_output:
-                _debug_print(f"📏 Final Excel data size: {len(excel_data)} bytes")
-
-                # Check if it's really Excel data
-                if len(excel_data) > 0:
-                    if excel_data.startswith(b"PK"):
-                        _debug_print("✅ Excel file signature is correct")
-                    else:
-                        _debug_print("❌ Not a valid Excel file!")
-                        _debug_print(f"First 50 chars: {excel_data[:50]}")
-                else:
-                    _debug_print("❌ Excel data is empty!")
-
+            samples = self._samples_to_prefill()
+            excel_data = self._generate_excel_data(samples)
             filename = f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            download_html = self._create_download_link(excel_data, filename)
+            note = (
+                "<div style='padding: 8px 12px; background-color: #d4edda; "
+                "border: 1px solid #c3e6cb; border-radius: 6px; color: #155724;'>"
+                f"📊 Download of <b>{html.escape(filename)}</b> started "
+                f"({len(self.current_sequence)} processes).</div>"
+            )
+            start_download(self.download_output, excel_data, filename, XLSX_MIME, note=note)
+            self._status(f"Excel file generated: {filename}", "success")
+            if samples:
+                self._status(f"Prefilled {len(samples)} samples from NOMAD.", "success")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Excel generation failed")
+            self._status(f"The Excel file could not be generated: {exc}", "error")
 
-            self.download_area.value = download_html
+    def _generate_excel_data(self, samples=None):
+        """The Excel file's bytes from ExperimentExcelBuilder; raises when it cannot be built.
+        samples: PrefillSamples to prefill, or None. Row 3 carries example values and the
+        Nomad ID formula unless samples are prefilled: a prefilled file is meant to be
+        uploaded, and an example row left in it would become a sample."""
+        if not EXCEL_BUILDER_AVAILABLE:
+            raise RuntimeError("ExperimentExcelBuilder is not available (import failed).")
+        rows = [sample.as_row() for sample in samples or []]
+        builder = ExperimentExcelBuilder(
+            self.current_sequence, is_testing=not rows, samples=rows or None
+        )
+        builder.build_excel()
+        buffer = io.BytesIO()
+        builder.workbook.save(buffer)
+        excel_data = buffer.getvalue()
+        if not excel_data.startswith(b"PK"):
+            raise RuntimeError("the generated file is not a valid Excel workbook")
+        return excel_data
 
-            with self.status_output:
-                _debug_print(f"🎯 Download link created for: {filename}")
-
-        except Exception as e:
-            with self.status_output:
-                self.status_output.clear_output()
-                _debug_print(f"❌ Error in _on_generate_excel: {e}")
-                if DEBUG:
-                    import traceback
-
-                    traceback.print_exc()
-
-    def _generate_excel_data(self):
-        """Generate Excel file using ExperimentExcelBuilder first, then openpyxl fallback"""
-
-        # Try ExperimentExcelBuilder FIRST (this gives you the full detailed format)
-        if EXCEL_BUILDER_AVAILABLE:
-            try:
-                with self.status_output:
-                    _debug_print("🔄 Using ExperimentExcelBuilder (full detailed format)...")
-
-                # Row 3 always gets the example values and the Nomad ID formula
-                builder = ExperimentExcelBuilder(self.current_sequence, is_testing=True)
-                builder.build_excel()
-
-                buffer = io.BytesIO()
-                builder.workbook.save(buffer)
-                buffer.seek(0)
-                excel_data = buffer.getvalue()
-
-                with self.status_output:
-                    _debug_print(f"✅ ExperimentExcelBuilder created file: {len(excel_data)} bytes")
-                    _debug_print(
-                        f"🔍 Multiple sheets: {len(builder.workbook.worksheets)} worksheets"
-                    )
-                    _debug_print(
-                        f"🔍 Sheet names: {[ws.title for ws in builder.workbook.worksheets]}"
-                    )
-
-                if (
-                    excel_data and len(excel_data) > 1000
-                ):  # Should be much larger with detailed format
-                    return excel_data
-                else:
-                    with self.status_output:
-                        _debug_print(
-                            "❌ ExperimentExcelBuilder file seems too small, trying fallback..."
-                        )
-
-            except Exception as e:
-                with self.status_output:
-                    _debug_print(f"❌ ExperimentExcelBuilder failed: {e}")
-                    _debug_print("🔄 Falling back to basic openpyxl...")
-        else:
-            with self.status_output:
-                _debug_print("❌ ExperimentExcelBuilder not available, using basic openpyxl...")
-
-        # Fallback: Basic openpyxl (simple format)
-        try:
-            from openpyxl import Workbook
-            from openpyxl.styles import Font
-
-            with self.status_output:
-                _debug_print("🔄 Using basic openpyxl (simple format)...")
-
-            # Create workbook
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Experiment Data"
-
-            # Add content
-            ws["A1"] = "Experiment Builder - Generated File"
-            ws["A1"].font = Font(bold=True, size=14)
-            ws["A2"] = f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            ws["A4"] = f"Number of Processes: {len(self.current_sequence)}"
-
-            # Process sequence
-            ws["A6"] = "Process Sequence:"
-            ws["A6"].font = Font(bold=True)
-
-            row = 7
-            for i, process in enumerate(self.current_sequence, 1):
-                ws[f"A{row}"] = f"{i}. {process['process']}"
-                if "config" in process and process["config"]:
-                    col = 2
-                    for key, value in process["config"].items():
-                        ws.cell(row=row, column=col, value=f"{key}: {value}")
-                        col += 1
-                row += 1
-
-            with self.status_output:
-                _debug_print(f"✅ Basic Excel created: {len(self.current_sequence)} processes")
-
-            # Save to buffer
-            buffer = io.BytesIO()
-            wb.save(buffer)
-            buffer.seek(0)
-            excel_data = buffer.getvalue()
-
-            with self.status_output:
-                _debug_print(f"💾 Basic Excel file: {len(excel_data)} bytes")
-
-            return excel_data
-
-        except Exception as e:
-            with self.status_output:
-                _debug_print(f"❌ All Excel generation methods failed: {e}")
-                if DEBUG:
-                    import traceback
-
-                    traceback.print_exc()
-
-            # Return error as text file
-            error_content = f"""Excel Generation Error
-=====================
-
-Error: {e}
-Timestamp: {datetime.now()}
-Process Count: {len(self.current_sequence)}
-
-Process Sequence:
-"""
-            for i, process in enumerate(self.current_sequence, 1):
-                error_content += f"{i}. {process['process']}"
-                if "config" in process and process["config"]:
-                    config_str = ", ".join([f"{k}={v}" for k, v in process["config"].items()])
-                    error_content += f" ({config_str})"
-                error_content += "\n"
-
-            return error_content.encode("utf-8")
-
-    def _create_download_link(self, excel_data, filename):
-        """Create download link"""
-        b64_data = base64.b64encode(excel_data).decode()
-
-        return f"""
-        <div style="padding: 12px; background-color: #d4edda; border: 1px solid #c3e6cb; border-radius: 6px; margin: 10px 0;">
-            <div style="display: flex; align-items: center; margin-bottom: 8px;">
-                <span style="font-size: 18px; margin-right: 8px;">📊</span>
-                <strong style="color: #155724;">Excel Ready</strong>
-            </div>
-            <div style="font-size: 14px; color: #155724; margin-bottom: 10px;">
-                {filename} • {len(self.current_sequence)} processes
-            </div>
-            <a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64_data}" 
-               download="{filename}" 
-               style="display: inline-block; padding: 8px 16px; background-color: #28a745; color: white; text-decoration: none; border-radius: 4px; font-weight: bold; font-size: 14px;">
-                📥 Download
-            </a>
-        </div>
-        """
-
-    def display(self):
-        """Display the interface"""
-
+    def build_interface(self):
+        """The whole app as one widget."""
         # Compact header
         header = widgets.HTML(
             value="""
-            <div style="padding: 15px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 8px; margin-bottom: 20px;">
+            <div style="padding: 15px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        color: white; border-radius: 8px; margin-bottom: 20px;">
                 <h2 style="margin: 0 0 5px 0; font-size: 1.8em;">🧪 Experiment Builder</h2>
-                <p style="margin: 0; font-size: 0.95em; opacity: 0.9;">Configure processes and generate Excel files</p>
+                <p style="margin: 0; font-size: 0.95em; opacity: 0.9;">
+                    Configure processes and generate Excel files</p>
             </div>
             """
         )
@@ -875,14 +652,14 @@ Process Sequence:
         # Template selection - compact
         template_section = widgets.VBox(
             [
+                manual_panel(__file__),
                 widgets.HTML(
                     value="<h4 style='margin: 15px 0 8px 0; color: #2c3e50;'>📋 Template</h4>"
                 ),
                 widgets.HBox(
-                    [self.template_dropdown, self.apply_button, self.guide_toggle],
+                    [self.template_dropdown, self.apply_button],
                     layout=widgets.Layout(margin="0 0 15px 0"),
                 ),
-                self.guide_content,
             ]
         )
 
@@ -890,7 +667,7 @@ Process Sequence:
         sequence_section = widgets.VBox(
             [
                 widgets.HTML(
-                    value="<h4 style='margin: 15px 0 8px 0; color: #2c3e50;'>⚙️ Process Sequence</h4>"
+                    value="<h4 style='margin: 15px 0 8px 0; color: #2c3e50;'>⚙️ Process Sequence</h4>"  # noqa: E501
                 ),
                 self.process_sequence_area,
             ]
@@ -902,11 +679,10 @@ Process Sequence:
                 widgets.HTML(
                     value="<h4 style='margin: 15px 0 8px 0; color: #2c3e50;'>📊 Generate</h4>"
                 ),
-                widgets.HBox(
-                    [self.generate_button],
-                    layout=widgets.Layout(margin="0 0 10px 0"),
-                ),
-                self.download_area,
+                widgets.HBox([self.generate_button], layout=widgets.Layout(margin="0 0 10px 0")),
+                self.prefill_toggle,
+                self.prefill_panel,
+                self.download_output,
             ]
         )
 
@@ -920,18 +696,18 @@ Process Sequence:
             ]
         )
 
-        # Main interface - more compact
-        main_interface = widgets.VBox(
+        return widgets.VBox(
             [header, template_section, sequence_section, generation_section, status_section],
             layout=widgets.Layout(padding="15px", max_width="1000px"),
         )
 
-        # Only display once, don't return the interface to avoid duplication
-        display(main_interface)
+    def display(self):
+        """Display the interface"""
+        display(self.build_interface())
 
 
 # Convenience function
-def create_experiment_app(templates_file="templates/process_templates.json"):
+def create_experiment_app(templates_file=None):
     """Create and display the experiment builder interface"""
     app = MinimalistExperimentBuilder(templates_file)
     app.display()

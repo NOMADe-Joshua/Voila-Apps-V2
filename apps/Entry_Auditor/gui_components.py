@@ -1,0 +1,739 @@
+# gui_components.py
+# All ipywidgets code. No NOMAD/API calls happen here directly - everything funnels
+# through data_manager.py, which owns EntryAuditSession and never imports a widget
+# library.
+
+from __future__ import annotations
+
+import html
+import logging
+import re
+from pathlib import Path
+
+import ipywidgets as widgets
+import pandas as pd
+from data_manager import (
+    BACKUP_FOLDER,
+    EntryAuditSession,
+    apply_correction,
+    preview_correction,
+    read_correction_logs,
+)
+from natsort import natsort_keygen
+
+from perotf_utils.batch_selection import create_batch_selection
+from perotf_utils.downloads import start_download
+from perotf_utils.table_utils import csv_safe
+
+logger = logging.getLogger(__name__)
+
+# Corrections write to NOMAD. They edit one value at its exact path (not by leaf name),
+# are previewed and confirmed before anything is written, keep a backup of every original
+# file, and only count as done once NOMAD processed the entry and it reads back with the
+# new value (issue #56).
+CORRECTIONS_ENABLED = True
+
+
+def _esc(value) -> str:
+    """HTML-escape any text that came from NOMAD or from an exception before it goes into a
+    widgets.HTML: field values are free text typed by any user of the Oasis."""
+    return html.escape(str(value), quote=True)
+
+
+_natsort_key = natsort_keygen()
+
+
+_MAINFILE_SUFFIX = re.compile(r"\.archive\.(json|yaml)$")
+
+
+def _entry_order(row) -> tuple:
+    """Sort key shared by the table's columns and the sample dropdown."""
+    return _natsort_key((str(row.get("sample_id", "") or ""), str(row.get("_mainfile", "") or "")))
+
+
+def _mainfile_label(mainfile: str) -> str:
+    """Short, human-meaningful tag for one entry's underlying file - a sample can have
+    several entries of the same schema (e.g. multiple Spin Coating steps), all sharing
+    one sample_id, so the mainfile (which carries a sequence/step prefix in this lab's
+    naming convention) is what actually tells them apart in the UI."""
+    return _MAINFILE_SUFFIX.sub("", mainfile)
+
+
+def _log_html(text: str) -> str:
+    return (
+        "<div style='max-height:220px;overflow-y:auto;font-size:12px;white-space:pre-wrap'>"
+        f"{text}</div>"
+    )
+
+
+class FieldAuditPanel(widgets.VBox):
+    """One row per auditable parameter, one column per entry (numbered, with the
+    sample/mainfile shown on hover) - every value is spelled out, and a varied
+    parameter's whole row is colored. Cell count is bounded by (auditable columns) x
+    (entries) for one schema, which stays small even for large batches (a few hundred
+    cells at most in practice), so this is rendered directly rather than gated behind
+    an extra expand step. The correction section is only shown when url/token are both
+    given - offline/demo data has no NOMAD entries to write back to."""
+
+    _VALUE_CELL_WIDTH = "200px"
+    _NAME_CELL_WIDTH = "240px"
+
+    def __init__(
+        self,
+        session: EntryAuditSession,
+        label: str,
+        url: str | None,
+        token: str | None,
+    ) -> None:
+        self.session = session
+        self.label = label
+        self.url = url
+        self.token = token
+        self.entry_type = session.entry_types.get(label, "")
+        self._can_correct = CORRECTIONS_ENABLED and url is not None and token is not None
+        self._pending: tuple | None = None
+
+        self.entries_df = session.datasets[label]
+        # Entries arrive in whatever order the API happened to return them in, which
+        # is not stable/meaningful - sort by sample then mainfile so column 1 in the
+        # table is genuinely "this batch's first sample" instead of appearing random.
+        self.entry_indices = sorted(
+            self.entries_df.index, key=lambda i: _entry_order(self.entries_df.loc[i])
+        )
+        entries = len(self.entries_df)
+        unique_samples = (
+            self.entries_df["sample_id"].nunique() if "sample_id" in self.entries_df.columns else 0
+        )
+        # Varied parameters are what someone is actually looking for ("this value is
+        # wrong") - put them first so they don't have to scroll past every consistent
+        # field first. Stable sort keeps each group in its original column order.
+        overview = sorted(session.field_overview(label), key=lambda e: not e["is_varied"])
+        header = widgets.HTML(
+            value=(
+                "<hr style='margin:28px 0 10px 0;border:none;border-top:2px solid #ccc'>"
+                f"<h2 style='margin:0 0 2px 0;font-size:22px'>&#9679;&nbsp;{_esc(label)}</h2>"
+                f"<p style='margin-top:0;color:#555'>Entries: {entries} &nbsp;|&nbsp; "
+                f"Unique samples: {unique_samples} &nbsp;|&nbsp; "
+                f"Auditable fields: {len(overview)}</p>"
+            )
+        )
+
+        self.links_toggle = widgets.ToggleButton(
+            value=False, description="Add NOMAD links", icon="link"
+        )
+        self.links_toggle.observe(self._on_links_change, names="value")
+        self._overview = overview  # kept for _on_links_change to rebuild the table
+
+        self.dropdown: widgets.Dropdown | None = None
+        correct_section: widgets.Widget = widgets.VBox([])
+        if self._can_correct:
+            self.dropdown = widgets.Dropdown(
+                # Same varied-first order as the pivot table below, so the two stay
+                # consistent instead of the dropdown looking arbitrarily ordered.
+                options=[entry["column"] for entry in overview],
+                description="Field:",
+                layout=widgets.Layout(width="380px"),
+            )
+            self.from_dropdown = widgets.Dropdown(
+                description="Change name:", layout=widgets.Layout(width="260px")
+            )
+            self.sample_dropdown = widgets.Dropdown(
+                description="Sample:", layout=widgets.Layout(width="260px")
+            )
+            self.to_input = widgets.Text(
+                description="To:", placeholder="new value", layout=widgets.Layout(width="260px")
+            )
+            self.preview_button = widgets.Button(
+                description="Preview correction", button_style="warning", icon="eye"
+            )
+            self.confirm_button = widgets.Button(
+                description="Confirm", button_style="danger", icon="check"
+            )
+            self.cancel_button = widgets.Button(description="Cancel", icon="times")
+            self.confirm_button.layout.display = "none"
+            self.cancel_button.layout.display = "none"
+            self.correct_out = widgets.HTML(value="")
+            self.correct_progress = widgets.IntProgress(
+                min=0, max=1, value=0, layout=widgets.Layout(width="380px", display="none")
+            )
+
+            self.dropdown.observe(self._on_field_change, names="value")
+            self.from_dropdown.observe(self._on_from_change, names="value")
+            self.preview_button.on_click(self._on_preview_click)
+            self.confirm_button.on_click(self._on_confirm_click)
+            self.cancel_button.on_click(self._on_cancel_click)
+            for control in (self.dropdown, self.from_dropdown, self.sample_dropdown, self.to_input):
+                control.observe(self._reset_preview, names="value")
+
+            correct_section = widgets.VBox(
+                [
+                    widgets.HTML("<hr><b>Correct values</b>"),
+                    widgets.HBox(
+                        [
+                            self.dropdown,
+                            self.from_dropdown,
+                            self.sample_dropdown,
+                            self.to_input,
+                            self.preview_button,
+                            self.confirm_button,
+                            self.cancel_button,
+                        ]
+                    ),
+                    self.correct_progress,
+                    self.correct_out,
+                ]
+            )
+            if self.dropdown.options:
+                self._refresh_from_options(self.dropdown.options[0])
+
+        pivot_table = self._build_pivot_table(overview)
+
+        # Collapsed by default - a batch audits ~10 schemas at once and showing every
+        # table immediately is overwhelming; the caller's "Expand all"/"Collapse all"
+        # buttons (in create_audit_tab) drive set_expanded on every panel at once.
+        self.show_toggle = widgets.ToggleButton(
+            value=False, description="Show table", icon="chevron-down"
+        )
+        self.show_toggle.observe(self._on_show_toggle_change, names="value")
+        self.content_box = widgets.VBox([self.links_toggle, pivot_table, correct_section])
+        self.content_box.layout.display = "none"
+
+        super().__init__([header, self.show_toggle, self.content_box])
+
+    def set_expanded(self, expanded: bool) -> None:
+        self.show_toggle.value = expanded
+
+    def _on_show_toggle_change(self, change) -> None:
+        expanded = change["new"]
+        self.content_box.layout.display = None if expanded else "none"
+        self.show_toggle.description = "Hide table" if expanded else "Show table"
+        self.show_toggle.icon = "chevron-up" if expanded else "chevron-down"
+
+    def _build_pivot_table(self, overview: list[dict]) -> widgets.GridBox:
+        # A single GridBox, one child per cell - not a native-Button column sitting
+        # next to a separate HTML <table>. Two independent widget trees can't be made
+        # to agree on row height (confirmed: they visibly drifted out of alignment),
+        # whereas CSS grid natively aligns every cell in a row, mixed content types
+        # included, with no manual height-matching. It also structurally rules out
+        # per-row independent scrolling, since there are no per-row wrapper widgets at
+        # all anymore - every cell is a direct grid child, and the ONE grid container
+        # is the only scrollable element.
+        children: list[widgets.Widget] = [widgets.HTML("<b>Parameter</b>")]
+        for position, row_index in enumerate(self.entry_indices, start=1):
+            row = self.entries_df.loc[row_index]
+            sample_id = row.get("sample_id", "") or "N/A"
+            mainfile_label = _mainfile_label(row.get("_mainfile", "") or "")
+            tooltip = _esc(f"{sample_id} ({mainfile_label})" if mainfile_label else str(sample_id))
+            children.append(
+                widgets.HTML(
+                    f"<div style='text-align:center;font-weight:bold' "
+                    f'title="{tooltip}">{position}</div>'
+                )
+            )
+
+        self._value_cells: dict[str, list[widgets.HTML]] = {}
+        for entry in overview:
+            column = entry["column"]
+            is_varied = entry["is_varied"]
+
+            if self._can_correct:
+                name_widget: widgets.Widget = widgets.Button(
+                    description=column,
+                    layout=widgets.Layout(width=self._NAME_CELL_WIDTH),
+                    tooltip="Select this field in the correction controls below",
+                )
+                if is_varied:
+                    name_widget.style.button_color = "#f5b7b1"
+                name_widget.on_click(lambda _button, col=column: self._select_field(col))
+            else:
+                name_widget = widgets.HTML(f"<code>{_esc(column)}</code>")
+            children.append(name_widget)
+
+            row_cells = []
+            for row_index in self.entry_indices:
+                cell = widgets.HTML(self._cell_html(row_index, column, is_varied))
+                row_cells.append(cell)
+                children.append(cell)
+            self._value_cells[column] = row_cells
+
+        columns = f"{self._NAME_CELL_WIDTH} " + " ".join(
+            [self._VALUE_CELL_WIDTH] * len(self.entry_indices)
+        )
+        return widgets.GridBox(
+            children=children,
+            layout=widgets.Layout(grid_template_columns=columns, overflow="auto visible"),
+        )
+
+    def _cell_html(self, row_index, column: str, is_varied: bool) -> str:
+        text_color = "#c0392b" if is_varied else "#1a1a1a"
+        row_bg = "#fdecea" if is_varied else "#ffffff"
+        row = self.entries_df.loc[row_index]
+        value = row.get(column)
+        if value is None or value == "" or (isinstance(value, float) and pd.isna(value)):
+            text = "-"
+        else:
+            text = _esc(value)
+            if self.links_toggle.value:
+                sample_id = row.get("sample_id", "") or ""
+                gui_url = row.get("_gui_url", "") or self.session.sample_links.get(sample_id, "")
+                if gui_url:
+                    # Explicit color/underline, not inherited - Jupyter/Voila's own base
+                    # styles often reset link appearance, which made "Add NOMAD links"
+                    # look like it did nothing even though the <a> tag was there.
+                    text = (
+                        f"<a href='{_esc(gui_url)}' target='_blank' "
+                        f"style='color:#1a73e8;text-decoration:underline'>{text}</a>"
+                    )
+        return (
+            f"<div style='background:{row_bg};overflow-x:auto;white-space:nowrap;"
+            f"color:{text_color}'>{text}</div>"
+        )
+
+    def _select_field(self, column: str) -> None:
+        if self.dropdown is None:
+            return
+        if self.dropdown.value == column:
+            self._refresh_from_options(column)
+        else:
+            self.dropdown.value = column
+
+    def _on_links_change(self, _change) -> None:
+        for entry in self._overview:
+            column = entry["column"]
+            for row_index, cell in zip(self.entry_indices, self._value_cells[column]):
+                cell.value = self._cell_html(row_index, column, entry["is_varied"])
+
+    def _on_field_change(self, change) -> None:
+        column = change["new"]
+        if not column:
+            return
+        self._refresh_from_options(column)
+
+    def _refresh_from_options(self, column: str) -> None:
+        summary = self.session.field_summary(self.label, column)
+        options = tuple(row["value"] for row in summary)
+        previous_value = self.from_dropdown.value
+        self.from_dropdown.options = options
+        new_value = options[0] if options else None
+        self.from_dropdown.value = new_value
+        if new_value == previous_value:
+            # Assigning the same value back doesn't fire the "value" observer below,
+            # so the sample dropdown would otherwise go stale - refresh explicitly.
+            self._refresh_sample_options(column, new_value)
+
+    def _on_from_change(self, change) -> None:
+        old_value = change["new"]
+        if old_value is None or self.dropdown is None:
+            self.sample_dropdown.options = [("All", None)]
+            self.sample_dropdown.value = None
+            return
+        self._refresh_sample_options(self.dropdown.value, old_value)
+
+    def _refresh_sample_options(self, column: str, old_value) -> None:
+        summary = self.session.field_summary(self.label, column)
+        matched = next((row for row in summary if row["value"] == old_value), None)
+        if not matched:
+            self.sample_dropdown.options = [("All", None)]
+            self.sample_dropdown.value = None
+            return
+        df = self.session.datasets[self.label]
+        options = [(f"All matching entries ({len(matched['row_indices'])})", None)]
+        # same order as the table's columns: sample, then mainfile, natural sort
+        for row_index in sorted(matched["row_indices"], key=lambda i: _entry_order(df.loc[i])):
+            row = df.loc[row_index]
+            sample_id = row.get("sample_id", "") or "N/A"
+            entry_id = row.get("_entry_id", "")
+            mainfile_label = _mainfile_label(row.get("_mainfile", "") or "")
+            # A sample can carry several entries of the same schema (e.g. multiple
+            # Spin Coating steps) - always show the mainfile tag, not just when a
+            # duplicate is detected, so the option a user picks is unambiguous.
+            label = f"{sample_id} ({mainfile_label})" if mainfile_label else str(sample_id)
+            options.append((label, entry_id))
+        self.sample_dropdown.options = options
+        # Setting .options does NOT reselect a default value (confirmed ipywidgets
+        # quirk) - without this, picking a new "change name" value would silently keep
+        # whatever specific sample was selected for the PREVIOUS value, which is almost
+        # never what's wanted. Always reset to the bulk "All" default instead.
+        self.sample_dropdown.value = None
+
+    def _on_correct_progress(self, index: int, total: int) -> None:
+        self.correct_progress.max = total
+        self.correct_progress.value = index
+        self.correct_out.value = (
+            f"<span style='color:#b9770e'><b>Working...</b> ({index}/{total})</span>"
+        )
+
+    def _reset_preview(self, _change=None) -> None:
+        """Any change to the selection invalidates a previewed correction."""
+        self._pending = None
+        self.confirm_button.layout.display = "none"
+        self.cancel_button.layout.display = "none"
+
+    def _on_cancel_click(self, _button) -> None:
+        self._reset_preview()
+        self.correct_out.value = "<i>Cancelled. Nothing was changed.</i>"
+
+    def _on_preview_click(self, _button) -> None:
+        self._reset_preview()
+        column = self.dropdown.value
+        old_value = self.from_dropdown.value
+        new_value = self.to_input.value.strip()
+        only_entry_id = self.sample_dropdown.value
+
+        if not new_value:
+            self.correct_out.value = "<span style='color:#c0392b'>Enter a target value.</span>"
+            return
+        if new_value == old_value:
+            self.correct_out.value = (
+                "<span style='color:#c0392b'>Target is the same as source. Nothing to do.</span>"
+            )
+            return
+
+        self.correct_out.value = "<span style='color:#b9770e'><b>Checking entries...</b></span>"
+        self.correct_progress.value = 0
+        self.correct_progress.layout.display = None
+        try:
+            preview = preview_correction(
+                self.url,
+                self.token,
+                self.session.datasets[self.label],
+                column,
+                old_value,
+                new_value,
+                self.entry_type,
+                only_entry_id=only_entry_id,
+                progress_callback=self._on_correct_progress,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Preview failed for %s.%s", self.label, column)
+            self.correct_out.value = f"<span style='color:#c0392b'>Failed: {_esc(exc)}</span>"
+            return
+        finally:
+            self.correct_progress.layout.display = "none"
+
+        n_change = sum(1 for item in preview if item["status"] == "change")
+        n_no_match = sum(1 for item in preview if item["status"] == "no_match")
+        n_error = sum(1 for item in preview if item["status"] == "error")
+        rows = "".join(
+            "<tr><td>{}</td><td>{}</td></tr>".format(
+                _esc(_mainfile_label(item["mainfile"])),
+                {"change": "will change", "no_match": "not at this path, skipped"}.get(
+                    item["status"], "error: " + _esc(item.get("detail", ""))
+                ),
+            )
+            for item in preview
+        )
+        summary = (
+            f"<b>{_esc(column)}</b>: <code>{_esc(old_value)}</code> &rarr; "
+            f"<code>{_esc(new_value)}</code><br>"
+            f"{n_change} entr{'y' if n_change == 1 else 'ies'} will change, "
+            f"{n_no_match} skipped, {n_error} with errors. "
+            "Before an entry is changed, its original file is stored in "
+            f"<code>{BACKUP_FOLDER}/</code> of the entry's own upload."
+        )
+        self.correct_out.value = (
+            f"{summary}<div style='max-height:220px;overflow-y:auto'>"
+            f"<table style='font-size:12px'>{rows}</table></div>"
+        )
+        if n_change:
+            self._pending = (column, old_value, new_value, only_entry_id)
+            self.confirm_button.description = f"Confirm: change {n_change}"
+            self.confirm_button.layout.display = None
+            self.cancel_button.layout.display = None
+
+    def _on_confirm_click(self, _button) -> None:
+        pending = self._pending
+        self._reset_preview()
+        if pending is None:
+            return
+        column, old_value, new_value, only_entry_id = pending
+        self.correct_progress.value = 0
+        self.correct_progress.layout.display = None
+        try:
+            result = apply_correction(
+                self.url,
+                self.token,
+                self.session.datasets[self.label],
+                column,
+                old_value,
+                new_value,
+                self.entry_type,
+                only_entry_id=only_entry_id,
+                progress_callback=self._on_correct_progress,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Correction failed for %s.%s", self.label, column)
+            self.correct_out.value = f"<span style='color:#c0392b'>Failed: {_esc(exc)}</span>"
+            return
+        finally:
+            self.correct_progress.layout.display = "none"
+
+        message = (
+            f"<b>Done</b> - {result.success} updated and verified, {result.skipped} skipped, "
+            f"{result.failed} failed."
+        )
+        if result.unverified:
+            message += (
+                f" <span style='color:#b9770e'>{result.unverified} written but NOT confirmed "
+                "(NOMAD was still processing or the result could not be read back): check "
+                "them in NOMAD before correcting again.</span>"
+            )
+        if result.log_errors:
+            message += (
+                f" <span style='color:#c0392b'>The correction log could not be stored in "
+                f"{result.log_errors} upload(s); the backups are there.</span>"
+            )
+        rows = "".join(
+            "<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                _esc(_mainfile_label(item["mainfile"])),
+                _esc(item.get("outcome", "")),
+                _esc(item.get("detail", "")),
+            )
+            for item in result.details
+        )
+        self.correct_out.value = (
+            f"{message}<div style='max-height:220px;overflow-y:auto'>"
+            f"<table style='font-size:12px'>{rows}</table></div>"
+        )
+        self._refresh_after_correction(result.succeeded_entry_ids, column, new_value)
+
+    def _refresh_after_correction(self, entry_ids: list[str], column: str, new_value: str) -> None:
+        """Show the corrected values: patch the loaded data for the entries NOMAD confirmed,
+        then rebuild the table and the 'change name' options from it."""
+        if not entry_ids:
+            return
+        df = self.session.datasets[self.label]
+        df.loc[df["_entry_id"].isin(entry_ids), column] = new_value
+        self._overview = sorted(
+            self.session.field_overview(self.label), key=lambda e: not e["is_varied"]
+        )
+        self.content_box.children = (
+            self.links_toggle,
+            self._build_pivot_table(self._overview),
+            *self.content_box.children[2:],
+        )
+        self.dropdown.options = [entry["column"] for entry in self._overview]
+        self.dropdown.value = column
+        self._refresh_from_options(column)
+
+
+def _batch_panel(url: str | None, token: str | None, on_load) -> widgets.Widget:
+    """The shared batch list, or why it is missing: the demo works without NOMAD."""
+    if not token:
+        return widgets.HTML(
+            "<p style='color:#b00'>Not logged in to NOMAD, so no batches can be loaded. "
+            "The demo data still works.</p>"
+        )
+    try:
+        return create_batch_selection(url, token, on_load)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("NOMAD batch list unavailable: %s", exc)
+        return widgets.HTML(
+            "<p style='color:#b00'>Could not get the batch list from NOMAD "
+            f"({_esc(type(exc).__name__)}). Check your login; the demo data still works.</p>"
+        )
+
+
+def create_audit_tab(
+    session: EntryAuditSession, url: str, token: str, demo_fixture_path: Path
+) -> widgets.VBox:
+    # status_out is always visible - it's the only feedback the user gets for "nothing
+    # selected"/"still loading"/errors, so it must never be hidden behind the collapsed
+    # debug accordion below.
+    status_out = widgets.HTML(value="")
+    progress_bar = widgets.IntProgress(min=0, max=1, value=0, layout=widgets.Layout(width="380px"))
+    progress_bar.layout.display = "none"
+    log_out = widgets.HTML(value="")
+    log_accordion = widgets.Accordion(children=[log_out], selected_index=None)
+    log_accordion.set_title(0, "Debug log (per-schema entry counts)")
+    results_out = widgets.VBox([])
+
+    def _status(text: str) -> None:
+        status_out.value = f"<p style='margin:4px 0'>{text}</p>"
+
+    def _log(text: str) -> None:
+        log_out.value = _log_html(text)
+
+    def _show_results(url_for_panels: str | None, token_for_panels: str | None) -> None:
+        results_out.children = [
+            FieldAuditPanel(session, label, url_for_panels, token_for_panels)
+            for label in session.datasets
+        ]
+
+    def _on_expand_all(_button) -> None:
+        for panel in results_out.children:
+            panel.set_expanded(True)
+
+    def _on_collapse_all(_button) -> None:
+        for panel in results_out.children:
+            panel.set_expanded(False)
+
+    expand_all_button = widgets.Button(description="Expand all", icon="chevron-down")
+    collapse_all_button = widgets.Button(description="Collapse all", icon="chevron-up")
+    expand_all_button.on_click(_on_expand_all)
+    collapse_all_button.on_click(_on_collapse_all)
+
+    def _on_load_progress(index: int, total: int, label: str) -> None:
+        progress_bar.max = total
+        progress_bar.value = index - 1
+        _status(f"Loading schema {index}/{total}: {label}...")
+
+    def _run_audit(batch_widget) -> None:
+        batch_ids = list(batch_widget.value)
+        results_out.children = []
+        log_out.value = ""
+        if not batch_ids:
+            _status(
+                "No batches selected - highlight one or more batches in the list "
+                "above (Ctrl/Cmd-click for multiple), then click Load Data."
+            )
+            return
+        _status(f"Resolving samples for {len(batch_ids)} batch(es)...")
+        progress_bar.value = 0
+        progress_bar.layout.display = None
+        try:
+            messages = session.load(url, token, batch_ids, progress_callback=_on_load_progress)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to load batches %s", batch_ids)
+            _status(f"<span style='color:#c0392b'>Failed to load batches: {_esc(exc)}</span>")
+            return
+        finally:
+            progress_bar.layout.display = "none"
+        _status(
+            f"Loaded {len(session.sample_ids)} sample(s) across {len(session.datasets)} schema(s)."
+        )
+        _log("<br>".join(f"{_esc(label)}: {_esc(message)}" for label, message in messages.items()))
+        _show_results(url, token)
+
+    demo_button = widgets.Button(
+        description="Load demo data", button_style="warning", icon="database"
+    )
+
+    def _on_demo_click(_button) -> None:
+        results_out.children = []
+        log_out.value = ""
+        try:
+            loaded = session.load_offline(demo_fixture_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to load demo fixture %s", demo_fixture_path)
+            _status(f"<span style='color:#c0392b'>Failed to load demo data: {_esc(exc)}</span>")
+            return
+        if not loaded:
+            _status("Demo fixture contained no data.")
+            return
+        _status(f"Loaded demo data: {len(session.sample_ids)} samples.")
+        _show_results(None, None)
+
+    demo_button.on_click(_on_demo_click)
+
+    return widgets.VBox(
+        [
+            widgets.HTML("<h3 style='margin:4px 0'>Batch Selection</h3>"),
+            demo_button,
+            _batch_panel(url, token, _run_audit),
+            status_out,
+            progress_bar,
+            log_accordion,
+            widgets.HTML("<h3 style='margin:10px 0 4px 0'>Audit Results</h3>"),
+            widgets.HBox([expand_all_button, collapse_all_button]),
+            results_out,
+        ]
+    )
+
+
+CORRECTION_COLUMNS = {
+    "time": "Time",
+    "user": "User",
+    "entry_type": "Entry type",
+    "field": "Field",
+    "from": "Wrong value",
+    "to": "Corrected to",
+    "changed": "Entries verified",
+    "upload_id": "Upload",
+}
+
+
+def corrections_dataframe(records: list[dict]) -> pd.DataFrame:
+    """One row per correction run and upload, from the logs read_correction_logs returns."""
+    rows = [
+        {
+            **{key: record.get(key, "") for key in CORRECTION_COLUMNS if key != "changed"},
+            "changed": sum(
+                1 for entry in record.get("entries", []) if entry.get("outcome") == "verified"
+            ),
+        }
+        for record in records
+    ]
+    return pd.DataFrame(rows, columns=list(CORRECTION_COLUMNS)).rename(columns=CORRECTION_COLUMNS)
+
+
+def create_corrections_tab(session: EntryAuditSession, url: str | None, token: str | None):
+    """The corrections made in the uploads of the loaded batch. Every upload keeps its own
+    log, readable by exactly the people who can read the upload."""
+    table_out = widgets.HTML(value="")
+    download_out = widgets.HTML(value="")
+    download_js = widgets.Output()  # runs the download script (widgets.HTML would not)
+    refresh_button = widgets.Button(description="Refresh", button_style="info", icon="refresh")
+    export_button = widgets.Button(
+        description="Export CSV", button_style="success", icon="download"
+    )
+    state = {"df": corrections_dataframe([])}
+
+    def _on_refresh(_button=None) -> None:
+        download_out.value = ""
+        if url is None or token is None or not session.upload_ids:
+            state["df"] = corrections_dataframe([])
+            table_out.value = (
+                "<p style='color:#888'>Load batches in the <i>Audit</i> tab first: every "
+                f"upload keeps the log of its corrections in <code>{BACKUP_FOLDER}/</code>, "
+                "and this tab lists those of the loaded entries' uploads.</p>"
+            )
+            return
+        table_out.value = "<i>Reading the correction logs...</i>"
+        try:
+            state["df"] = corrections_dataframe(
+                read_correction_logs(url, token, session.upload_ids)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Could not read the correction logs")
+            table_out.value = f"<span style='color:#c0392b'>Failed: {_esc(exc)}</span>"
+            return
+        if state["df"].empty:
+            table_out.value = "<p style='color:#888'>No corrections in these uploads yet.</p>"
+        else:
+            table_out.value = state["df"].to_html(index=False, escape=True)
+
+    def _on_export(_button) -> None:
+        df = state["df"]
+        if df.empty:
+            download_out.value = "Nothing to export."
+            return
+        start_download(download_js, csv_safe(df).to_csv(index=False), "corrections.csv", "text/csv")
+        download_out.value = "Downloading corrections.csv - it should start by itself."
+
+    refresh_button.on_click(_on_refresh)
+    export_button.on_click(_on_export)
+    _on_refresh()
+
+    return widgets.VBox(
+        [
+            widgets.HTML("<h3 style='margin:4px 0'>Corrections Log</h3>"),
+            widgets.HBox([refresh_button, export_button]),
+            table_out,
+            download_out,
+            download_js,
+        ]
+    )
+
+
+def create_entry_auditor_ui(url: str, token: str, demo_fixture_path: Path) -> widgets.Widget:
+    session = EntryAuditSession()
+    tabs = widgets.Tab(
+        children=[
+            create_audit_tab(session, url, token, demo_fixture_path),
+            create_corrections_tab(session, url, token),
+        ]
+    )
+    tabs.set_title(0, "Audit")
+    tabs.set_title(1, "Corrections")
+    return tabs

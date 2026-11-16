@@ -27,6 +27,8 @@ known-first-party = ["perotf_utils"]
 "apps/UVVis_Simulator/*" = ["E402", "E501", "F841"]
 "apps/XRD_PF/*" = ["E402", "E501", "E722", "F401", "F811", "F841"]
 "shared/perotf_utils/api_calls.py" = ["E501"]
+# Ported from HZB with HZB's own ignore (long HTML/Markdown help strings), not legacy findings.
+"apps/Global_analyzer/*" = ["E501"]
 "shared/perotf_utils/auth_manager.py" = ["E501"]
 "shared/perotf_utils/auth_ui.py" = ["E501"]
 "shared/perotf_utils/process_handling.py" = ["E501"]

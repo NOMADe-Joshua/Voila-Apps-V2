@@ -4,6 +4,7 @@ import pytest
 
 MODULES = [
     "voila_experiment_app",
+    "nomad_prefill",
     "experiment_excel_builder",
     "sheet_data_entry_guide",
     "sheet_experiment",

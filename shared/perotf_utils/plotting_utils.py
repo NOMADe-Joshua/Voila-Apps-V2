@@ -1,5 +1,4 @@
 import ipywidgets as widgets
-from IPython.display import Markdown, display
 
 # --- Layout Constants ---
 LAYOUT = {
@@ -133,7 +132,7 @@ class WidgetFactory:
     def create_filter_row():
         """Create a filter row with consistent dropdown and text input styling"""
         dropdown1 = WidgetFactory.create_dropdown(
-            options=["Voc(V)", "Jsc(mA/cm2)", "FF(%)", "PCE(%)", "V_MPP(V)", "J_MPP(mA/cm2)"],
+            options=["Voc(V)", "Jsc(mA/cm2)", "FF(%)", "PCE(%)", "V_mpp(V)", "J_mpp(mA/cm2)"],
             description="",
             width="label",
         )
@@ -202,18 +201,3 @@ class plot_options(widgets.widget_box.VBox):
             description="select how the datasets will be named",
         )
         super().__init__([self.name, self.width, self.height])
-
-
-# function to create a manual display area
-def create_manual(filename):
-    toggle_manual = widgets.ToggleButton(description="Manual")
-    manual_out = widgets.Output()
-
-    def update_manual(change):
-        manual_out.clear_output()
-        if change["new"]:
-            with manual_out, open(filename, "r", encoding="utf-8") as file:
-                display(Markdown(file.read()))
-
-    toggle_manual.observe(update_manual, names="value")
-    return widgets.VBox([toggle_manual, manual_out])

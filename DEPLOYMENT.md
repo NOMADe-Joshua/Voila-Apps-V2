@@ -110,6 +110,9 @@ NO_PROXY = "localhost,127.0.0.1"
 | `PEROTF_GUI_ENDPOINT` | the GUI is not at `/nomad-oasis/gui` | Used for links to entries (JV app, Excel creator). |
 | `PEROTF_NORTH_ENDPOINT` | NORTH is not at `/nomad-oasis/north` | Used by the App Dashboard's links. |
 | `PEROTF_ADMIN_USERS` | someone other than `nomade` should see the Usage Log | Comma-separated NOMAD usernames; only they get the Usage Log card and its data. |
+| `PEROTF_DASHBOARD_HIDE_APPS` | some apps should not appear on this Oasis's dashboard | Comma-separated app folder names or card names (case and spaces ignored). Hidden apps stay in the upload and can still be opened directly. |
+| `PEROTF_DASHBOARD_SHOW_APPS` | only a few apps should appear | Same format; when set, only these cards are shown (a hidden one stays hidden). Admin-only cards (Usage Log, Reprocess Uploads) stay hidden for non-admins either way. |
+| `PEROTF_DASHBOARD_GROUP_ORDER` | the dashboard groups should come in another order | Group names to list first, e.g. `Utilities & Calculators, Device Characterization`; the others follow in their usual order. |
 | `HTTP_PROXY`, `HTTPS_PROXY` | the container has no direct outbound route | Applied *before* `pip install shared/` runs, because pip may fetch `hatchling` from PyPI to build it. |
 | `NO_PROXY` | whenever a proxy is set | Hosts reached *without* the proxy. Defaults to `localhost,127.0.0.1`. Only add the Oasis host if a direct call to it actually works from the container. |
 

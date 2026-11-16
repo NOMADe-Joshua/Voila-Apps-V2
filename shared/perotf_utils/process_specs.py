@@ -1,31 +1,31 @@
-"""Per-process-type Excel columns and their NOMAD archive field mappings for peroTF.
+"""Per-process-type Excel columns, their NOMAD archive paths and the Excel_creator controls
+for peroTF.
 
-smart_databaser (apps/smart_databaser) reads this catalog to know, for every process type
-peroTF's Excel_creator can write, which Excel column autofills from which path of an
-already-uploaded NOMAD process step. The module keeps the API of HZB's equivalent module
-(PROCESSES, AVAILABLE_PROCESSES, ATMOSPHERIC_CONFIG_KEY, field_args and the build_*
-functions), so smart_databaser runs against it unchanged.
+apps/Excel_creator reads this catalog for three things:
+
+- AVAILABLE_PROCESSES: the process types it offers, in this order;
+- each type's "meta": the config controls and defaults of a process row;
+- the Experiment Info archive paths (build_field_paths), with which nomad_prefill.py fills the
+  sample rows of a new sheet from the samples of a NOMAD upload.
+
+The module keeps the API of HZB's equivalent module (PROCESSES, AVAILABLE_PROCESSES,
+ATMOSPHERIC_CONFIG_KEY, field_args and the build_* functions), so code ported from HZB runs
+against it unchanged.
 
 Two sources define what belongs in here, and the catalog must match both:
 
 1. The column labels peroTF's apps/Excel_creator/sheet_experiment.py writes
-   (generate_steps_for_process). smart_databaser builds its columns by running that
-   function and reading back the header row, so a label in this catalog that the sheet
-   never writes can never be filled, and a label spelled differently than in the sheet
-   never autofills. peroTF's sheet_experiment.py does NOT read this module; it keeps its
-   own inline labels, which is why every label below is copied from it verbatim,
-   including its spelling quirks ("Athmosphere in chamber", "Solution volume [um]",
-   "Drying gas temperature [°]").
+   (generate_steps_for_process). That module does NOT read this catalog; it keeps its own
+   inline labels, which is why every label below is copied from it verbatim, including its
+   spelling quirks ("Athmosphere in chamber", "Solution volume [um]", "Drying gas
+   temperature [°]"). tests/Excel_creator checks that the two agree.
 2. The archive paths nomad_perotf's experiment parser (perotf_batch_parser.py) stores
    through the nomad-baseclasses map_<type> functions (helper/solar_cell_batch_mapping.py).
    Only add a path after reading the map_<type> function that writes it; never guess.
 
-AVAILABLE_PROCESSES mirrors the process list of peroTF's Excel_creator
-(voila_experiment_app.py, MinimalistExperimentBuilder) in the same order, so smart_databaser
-offers exactly the process types Excel_creator can write. Types the parser never turns into
-an archive step (Multijunction Info) or turns into a step of another type (Seq-Evaporation
-becomes a plain Evaporation) are still listed so they can be part of a new experiment; they
-simply never autofill.
+Types the parser never turns into an archive step (Multijunction Info) or turns into a step
+of another type (Seq-Evaporation becomes a plain Evaporation) are listed too, so they can be
+part of a new experiment.
 
 Shape of one field entry (a dict): {"test": <test value>, "path": [...]} for a single
 archive path, or {"test": <test value>, "paths": [[...], [...]]} for alternative paths tried
@@ -33,38 +33,30 @@ in order (first non-None wins). Optional keys: "unit_verified" (default True; Fa
 the value is copied from the archive with NO unit conversion applied and has NOT been
 confirmed to match the Excel column's stated unit - check against the NOMAD web GUI before
 flipping to True), "multiply" (a confirmed numeric unit-conversion factor applied before the
-value is written/previewed - only add once verified against the actual NOMAD quantity
-definition, never guessed), "dropdown" (inline Excel data-validation choices). A field with
-no "path"/"paths" is a deliberately unmapped column (Notes on every process type, Experiment
-Info's Date/Project_Name/Batch/Subbatch/Nomad ID/Sample/Variation - see
-EXPERIMENT_INFO_NEVER_AUTOFILLED and EXPERIMENT_INFO_COMPUTED_KEYS in smart_databaser's
-data_manager.py - and every column the parser does not store).
+value is written - only add once verified against the actual NOMAD quantity definition,
+never guessed), "dropdown" (inline Excel data-validation choices). A field with no
+"path"/"paths" is a deliberately unmapped column (Notes on every process step, Experiment
+Info's Date/Project_Name/Batch/Subbatch/Nomad ID/Sample, which nomad_prefill reads back from
+the lab_id instead, and every column the parser does not store).
 
 Indexed (repeated) fields - e.g. "Solvent {n} name" - are grouped by the config key that
 drives their repeat count (PROCESSES[type]["indexed"][key]), since every field in that group
 loops together off the same counter. Each entry's "path" carries a "{i}" placeholder
 resolved to the 0-based index. "test" may be a plain value or a callable taking the 1-based
-n. "mapping_range" (default (1, 5)) is how far smart_databaser pre-generates archive-path
-lookups for autofill; a source archive with more items than that simply does not autofill
-the extras. Exactly one entry per group carries a `config_key` matching its group key;
-smart_databaser's infer_config_from_source_step uses it to size a new process's config to
-the source step.
+n. "mapping_range" (default (1, 5)) is how many items build_field_paths resolves. Exactly
+one entry per group carries a "config_key" matching its group key.
 
 Optional blocks (e.g. Spin Coating's Gas Quenching) are grouped by their boolean config key
 (PROCESSES[type]["optional"][key]) - present only when that config flag is True, same shape
 as a plain "fields" entry otherwise.
 
-"meta" holds the per-process GUI metadata: "material_gated" (the parser skips the step when
-"Material name" is empty, so smart_databaser only counts its progress once it is filled),
-"numeric_config" (list of (config_key, label, min, max) - numeric controls such as the
-solvent count), "boolean_config" (list of (config_key, label) - checkboxes such as Gas
-Quenching), "config_defaults" (starting config dict for a newly added process). These mirror
-the controls and defaults of Excel_creator's voila_experiment_app.py. Two Inkjet Printing
-controls there cannot be expressed here and are left unsupported in smart_databaser: the
-"pixORnotion" printer-type dropdown (a string, not a count or flag) and the
-"Wf Number of Pulses" count (it repeats waveform columns the parser only stores for some
-printers, computed rather than copied). Their defaults are still listed in config_defaults,
-so the generated sheet gets Excel_creator's default waveform columns.
+"meta" holds the per-process GUI metadata of Excel_creator's process rows:
+"material_gated" (the parser skips the step when "Material name" is empty),
+"numeric_config" (list of (config_key, label, min, max): counts such as the solvent count),
+"boolean_config" (list of (config_key, label): checkboxes such as Gas Quenching),
+"choice_config" (optional, list of (config_key, label, options): a dropdown, such as Inkjet
+Printing's printer type "pixORnotion") and "config_defaults" (the config of a newly added
+process).
 """
 
 # ---------------------------------------------------------------------------
@@ -200,7 +192,7 @@ def _without_paths(fields: dict) -> dict:
 _ATMOSPHERIC_FIELDS: dict = {}
 """The upstream (HZB) sheet_experiment.py can append a block of atmosphere columns to every
 process (the "add_atmospheric" flag). peroTF's sheet_experiment.py has no such block, so the
-catalog has none either and ATMOSPHERIC_CONFIG_KEY is None: smart_databaser then does not
+catalog has none either and ATMOSPHERIC_CONFIG_KEY is None: Excel_creator then does not
 offer the checkbox. Kept as an (empty) name so atmospheric_args() keeps the upstream API."""
 
 ATMOSPHERIC_CONFIG_KEY = None
@@ -214,7 +206,7 @@ _MATERIALS_CONFIG = ("materials", "Materials", 1, 5)
 PROCESSES = {
     "Experiment Info": {
         "meta": {"material_gated": False, "numeric_config": [], "boolean_config": []},
-        # map_basic_sample() / map_substrate(); smart_databaser reads these from the first
+        # map_basic_sample() / map_substrate(); Excel_creator's prefill reads these from a
         # sample and its substrate entry ({"sample": ..., "substrate": ...}).
         "fields": {
             "Date": {"test": "20260526"},
@@ -223,7 +215,8 @@ PROCESSES = {
             "Subbatch": {"test": "1"},
             "Sample": {"test": "1"},
             "Nomad ID": {"test": ""},
-            "Variation": {"test": "1000 rpm"},
+            # map_basic_sample() stores the variation as the sample's description
+            "Variation": {"test": "1000 rpm", "path": ["sample", "description"]},
             "Sample dimension": {"test": "16x16", "path": ["substrate", "substrate_dimension"]},
             "Sample area [cm^2]": {"test": 0.105, "path": ["substrate", "solar_cell_area"]},
             "Number of pixels": {"test": 4, "path": ["substrate", "number_of_pixels"]},
@@ -235,7 +228,8 @@ PROCESSES = {
                 "path": ["substrate", "conducting_material", 0],
             },
             "Bottom Cell Name": {"test": "", "path": ["substrate", "lab_id"]},
-            "Notes": {"test": "Test excel"},
+            # map_substrate() stores the notes as the substrate's description
+            "Notes": {"test": "Test excel", "path": ["substrate", "description"]},
         },
     },
     "Spin Coating": {
@@ -347,7 +341,7 @@ PROCESSES = {
         "meta": {"material_gated": True, "numeric_config": [], "boolean_config": []},
         # map_evaporation(coevaporation=False). "Organic" only decides whether the values
         # land in organic_evaporation or inorganic_evaporation, so it has no path of its
-        # own; smart_databaser derives it back (data_manager._DERIVED_FIELDS).
+        # own.
         "fields": {
             "Material name": {"test": "PCBM", "path": ["layer", 0, "layer_material_name"]},
             "Layer type": {
@@ -513,9 +507,8 @@ PROCESSES = {
         # Same columns as Co-Evaporation, but the parser runs map_evaporation() with
         # coevaporation=False on it: without an "Organic" column it stores neither
         # organic_evaporation nor inorganic_evaporation, and the resulting step is an
-        # ordinary "Evaporation" step that smart_databaser resolves as Evaporation. A
-        # Seq-Evaporation process can therefore never find a source step, so it carries no
-        # paths; it is listed so a new experiment can still contain it.
+        # ordinary "Evaporation" step, so this type carries no paths; it is listed so a
+        # new experiment can still contain it.
         "meta": {
             "material_gated": True,
             "numeric_config": [_MATERIALS_CONFIG],
@@ -727,11 +720,17 @@ PROCESSES = {
     "Inkjet Printing": {
         "meta": {
             "material_gated": True,
-            "numeric_config": [("solvents", "Solvents", 0, 20), ("solutes", "Solutes", 0, 20)],
+            # NOMAD's Pixdro waveform has the pulses a, b and c, hence at most 3.
+            "numeric_config": [
+                ("solvents", "Solvents", 0, 20),
+                ("solutes", "Solutes", 0, 20),
+                ("Wf Number of Pulses", "Pulses", 1, 3),
+            ],
             "boolean_config": [
                 ("gasquenching", "Gas Quenching"),
                 ("vacuumquenching", "Vacuum Quenching"),
             ],
+            "choice_config": [("pixORnotion", "Type", ("Pixdro", "Notion"))],
             "config_defaults": {
                 "solvents": 1,
                 "solutes": 1,
@@ -905,7 +904,7 @@ PROCESSES = {
             "material_gated": True,
             "numeric_config": [_MATERIALS_CONFIG],
             "boolean_config": [("milling", "Milling")],
-            "config_defaults": {"materials": 1, "milling": False, "mixing_ratio": False},
+            "config_defaults": {"materials": 1, "milling": False},
         },
         # map_close_space_sublimation(). The sheet only writes the "Source material ratio {n}"
         # columns when materials > 1, and the parser reads source materials 1 to 4.
@@ -992,8 +991,7 @@ PROCESSES = {
         # map_lamination() reads its own column names ("Temperature [°C]", "Time [s]",
         # "Stamp Material", ...), most of which peroTF's sheet spells differently, so only
         # the five columns below reach the archive; the rest carry no path. The step has
-        # no method; smart_databaser recognises it by its entry type
-        # (ENTRY_TYPES["lamination"]).
+        # no method; its entry type is ENTRY_TYPES["lamination"].
         "meta": {"material_gated": False, "numeric_config": [], "boolean_config": []},
         "fields": {
             "Interface": {"test": ""},
@@ -1032,8 +1030,8 @@ PROCESSES = {
         },
     },
     "Annealing": {
-        # map_annealing_class(). The step has no method; smart_databaser recognises it by
-        # its entry type (ENTRY_TYPES["thermal_annealing"] and its lab variants).
+        # map_annealing_class(). The step has no method; its entry type is
+        # ENTRY_TYPES["thermal_annealing"] (or one of its lab variants).
         "meta": {"material_gated": False, "numeric_config": [], "boolean_config": []},
         "fields": {
             "Annealing time [min]": {
@@ -1052,8 +1050,8 @@ PROCESSES = {
         },
     },
     "Generic Process": {
-        # map_generic(). The step has no method; smart_databaser recognises it by its entry
-        # type (ENTRY_TYPES["process"]).
+        # map_generic(). The step has no method; its entry type is
+        # ENTRY_TYPES["process"].
         "meta": {"material_gated": False, "numeric_config": [], "boolean_config": []},
         "fields": {
             "Name": {"test": "Test Generic Process", "path": ["name"]},
@@ -1115,7 +1113,7 @@ def atmospheric_args() -> list[tuple]:
 
 
 # ---------------------------------------------------------------------------
-# smart_databaser-facing API: archive field-path lookups
+# Archive field-path lookups
 # ---------------------------------------------------------------------------
 
 
@@ -1168,9 +1166,8 @@ def build_field_paths(
 
 
 def build_indexed_config_keys(processes: dict | None = None) -> dict[str, dict[str, str]]:
-    """{process_type: {config_key: excel_key_template}}, used by smart_databaser's
-    infer_config_from_source_step to widen a target process's config to match how much data
-    a source batch step actually has. Only considers entries that carry an archive path, so
+    """{process_type: {config_key: excel_key_template}}: which column template counts the
+    items of each indexed group. Only considers entries that carry an archive path, so
     a process with no path data at all (e.g. Seq-Evaporation) yields nothing here. Pass
     `processes` to build from a different PROCESSES-shaped dict."""
     result: dict[str, dict[str, str]] = {}
@@ -1221,7 +1218,9 @@ def build_configurable_process_types() -> set[str]:
     return {
         p
         for p, spec in PROCESSES.items()
-        if spec["meta"]["numeric_config"] or spec["meta"]["boolean_config"]
+        if spec["meta"]["numeric_config"]
+        or spec["meta"]["boolean_config"]
+        or spec["meta"].get("choice_config")
     }
 
 

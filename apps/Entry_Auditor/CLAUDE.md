@@ -1,0 +1,7 @@
+# Entry_Auditor: corrections write to NOMAD
+
+- A correction changes the one value at its flattened path (`modify_file_field`, path-exact) inside the `data` wrapper of the entry's own file, after a preview and a confirm; never a regex over the file text.
+- Order per entry (`apply_correction`), none of it may be weakened or reordered: entry hash read before the download; backup into the entry's OWN upload (`entry_auditor_backups/`, hidden `.<file>.<stamp>.bak`, `overwrite=False`, `trigger_processing=False`), and no backup means no change; the corrected file PUT into its own folder with `entry_hash` (NOMAD refuses with 409 if the entry changed); wait; verify the raw file AND the processed entry.
+- Backups and logs never go next to the app (HZB's place): there every user of the apps could read other people's private entries. Every name in `entry_auditor_backups/` starts with a dot, because `nomad.parsing.parsers.match_parser` skips such files; a name without the dot could be parsed as a second entry.
+- Published uploads, non-archive mainfiles and `LOCKED_FIELD` columns (lab_id, plan position, time stamps) are never written; `_correction_targets` raises for locked fields.
+- Every NOMAD request goes through `perotf_utils.api_calls` (`put_raw_file`, `get_upload`, `wait_for_upload`, `get_entry_hashes`, `list_raw_folder`, `download_raw_file`). The audited entry types come from `perotf_utils.config` plus the batch's BaseProcess types (`audit_catalog`); never type names in the app.

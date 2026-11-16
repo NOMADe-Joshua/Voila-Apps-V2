@@ -210,6 +210,22 @@ def test_get_all_batches_wth_data_reads_uploads_from_the_metadata_endpoint(monke
     assert sorted(batch_query["upload_id:any"]) == ["U0", "U1", "U2"]
 
 
+class _AggregationResponse:
+    """entries/query answer with an upload_id terms aggregation."""
+
+    def __init__(self, upload_ids):
+        self.payload = {
+            "data": [],
+            "aggregations": {"uploads": {"terms": {"data": [{"value": u} for u in upload_ids]}}},
+        }
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self.payload
+
+
 def test_get_all_batches_wth_data_without_uploads_asks_nothing_more(monkeypatch):
     from perotf_utils import api_calls
 
@@ -217,11 +233,45 @@ def test_get_all_batches_wth_data_without_uploads_asks_nothing_more(monkeypatch)
 
     def post(url, **kwargs):
         calls.append(url)
-        return _PagedServer([]).post(url, **kwargs)
+        return _AggregationResponse([])
 
     monkeypatch.setattr(api_calls.requests, "post", post)
     assert api_calls.get_all_batches_wth_data("https://e.test/api", "tok", "T") == []
     assert len(calls) == 1
+
+
+def test_upload_lookup_is_one_aggregation_request(monkeypatch):
+    """KIT addition: the uploads come from a terms aggregation, no entries are downloaded."""
+    from perotf_utils import api_calls
+
+    seen = []
+
+    def post(url, json=None, **kwargs):
+        seen.append(json)
+        return _AggregationResponse(["U1", "U2"])
+
+    monkeypatch.setattr(api_calls.requests, "post", post)
+    ids = api_calls.upload_ids_with_entries("https://e.test/api", "tok", ["T2", "T1"])
+    assert ids == {"U1", "U2"}
+    assert len(seen) == 1
+    assert seen[0]["query"] == {"entry_type:any": ["T1", "T2"]}
+    assert seen[0]["pagination"] == {"page_size": 0}
+    assert seen[0]["aggregations"]["uploads"]["terms"]["quantity"] == "upload_id"
+
+
+def test_upload_lookup_reads_the_entries_when_the_aggregation_may_be_cut_off(monkeypatch):
+    from perotf_utils import api_calls
+
+    monkeypatch.setattr(api_calls, "UPLOAD_AGGREGATION_SIZE", 2)
+    monkeypatch.setattr(
+        api_calls.requests, "post", lambda *a, **k: _AggregationResponse(["U1", "U2"])
+    )
+    monkeypatch.setattr(
+        api_calls,
+        "query_all",
+        lambda url, token, endpoint, query: [{"upload_id": u} for u in ("U1", "U2", "U3")],
+    )
+    assert api_calls.upload_ids_with_entries("u", "t", "T") == {"U1", "U2", "U3"}
 
 
 def test_get_ids_in_batch_warns_instead_of_asserting(monkeypatch, caplog):
@@ -383,6 +433,12 @@ def test_get_all_batches_wth_data_asks_only_for_ids_in_upload_chunks(monkeypatch
             {"archive": {"data": {}}}
         ]
 
+    class _NoAggregation:
+        def raise_for_status(self):
+            raise api_calls.requests.HTTPError("400")
+
+    # the aggregation fails, so the lookup reads the upload_id of every entry
+    monkeypatch.setattr(api_calls.requests, "post", lambda *a, **k: _NoAggregation())
     monkeypatch.setattr(api_calls, "query_all", fake_query_all)
     monkeypatch.setattr(api_calls, "BATCH_LOOKUP_UPLOAD_CHUNK", 2)
     res = api_calls.get_all_batches_wth_data("u", "t", "Test_JVmeasurement")
@@ -395,3 +451,177 @@ def test_get_all_batches_wth_data_asks_only_for_ids_in_upload_chunks(monkeypatch
         ["U4"],
     ]
     assert all(q["required"] == {"data": {"lab_id": "*"}} for q in batch_queries)
+
+
+# --- Writing files into an upload (Entry_Auditor) ------------------------------------------
+
+
+class _Reply:
+    def __init__(self, status=200, payload=None, text=""):
+        self.status_code = status
+        self._payload = payload or {}
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+
+            raise requests.HTTPError(f"{self.status_code} error")
+
+
+def _record_put(monkeypatch, reply=None):
+    from perotf_utils import api_calls
+
+    calls = []
+
+    def fake_put(url, params, headers, files, timeout):
+        calls.append({"url": url, "params": params, "files": files, "timeout": timeout})
+        return reply or _Reply()
+
+    monkeypatch.setattr(api_calls.requests, "put", fake_put)
+    return calls
+
+
+def test_put_raw_file_writes_into_the_folder_without_unpacking(monkeypatch):
+    from perotf_utils import api_calls
+
+    calls = _record_put(monkeypatch)
+    api_calls.put_raw_file(
+        "https://e.test/api",
+        "tok",
+        "UP1",
+        "sub dir/",
+        "x.archive.json",
+        b"{}",
+        "application/json",
+        entry_hash="H1",
+    )
+    (call,) = calls
+    assert call["url"] == "https://e.test/api/uploads/UP1/raw/sub%20dir/"
+    assert call["params"] == {
+        "overwrite_if_exists": "true",
+        "trigger_processing": "true",
+        "auto_decompress": "false",
+        "entry_hash": "H1",
+    }
+    assert call["files"]["file"][0] == "x.archive.json"
+    assert call["timeout"] == api_calls.REQUEST_TIMEOUT
+
+
+def test_put_raw_file_for_a_backup_never_overwrites_and_never_reprocesses(monkeypatch):
+    from perotf_utils import api_calls
+
+    calls = _record_put(monkeypatch)
+    api_calls.put_raw_file(
+        "https://e.test/api",
+        "tok",
+        "UP1",
+        "",
+        ".x.bak",
+        b"{}",
+        "text/plain",
+        overwrite=False,
+        trigger_processing=False,
+    )
+    (call,) = calls
+    assert call["url"] == "https://e.test/api/uploads/UP1/raw/"
+    assert call["params"]["overwrite_if_exists"] == "false"
+    assert call["params"]["trigger_processing"] == "false"
+    assert "entry_hash" not in call["params"]
+
+
+def test_put_raw_file_reports_nomads_refusals_as_conflicts(monkeypatch):
+    import pytest
+    import requests
+
+    from perotf_utils import api_calls
+
+    _record_put(monkeypatch, _Reply(409, text="The provided hash did not match the current file."))
+    with pytest.raises(api_calls.UploadConflictError, match="hash did not match"):
+        api_calls.put_raw_file("u", "t", "UP1", "", "x.archive.json", b"", "application/json")
+
+    _record_put(monkeypatch, _Reply(400, text="The provided path already exists and ..."))
+    with pytest.raises(api_calls.UploadConflictError):
+        api_calls.put_raw_file("u", "t", "UP1", "", ".x.bak", b"", "text/plain", overwrite=False)
+
+    _record_put(monkeypatch, _Reply(500, text="boom"))
+    with pytest.raises(requests.HTTPError):
+        api_calls.put_raw_file("u", "t", "UP1", "", "x.archive.json", b"", "application/json")
+
+
+def test_put_raw_file_refuses_path_tricks_before_any_request(monkeypatch):
+    import pytest
+
+    from perotf_utils import api_calls
+
+    calls = _record_put(monkeypatch)
+    for folder, name in [
+        ("../other", "x"),
+        ("a/../../b", "x"),
+        ("", "../x"),
+        ("", "a/b"),
+        ("", ""),
+    ]:
+        with pytest.raises(ValueError):
+            api_calls.put_raw_file("u", "t", "UP1", folder, name, b"", "text/plain")
+    assert not calls
+
+
+def test_wait_for_upload_returns_the_final_status_or_none_on_timeout(monkeypatch):
+    from perotf_utils import api_calls
+
+    states = iter(
+        [{"process_running": True}, {"process_running": False, "process_status": "SUCCESS"}]
+    )
+    monkeypatch.setattr(api_calls, "get_upload", lambda url, token, upload_id: next(states))
+    monkeypatch.setattr(api_calls.time, "sleep", lambda s: None)
+    assert api_calls.wait_for_upload("u", "t", "UP1", timeout=10, poll_interval=1) == "SUCCESS"
+
+    monkeypatch.setattr(
+        api_calls, "get_upload", lambda url, token, upload_id: {"process_running": True}
+    )
+    assert api_calls.wait_for_upload("u", "t", "UP1", timeout=3, poll_interval=1) is None
+
+
+def test_list_raw_folder_lists_files_only_and_tolerates_a_missing_folder(monkeypatch):
+    from perotf_utils import api_calls
+
+    pages = {
+        1: [{"name": f"f{i}", "is_file": True} for i in range(2)]
+        + [{"name": "d", "is_file": False}],
+        2: [{"name": ".log", "is_file": True}],
+    }
+    seen = []
+
+    def fake_get(url, params, headers, timeout):
+        seen.append((url, params["page"]))
+        return _Reply(payload={"directory_metadata": {"content": pages[params["page"]]}})
+
+    monkeypatch.setattr(api_calls.requests, "get", fake_get)
+    names = api_calls.list_raw_folder(
+        "https://e.test/api", "tok", "UP1", "entry_auditor_backups", 3
+    )
+    assert names == ["f0", "f1", ".log"]
+    assert seen[0][0] == "https://e.test/api/uploads/UP1/rawdir/entry_auditor_backups"
+
+    monkeypatch.setattr(api_calls.requests, "get", lambda *a, **k: _Reply(404))
+    assert api_calls.list_raw_folder("u", "t", "UP1", "missing") == []
+
+
+def test_get_entry_hashes_asks_for_the_hash_of_exactly_these_entries(monkeypatch):
+    from perotf_utils import api_calls
+
+    seen = {}
+
+    def fake_query_all(url, token, endpoint, query):
+        seen.update(endpoint=endpoint, query=query)
+        return [{"entry_id": "E1", "entry_hash": "H1"}, {"entry_id": "E2", "entry_hash": "H2"}]
+
+    monkeypatch.setattr(api_calls, "query_all", fake_query_all)
+    assert api_calls.get_entry_hashes("u", "t", ["E1", "E2"]) == {"E1": "H1", "E2": "H2"}
+    assert seen["endpoint"] == "entries/query"
+    assert seen["query"]["query"] == {"entry_id:any": ["E1", "E2"]}
+    assert api_calls.get_entry_hashes("u", "t", []) == {}

@@ -4,6 +4,7 @@ GUI layouts and main application class
 Assembles widgets into layouts and contains all application logic
 """
 
+import html
 import warnings
 
 import config
@@ -16,6 +17,8 @@ from gui_components import GUIComponents
 from IPython.display import display
 from plot_manager import PlotManager
 from utils import debug_print
+
+from perotf_utils.downloads import start_download
 
 warnings.filterwarnings("ignore", message="Using UFloat objects with std_dev==0")
 
@@ -1909,10 +1912,7 @@ class PLAnalysisApp:
         try:
             debug_print("Exporting results", "APP")
 
-            import base64
             from datetime import datetime
-
-            from IPython.display import HTML, display
 
             # Create filename
             filename = f"pl_fitting_results_{datetime.now().strftime(config.TIMESTAMP_FORMAT)}.xlsx"
@@ -1933,46 +1933,14 @@ class PLAnalysisApp:
             excel_buffer.seek(0)
             excel_data = excel_buffer.read()
 
-            # Encode to base64
-            b64 = base64.b64encode(excel_data).decode()
-
-            # Create download link with JavaScript
-            js_code = f"""
-            var link = document.createElement('a');
-            link.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}';
-            link.download = '{filename}';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            """
-
-            with self.widgets["export_output"]:
-                self.widgets["export_output"].clear_output()
-                print("✅ Results prepared for download!")
-                print(f"📊 File: {filename}")
-                print()
-
-                # Display download button
-                download_button_html = f"""
-                <button onclick="{js_code}" style="
-                    background-color: #28a745;
-                    color: white;
-                    padding: 10px 20px;
-                    border: none;
-                    border-radius: 5px;
-                    cursor: pointer;
-                    font-size: 14px;
-                    font-weight: bold;
-                ">
-                    📥 Download {filename}
-                </button>
-                """
-
-                display(HTML(download_button_html))
-                print()
-                print(
-                    "💡 Click the button above to download. If it doesn't work automatically, the download should start shortly."
-                )
+            # The file goes straight to the browser (perotf_utils.downloads)
+            start_download(
+                self.widgets["export_output"],
+                excel_data,
+                filename,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                note=f"<p>✅ Download of {html.escape(filename)} started.</p>",
+            )
 
             debug_print(f"Results prepared for download: {filename}", "APP")
 
