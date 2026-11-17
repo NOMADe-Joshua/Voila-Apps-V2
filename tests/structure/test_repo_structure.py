@@ -96,6 +96,15 @@ LOG_CALL = re.compile(r"^\s*(?:access_token\.)?log_notebook_usage\(")
 
 
 @pytest.mark.parametrize("notebook", NOTEBOOKS, ids=_rel)
+def test_notebook_is_stored_without_outputs(notebook):
+    """Saved outputs are what NOMAD's file preview shows: a local run's warnings and widget
+    reprs ("VBox(children=...") look like errors there, and they can hold local paths."""
+    cells = json.loads(notebook.read_text(encoding="utf-8"))["cells"]
+    run = [i for i, c in enumerate(cells) if c.get("outputs") or c.get("execution_count")]
+    assert not run, f"{_rel(notebook)} has outputs in cells {run}: clear them before committing"
+
+
+@pytest.mark.parametrize("notebook", NOTEBOOKS, ids=_rel)
 def test_notebook_logs_its_usage(notebook):
     """Every app start is written to the usage log (perotf_utils.access_token)."""
     calls = [

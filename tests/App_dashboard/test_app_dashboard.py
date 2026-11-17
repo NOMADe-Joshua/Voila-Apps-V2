@@ -5,6 +5,7 @@ import os
 from perotf_utils.config import NORTH_ENDPOINT, URL_BASE
 
 TEST_USER = "test-user"
+ADMIN = "admin-user"
 REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 APPS_DIR = os.path.join(REPO_ROOT, "apps")
 
@@ -158,21 +159,44 @@ def _visible_names(dm, user):
 
 
 def test_usage_log_card_is_shown_to_admins_only(dm, monkeypatch):
-    monkeypatch.setattr(dm, "ADMIN_USERS", ("nomade",))
+    monkeypatch.setattr(dm, "ADMIN_USERS", (ADMIN,))
 
-    assert "Usage Log" in _visible_names(dm, "nomade")
+    assert "Usage Log" in _visible_names(dm, ADMIN)
     assert "Usage Log" not in _visible_names(dm, TEST_USER)
     assert "Usage Log" not in _visible_names(dm, "")  # NOMAD_CLIENT_USER unset
 
 
 def test_a_category_with_only_hidden_cards_disappears(dm, monkeypatch):
-    monkeypatch.setattr(dm, "ADMIN_USERS", ("nomade",))
+    monkeypatch.setattr(dm, "ADMIN_USERS", (ADMIN,))
 
-    assert "Administration" in dm.visible_categories("nomade")
+    assert "Administration" in dm.visible_categories(ADMIN)
     assert "Administration" not in dm.visible_categories(TEST_USER)
     # Everything that is not admin-only stays visible to everyone.
     public = {e.name for es in dm.CATEGORIES.values() for e in es if not e.admin_only}
     assert _visible_names(dm, TEST_USER) == public
+
+
+def test_only_the_admin_users_see_the_administration_group(dm, monkeypatch):
+    monkeypatch.setattr(dm, "ADMIN_USERS", (ADMIN, "second-admin"))
+    admin_apps = {e.folder for e in dm.CATEGORIES[dm.ADMIN_CATEGORY]}
+    assert {"log_view", "Reprocess_Uploads", "Group_Management", "Samples_Dashboard"} <= admin_apps
+    for user in (ADMIN, "second-admin"):
+        assert [e.folder for e in dm.visible_categories(user)[dm.ADMIN_CATEGORY]] == [
+            e.folder for e in dm.CATEGORIES[dm.ADMIN_CATEGORY]
+        ]
+    for user in (TEST_USER, "", ADMIN.upper(), "second-admin2"):
+        assert dm.ADMIN_CATEGORY not in dm.visible_categories(user)
+        visible = {e.folder for es in dm.visible_categories(user).values() for e in es}
+        assert not admin_apps & visible
+
+
+def test_a_card_added_to_administration_without_the_flag_stays_hidden(dm, monkeypatch):
+    monkeypatch.setattr(dm, "ADMIN_USERS", (ADMIN,))
+    forgotten = dm.AppEntry("New_Admin_Tool", "x.ipynb", "New Admin Tool", "", "fa-cog")
+    admin_cards = [*dm.CATEGORIES[dm.ADMIN_CATEGORY], forgotten]
+    monkeypatch.setattr(dm, "CATEGORIES", {**dm.CATEGORIES, dm.ADMIN_CATEGORY: admin_cards})
+    assert "New Admin Tool" in _visible_names(dm, ADMIN)
+    assert "New Admin Tool" not in _visible_names(dm, TEST_USER)
 
 
 def test_deployment_can_hide_apps_by_folder_or_card_name(dm, monkeypatch):

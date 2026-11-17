@@ -115,12 +115,12 @@ ENTRY_TYPE_FAMILIES = {
     "pl_imaging": ["peroTF_PLImaging"],
 }
 
-# NOMAD usernames (NOMAD_CLIENT_USER) that see admin-only apps such as the Usage Log.
-# Comma-separated override, e.g. PEROTF_ADMIN_USERS="nomade,someone.else".
+# NOMAD usernames (NOMAD_CLIENT_USER) that see the dashboard's Administration group (Usage Log,
+# Reprocess Uploads, Group Management, Samples Dashboard). Comma-separated, set per Oasis as
+# PEROTF_ADMIN_USERS in the gitignored oasis_local_config.py, so the account names never land
+# in the repo. Without it nobody is an admin and the Administration group stays hidden.
 ADMIN_USERS = tuple(
-    name.strip()
-    for name in os.environ.get("PEROTF_ADMIN_USERS", "nomade").split(",")
-    if name.strip()
+    name.strip() for name in os.environ.get("PEROTF_ADMIN_USERS", "").split(",") if name.strip()
 )
 
 # First segment of every sample lab id (Nomad ID) this lab writes, e.g.

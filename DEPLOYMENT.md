@@ -79,7 +79,28 @@ plain HTTP, hence both spellings. These exports last for that terminal session
 only, and they do not carry into the Voila kernels that run the apps. That is
 what `oasis_local_config.py` (step 3) is for.
 
-## 3. Create `oasis_local_config.py` (only if you need overrides)
+## 2b. Who can open it: what NORTH mounts
+
+A NORTH tool (Voila, Jupyter) only sees the uploads it mounted when it started
+(nomad-FAIR `routers/north.py`, `start_tool`, checked in v2.0.1):
+
+- only uploads the account is **main author or co-author** of, directly or via a
+  co-author group. Sharing as **reviewer** (read access) is not enough;
+- only **unpublished** uploads. Once the upload is published, no tool mounts it;
+- the list is fixed when the tool starts. After the upload was shared with an
+  account, that account has to **stop the tool once** and launch it again.
+
+The mount folder is `uploads/<slugified upload name>-<upload id>/`
+(`uploads/<upload id>/` for an upload without a name); `perotf_utils.north`
+reads the path from the working directory, so the name does not matter.
+
+What it looks like when the upload is not mounted: *Launch* on a file of the
+upload opens Voila's general file list instead of the notebook (NOMAD finds no
+mount folder for it), and the next click on a running tool says "The upload ...
+is not mounted. You need to stop the tool before relaunching it". Stopping and
+launching again ends in the same loop until the account is a co-author.
+
+## 3. Create `oasis_local_config.py` (admin accounts, and overrides if needed)
 
 Create it at the repo root of the upload, next to `bootstrap.py`. It is
 gitignored (same pattern as `secrets.py`) because it describes one deployment,
@@ -95,6 +116,9 @@ proxy is applied unless this file (or the container) sets one.
 PEROTF_URL_BASE = "https://nomad.example.org"
 PEROTF_API_ENDPOINT = "/nomad-oasis/api/v1"
 
+# --- Who sees the Administration group (NOMAD usernames) ---
+PEROTF_ADMIN_USERS = "admin.account,second.admin"
+
 # --- Outbound network (only if the container needs a proxy) ---
 HTTP_PROXY = "http://proxy.example.org:3128"
 HTTPS_PROXY = "http://proxy.example.org:3128"
@@ -109,9 +133,9 @@ NO_PROXY = "localhost,127.0.0.1"
 | `PEROTF_API_ENDPOINT` | the API is not at `/nomad-oasis/api/v1` | |
 | `PEROTF_GUI_ENDPOINT` | the GUI is not at `/nomad-oasis/gui` | Used for links to entries (JV app, Excel creator). |
 | `PEROTF_NORTH_ENDPOINT` | NORTH is not at `/nomad-oasis/north` | Used by the App Dashboard's links. |
-| `PEROTF_ADMIN_USERS` | someone other than `nomade` should see the Usage Log | Comma-separated NOMAD usernames; only they get the Usage Log card and its data. |
+| `PEROTF_ADMIN_USERS` | always, if anyone should see the Administration group | Comma-separated NOMAD usernames; only they see the Administration group of the dashboard (Usage Log, Reprocess Uploads, Group Management, Samples Dashboard) and the Usage Log data. There is no default (the account names are kept out of the repo): without it, nobody sees the group. |
 | `PEROTF_DASHBOARD_HIDE_APPS` | some apps should not appear on this Oasis's dashboard | Comma-separated app folder names or card names (case and spaces ignored). Hidden apps stay in the upload and can still be opened directly. |
-| `PEROTF_DASHBOARD_SHOW_APPS` | only a few apps should appear | Same format; when set, only these cards are shown (a hidden one stays hidden). Admin-only cards (Usage Log, Reprocess Uploads) stay hidden for non-admins either way. |
+| `PEROTF_DASHBOARD_SHOW_APPS` | only a few apps should appear | Same format; when set, only these cards are shown (a hidden one stays hidden). The Administration group stays hidden for non-admins either way. |
 | `PEROTF_DASHBOARD_GROUP_ORDER` | the dashboard groups should come in another order | Group names to list first, e.g. `Utilities & Calculators, Device Characterization`; the others follow in their usual order. |
 | `HTTP_PROXY`, `HTTPS_PROXY` | the container has no direct outbound route | Applied *before* `pip install shared/` runs, because pip may fetch `hatchling` from PyPI to build it. |
 | `NO_PROXY` | whenever a proxy is set | Hosts reached *without* the proxy. Defaults to `localhost,127.0.0.1`. Only add the Oasis host if a direct call to it actually works from the container. |

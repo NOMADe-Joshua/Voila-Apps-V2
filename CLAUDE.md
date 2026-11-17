@@ -92,7 +92,7 @@ Two app shapes exist after the migration from the old flat repo
 - **Modular apps** (JV-Analysis, Process_JV_Overview, EQE_Analysis,
   AbsPL_Analysis, UVVis_Analyzer, XRD_PF, DesignOfExperiments, Excel_creator,
   Reprocess_Uploads, SEM_crystal_counter, Global_analyzer, Entry_Auditor,
-  MPPT_Analysis):
+  MPPT_Analysis, Group_Management, Samples_Dashboard):
   `app.py` plus modules, and a notebook with exactly 3 code cells (bootstrap,
   `log_notebook_usage()`, start the app).
 - **Notebook apps** (all others): the analysis code still lives in the
@@ -385,11 +385,15 @@ side.
   `shared/perotf_utils/notebook_usage.log` inside the upload; the log contains
   user names and is gitignored. `apps/log_view` (dashboard card "Usage Log" under
   Administration) and `shared/utils.ipynb` read it from there. The card and the
-  data are admin-only: `perotf_utils.config.ADMIN_USERS` (default `nomade`,
-  override `PEROTF_ADMIN_USERS`) is compared with `NOMAD_CLIENT_USER`; the
-  dashboard hides `AppEntry(admin_only=True)` cards for everyone else
+  data are admin-only: `perotf_utils.config.ADMIN_USERS` (from `PEROTF_ADMIN_USERS`,
+  set per Oasis in the gitignored `oasis_local_config.py`; empty by default, so the
+  account names never land in the repo: user decision 2026-11-16) is
+  compared with `NOMAD_CLIENT_USER`; the dashboard hides the whole Administration
+  group (`data_manager.ADMIN_CATEGORY`, whatever its cards' flags say) and other
+  `AppEntry(admin_only=True)` cards for everyone else
   (`data_manager.visible_categories`) and `log_view` checks again itself, since
-  the notebook URL still works. This is a display rule, not file access control:
+  the notebook URL still works. The other admin apps (Reprocess_Uploads,
+  Group_Management, Samples_Dashboard) rely on NOMAD's own permission checks. This is a display rule, not file access control:
   anyone with access to the upload can still open the log file itself.
   SEM_crystal_counter's *Save as reviewed* writes its training log next to it
   (`access_token.usage_log_dir() / "sem_training_log"`, gitignored; grain maps,
@@ -429,6 +433,24 @@ side.
   (`perotf_utils.upload_backups`, shared with Entry_Auditor), a hash re-check
   right before `edit_entry` (NOMAD's edit endpoint has no concurrency check) and
   a read-back; `apps/MPPT_Analysis/CLAUDE.md` lists what must not be weakened.
+- **Group_Management writes NOMAD user groups** (admin card, 2026-11-16; replaces
+  the group dashboard of the old admin scripts outside this repo, which broke with
+  NOMAD 1.4: GET login removed, member roles added). It writes `members_info`,
+  never the deprecated `members` (NOMAD's edit then looks the *editor* up as owner
+  and fails when the admin is not in the group, checked in nomad-FAIR v2.0.1),
+  re-reads the group before every write, logs the change before writing (no log
+  line, no write) to `group_changes.log` next to the usage log (gitignored, NOMAD
+  user ids and group names) and reads the group back. Its group and user requests
+  live in its own `data_manager` with `api_calls.REQUEST_TIMEOUT`, not in
+  `api_calls` (no other app needs them; move them there if one does).
+- **Samples_Dashboard keeps attribution overrides in a file** (admin card,
+  2026-11-16; replaces the samples dashboard of the old admin scripts, which
+  asked NOMAD once per upload and author and kept a local cache):
+  `sample_attribution_overrides.csv` next to the usage log (gitignored, upload ids
+  and names), same columns as the old `attribution_overrides.csv` so that file can
+  be imported. Saving keeps a `.bak` and refuses when the file changed since it was
+  loaded. It reads `main_author` from one `entries/query` of the sample entry type
+  (owner `admin`, falling back to `visible`) and writes nothing to NOMAD.
 - **`bootstrap.py` installs every app's modules as top-level modules** into
   site-packages (`packages = ["."]`: `data_manager.py`, `app.py`, ... of the
   last installed app, also in the dev `.venv`). An app's own folder comes first

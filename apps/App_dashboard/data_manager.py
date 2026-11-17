@@ -169,8 +169,30 @@ CATEGORIES: dict[str, list[AppEntry]] = {
             "fa-redo",
             admin_only=True,
         ),
+        AppEntry(
+            "Group_Management",
+            "group_management.ipynb",
+            "Group Management",
+            "NOMAD user groups: who is in which group, add or remove members, create and "
+            "delete groups; every change is checked first and logged.",
+            "fa-users",
+            admin_only=True,
+        ),
+        AppEntry(
+            "Samples_Dashboard",
+            "samples_dashboard.ipynb",
+            "Samples Dashboard",
+            "How many samples each person uploaded, and when; uploads can be credited to "
+            "someone other than their NOMAD author.",
+            "fa-vials",
+            admin_only=True,
+        ),
     ],
 }
+
+ADMIN_CATEGORY = "Administration"
+"""Shown to ADMIN_USERS only, whatever its cards' admin_only flags say, so a card added to it
+later cannot show up for everyone by mistake."""
 
 
 def is_admin(user: str) -> bool:
@@ -256,17 +278,19 @@ def select_categories(
 
 
 def visible_categories(user: str) -> dict[str, list[AppEntry]]:
-    """CATEGORIES as this user should see them on this deployment: admin-only cards are
-    dropped for everyone else, the PEROTF_DASHBOARD_* selection is applied, and a category
-    left without cards disappears entirely.
+    """CATEGORIES as this user should see them on this deployment: the Administration group
+    and admin-only cards are dropped for everyone but ADMIN_USERS, the PEROTF_DASHBOARD_*
+    selection is applied, and a category left without cards disappears entirely.
 
-    This only hides the card; the app itself checks the user again, since anyone who
-    knows the notebook URL could still open it."""
+    This only hides the cards; anyone who knows a notebook URL can still open it. log_view
+    therefore checks the user itself; Reprocess Uploads, Group Management and the Samples
+    Dashboard rely on NOMAD, which refuses what the signed-in account may not do."""
     admin = is_admin(user)
     selected = select_categories(
         {
             category: [entry for entry in entries if admin or not entry.admin_only]
             for category, entries in CATEGORIES.items()
+            if admin or category != ADMIN_CATEGORY
         },
         hide=parse_name_list(os.environ.get(HIDE_APPS_ENV)),
         show=parse_name_list(os.environ.get(SHOW_APPS_ENV)),

@@ -34,6 +34,8 @@ two repos (see `CONTRIBUTING.md`).
 | Excel Creator | `Excel_creator` | Experiment planning workbooks for NOMAD uploads |
 | Entry Auditor | `Entry_Auditor` | Inconsistent values across a batch's entries, corrected in NOMAD with backups |
 | Usage Log | `log_view` | Who started which app when, from the usage log every app writes |
+| Group Management | `Group_Management` | Admin: NOMAD user groups, add and remove members, create and delete groups (checked, logged) |
+| Samples Dashboard | `Samples_Dashboard` | Admin: samples per author and over time, with attribution overrides |
 | Design of Experiments | `DesignOfExperiments` | DoE planning and sampling |
 | UV-Vis Simulator | `UVVis_Simulator` | Thin-film optics from a refractive index library |
 

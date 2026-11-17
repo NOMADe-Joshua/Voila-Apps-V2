@@ -218,3 +218,8 @@ graphify-out/20*/
 
 # Written at runtime by apps/SEM_crystal_counter ("Save as reviewed"): grain maps and user names
 shared/perotf_utils/sem_training_log/
+
+# Written at runtime by the admin apps: Group_Management's change log (user ids, group names)
+# and Samples_Dashboard's attribution overrides (with their .bak/.tmp copies)
+shared/perotf_utils/group_changes.log
+shared/perotf_utils/sample_attribution_overrides.csv*

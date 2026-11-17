@@ -53,9 +53,11 @@ def test_environment_overrides_the_server(monkeypatch):
 
 
 def test_admin_users_default_and_override(monkeypatch):
-    assert "nomade" in config.ADMIN_USERS
-    monkeypatch.setenv("PEROTF_ADMIN_USERS", " alice , bob ,")
     try:
+        monkeypatch.delenv("PEROTF_ADMIN_USERS", raising=False)
+        # No names in the repo: without oasis_local_config.py nobody is an admin.
+        assert importlib.reload(config).ADMIN_USERS == ()
+        monkeypatch.setenv("PEROTF_ADMIN_USERS", " alice , bob ,")
         assert importlib.reload(config).ADMIN_USERS == ("alice", "bob")
     finally:
         monkeypatch.undo()
