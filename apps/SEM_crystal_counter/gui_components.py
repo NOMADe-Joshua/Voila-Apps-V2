@@ -70,7 +70,7 @@ class UploadPanel:
         self.widget = widgets.VBox(
             [
                 widgets.HTML(
-                    "<p>Zeiss SEM TIFFs with the pixel size in their metadata. The sample is "
+                    "<p>SEM TIFFs (Zeiss or Thermo Fisher) with the pixel size in their metadata. The sample is "
                     "taken from the file name. A file named for NOMAD belongs to the part "
                     "before the first dot, as in NOMAD: "
                     "<code>KIT_P1_20260101_1_0_3.top.sem.tif</code> belongs to "
@@ -171,7 +171,12 @@ class AnalysisPanel:
                 return
             ipydisplay(widgets.HTML("<h4>Images</h4>"))
             ipydisplay(_readable(images, IMAGE_COLUMNS))
-            unreliable = images[images.get("reliable", True) == False]  # noqa: E712
+            # No "reliable" column (e.g. only images without a summary yet) means none is flagged;
+            # .get() would return a plain bool there, and images[False] is a column lookup.
+            if "reliable" in images.columns:
+                unreliable = images[images["reliable"].eq(False)]
+            else:
+                unreliable = images.iloc[0:0]
             if len(unreliable):
                 ipydisplay(
                     widgets.HTML(

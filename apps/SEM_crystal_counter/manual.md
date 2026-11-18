@@ -15,9 +15,10 @@ corrected image as training data. The app only reads from NOMAD; it writes nothi
 
 ## Data it needs
 
-- **Top-view or cross-section SEM images as Zeiss TIFFs.** The pixel size is read from the TIFF metadata
-  (`Image Pixel Size`), so there is no scale bar to measure. The info banner below the image is
-  removed automatically. An image without a pixel size cannot be analysed.
+- **Top-view or cross-section SEM images as Zeiss or Thermo Fisher (FEI) TIFFs.** The pixel size
+  is read from the TIFF metadata (Zeiss: `Image Pixel Size`; Thermo Fisher: `PixelWidth`), so
+  there is no scale bar to measure. The info banner or data bar below the image is removed
+  automatically. An image without a pixel size cannot be analysed.
 - **From NOMAD:** the SEM entries of the samples in the selected batches. NOMAD creates one
   for every TIFF uploaded with a name like `<sample>.sem.tif` or `<sample>.<notes>.sem.tif`.
   Every image file listed in an entry is downloaded.
@@ -207,7 +208,8 @@ image matters, check it in the review tab and correct it, or use click mode.
 
 - In the Excel file, text from NOMAD that starts with `=` is stored as text, so Excel shows it
   instead of running it as a formula.
-- The pixel size must be in the TIFF metadata (Zeiss SmartSEM format).
+- The pixel size must be in the TIFF metadata (Zeiss SmartSEM or Thermo Fisher/FEI format).
+  The detection was tuned on Zeiss images; results on Thermo Fisher images are not checked yet.
 - Loading many images keeps them all in memory (about 10 MB per image). Remove images you no
   longer need with *Remove all images*.
 - Uploaded files are grouped into samples by their name: `cs_S12_01.tif` belongs to

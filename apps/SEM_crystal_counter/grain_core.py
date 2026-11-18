@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 
 _PIXEL_SIZE_RE = re.compile(r"Image Pixel Size = ([0-9.]+) ?(pm|nm|\xb5m|um|mm)")
 _UNIT_TO_NM = {"pm": 1e-3, "nm": 1.0, "\xb5m": 1e3, "um": 1e3, "mm": 1e6}
+# Thermo Fisher / FEI SEMs (Apreo, Helios, ...): an INI-style text tag with the pixel width in
+# metres ([Scan] PixelWidth=4.13411e-09) and the image height without the data bar
+# ([Image] ResolutionY=1024; the data bar below it has no black frame line).
+_FEI_PIXEL_WIDTH_RE = re.compile(r"(?m)^PixelWidth=([0-9.]+(?:[eE][-+]?[0-9]+)?)\s*$")
+_FEI_RESOLUTION_Y_RE = re.compile(r"(?m)^ResolutionY=([0-9]+)\s*$")
 
 
 class Params(BaseModel):
@@ -112,9 +117,10 @@ def load_sem_tiff(source: str | Path | bytes, name: str | None = None) -> SemIma
     """Load an SEM TIFF from a path or raw bytes, crop the info banner, read the pixel size.
 
     Zeiss SmartSEM files carry `Image Pixel Size = <v> <unit>` in their CZ_SEM tag; we search the
-    raw bytes for it so that the same code works for uploads and NOMAD downloads. The banner is
-    found as the all-black frame line that separates it from the image; if there is none the
-    image is used uncropped.
+    raw bytes for it so that the same code works for uploads and NOMAD downloads. Thermo Fisher /
+    FEI files carry `PixelWidth=<metres>` instead. The Zeiss banner is found as the all-black
+    frame line that separates it from the image; a Thermo data bar is what lies below the
+    `ResolutionY` rows of its metadata. Without either the image is used uncropped.
     """
     if isinstance(source, (str, Path)):
         raw = Path(source).read_bytes()
@@ -126,22 +132,35 @@ def load_sem_tiff(source: str | Path | bytes, name: str | None = None) -> SemIma
 
     pixel_size_nm = None
     meta: dict = {}
-    match = _PIXEL_SIZE_RE.search(raw.decode("latin-1"))
+    text = raw.decode("latin-1")
+    match = _PIXEL_SIZE_RE.search(text)
+    fei = _FEI_PIXEL_WIDTH_RE.search(text)
     if match:
         pixel_size_nm = float(match.group(1)) * _UNIT_TO_NM[match.group(2)]
         meta["pixel_size_raw"] = match.group(0)
+    elif fei and float(fei.group(1)) > 0:
+        pixel_size_nm = float(fei.group(1)) * 1e9
+        meta["pixel_size_raw"] = fei.group(0).strip()
     else:
-        logger.warning("%s: no 'Image Pixel Size' in metadata; sizes stay in pixels", name)
+        logger.warning("%s: no pixel size in metadata; sizes stay in pixels", name)
 
     cut = _banner_start(image)
+    rows = _FEI_RESOLUTION_Y_RE.search(text)
+    if cut == image.shape[0] and rows and 0 < int(rows.group(1)) < image.shape[0]:
+        cut = int(rows.group(1))
     banner_rows = image.shape[0] - cut
     return SemImage(image[:cut].copy(), pixel_size_nm, name, banner_rows, meta)
 
 
 def _banner_start(image: np.ndarray) -> int:
-    """Row index where the info banner (incl. its black frame line) starts, or the height."""
+    """Row index where the info banner (incl. its black frame line) starts, or the height.
+
+    The frame line counts as black when at least 99% of its pixels are 0: on some Zeiss files
+    (white banner with black text) it holds a single stray grey pixel, and the banner then stayed
+    in the image, where its text boxes looked like drawn-in measurements. A row of a real SEM
+    image is never that dark."""
     height = image.shape[0]
-    black = np.flatnonzero(image.max(axis=1) == 0)
+    black = np.flatnonzero((image == 0).mean(axis=1) >= 0.99)
     black = black[black > height // 2]
     return int(black[0]) if black.size else height
 

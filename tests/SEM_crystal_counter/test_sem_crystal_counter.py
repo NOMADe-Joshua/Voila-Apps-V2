@@ -845,6 +845,71 @@ def test_analysis_panel_refresh_and_download(app_demo, monkeypatch):
     assert mime.endswith("spreadsheetml.sheet") and content[:2] == b"PK"
 
 
+def _thermo_tiff(height=110, image_rows=100, pixel_width="4.13411e-09"):
+    """A TIFF laid out like a Thermo Fisher Apreo file: INI text metadata, a data bar below
+    ResolutionY without a black frame line."""
+    from PIL import Image
+
+    pixels = np.full((height, 80), 120, dtype=np.uint8)
+    pixels[image_rows:] = 60  # data bar
+    text = (
+        "[User]\r\nUserText=Apreo\r\n\r\n[Image]\r\nResolutionX=80\r\n"
+        f"ResolutionY={image_rows}\r\n\r\n[Scan]\r\nPixelWidth={pixel_width}\r\n"
+        f"PixelHeight={pixel_width}\r\n"
+    )
+    buffer = io.BytesIO()
+    Image.fromarray(pixels).save(buffer, format="TIFF", tiffinfo={270: text})
+    return buffer.getvalue()
+
+
+def test_thermo_fisher_tiffs_give_pixel_size_and_lose_the_data_bar():
+    sem = gc.load_sem_tiff(_thermo_tiff(), "apreo.tif")
+    assert sem.pixel_size_nm == pytest.approx(4.13411)
+    assert sem.image.shape == (100, 80)
+    assert sem.banner_rows == 10
+    assert sem.meta["pixel_size_raw"] == "PixelWidth=4.13411e-09"
+
+
+def test_a_white_zeiss_banner_behind_an_almost_black_line_is_cut_off():
+    """Seen on KIT Zeiss files: a white banner with black text boxes below a frame line that
+    holds one stray grey pixel. It stayed in the image and its text boxes made the image count
+    as one with drawn-in measurements, so it was ignored."""
+    from PIL import Image
+
+    rng = np.random.default_rng(0)
+    pixels = rng.integers(60, 200, size=(200, 300), dtype=np.uint8)
+    pixels[150] = 0
+    pixels[150, 299] = 91  # the stray pixel
+    pixels[151:] = 255  # white banner
+    pixels[160:185, 20:80] = 0  # black text box ...
+    pixels[165:180, 30:70:4] = 255  # ... with white text
+    buffer = io.BytesIO()
+    Image.fromarray(pixels).save(
+        buffer, format="TIFF", tiffinfo={270: "CZ_SEM\r\nImage Pixel Size = 3.4 nm\r\n"}
+    )
+    sem = gc.load_sem_tiff(buffer.getvalue(), "zeiss.tif")
+    assert sem.image.shape == (150, 300)
+    assert sem.banner_rows == 50
+    assert not gc.has_measurement_overlay(sem.image)
+
+
+def test_a_thermo_tiff_without_pixel_width_has_no_pixel_size():
+    sem = gc.load_sem_tiff(_thermo_tiff(pixel_width=""), "apreo.tif")
+    assert sem.pixel_size_nm is None
+
+
+def test_analysis_panel_refresh_without_a_reliable_column(app_demo, monkeypatch):
+    """Images loaded but not analysed yet have no "reliable" column; refresh crashed on it
+    with KeyError: False (seen in NORTH, 2026-11-18)."""
+    shown = []
+    monkeypatch.setattr(gui, "ipydisplay", shown.append)
+    images = app_demo.image_table().drop(columns="reliable", errors="ignore")
+    monkeypatch.setattr(app_demo, "image_table", lambda: images)
+    gui.AnalysisPanel(app_demo).refresh()
+    assert any(getattr(x, "value", None) == "<h4>Images</h4>" for x in shown)
+    assert not any("fewer than" in str(getattr(x, "value", "")) for x in shown)
+
+
 def test_app_demo_load_end_to_end(monkeypatch):
     class FakeAuth:
         def __init__(self, url_base, api_endpoint):
