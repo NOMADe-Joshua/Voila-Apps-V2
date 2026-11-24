@@ -1127,3 +1127,193 @@ def test_refresh_closes_the_tables_and_figures_it_replaces(app_demo, panel_class
     panel.refresh()
     assert not first & set(live_widgets())  # closed
     assert all(set(ids) <= set(live_widgets()) for ids in panel._shown.values())
+
+
+# ==========================================================================================
+# Pixel size entered by hand, image downloads (raw / outlines, info bar, scale bar)
+# ==========================================================================================
+@pytest.fixture
+def no_metadata(make_tiff, voronoi_film):
+    """One image with a banner and the pixel size, one cropped copy without any metadata."""
+    film = voronoi_film[0]
+    with_banner = np.vstack(
+        [film, np.zeros((2, film.shape[1]), np.uint8), np.full((30, film.shape[1]), 255, np.uint8)]
+    )
+    manager = dm.SemDataManager()
+    manager.add_uploads(
+        [
+            ("VP1_01.tif", make_tiff(with_banner, b"Image Pixel Size = 5.0 nm")),
+            ("VP1_02.tif", make_tiff(film[:200, :300])),
+        ]
+    )
+    return manager
+
+
+def test_an_image_without_pixel_size_gets_one_by_hand(no_metadata):
+    manager = no_metadata
+    assert manager.missing_pixel_size() == ["VP1_02.tif"]
+    manager.analyse_all()
+    assert manager.entries["VP1_02.tif"].error == dm.NO_PIXEL_SIZE
+    with pytest.raises(ValueError, match="between"):
+        manager.set_pixel_size("VP1_02.tif", 0)
+    manager.set_pixel_size("VP1_02.tif", 5.0)
+    assert manager.missing_pixel_size() == []
+    assert manager.entries["VP1_02.tif"].error is None
+    manager.analyse_all()
+    table = manager.image_table().set_index("image")
+    assert table.loc["VP1_02.tif", "status"] == "analysed"
+    assert table.loc["VP1_02.tif", "pixel_size_source"] == "manual"
+    assert table.loc["VP1_01.tif", "pixel_size_source"] == "metadata"
+
+
+def test_changing_the_pixel_size_of_an_analysed_image_analyses_it_again(no_metadata):
+    manager = no_metadata
+    manager.set_pixel_size("VP1_02.tif", 5.0)
+    manager.analyse_all()
+    before = manager.entries["VP1_02.tif"].result.summary["mean_eq_diameter_nm"]
+    manager.set_pixel_size("VP1_02.tif", 10.0)
+    after = manager.entries["VP1_02.tif"].result.summary["mean_eq_diameter_nm"]
+    assert after == pytest.approx(2 * before, rel=0.05)
+
+
+def test_nice_scale_bar_lengths_and_labels():
+    assert pm.nice_length_nm(230) == 200
+    assert pm.nice_length_nm(420) == 500
+    assert pm.nice_length_nm(1600) == 2000
+    assert pm.length_label(500) == "500 nm"
+    assert pm.length_label(2000) == "2 µm"
+    assert pm.length_label(1000, micro="u") == "1 um"
+
+
+def test_scale_bar_sits_in_the_chosen_corner_and_has_the_right_length():
+    rgb = np.full((200, 400, 3), 128, np.uint8)
+    for corner in pm.SCALE_BAR_CORNERS:
+        out = pm.draw_scale_bar(rgb, nm_per_px=5.0, corner=corner)
+        assert (rgb == 128).all()  # the input is not changed
+        changed = np.argwhere((out != 128).any(axis=2))
+        left_half = changed[:, 1].mean() < 200
+        assert left_half == (corner == "bottom left")
+        assert changed[:, 0].min() > 100  # bottom half only
+        # 400 px * 5 nm / 5 = 400 nm -> 500 nm = 100 px of white bar
+        white_rows = (out == 255).all(axis=2).sum(axis=1)
+        assert white_rows.max() == 100
+
+
+def test_export_raw_and_outlines_with_info_bar_and_scale_bar(no_metadata):
+    manager = no_metadata
+    manager.analyse_all()
+    raw = manager.export_image("VP1_01.tif", "raw", size=1)
+    assert raw.shape == (300, 400, 3)
+    assert (raw[..., 0] == raw[..., 1]).all()  # grey
+    grains = manager.export_image("VP1_01.tif", "grains", with_banner=True, size=1)
+    assert grains.shape == (332, 400, 3)  # 30 banner rows + the 2-row frame line back
+    assert (grains[-30:] == 255).all()
+    assert not (grains[..., 0] == grains[..., 1]).all()  # coloured outlines
+    with_bar = manager.export_image("VP1_01.tif", "raw", scale_bar="bottom right", size=1)
+    assert (with_bar != raw).any()
+    assert manager.export_file_name("VP1_01.tif", "grains") == "VP1_01_grains.png"
+    assert manager.export_file_name("KIT_A_1.top.sem.tif", "raw") == "KIT_A_1.top_raw.png"
+
+
+def test_exports_refuse_what_they_cannot_do(no_metadata):
+    manager = no_metadata
+    with pytest.raises(ValueError, match="pixel size"):
+        manager.export_image("VP1_02.tif", "raw", scale_bar="bottom left")
+    with pytest.raises(ValueError, match="not analysed"):
+        manager.export_image("VP1_02.tif", "grains")
+    assert manager.export_image("VP1_02.tif", "raw", with_banner=True, size=1).shape == (
+        200,
+        300,
+        3,
+    )
+
+
+def test_zip_of_all_images_lists_what_was_left_out(no_metadata):
+    import zipfile
+
+    manager = no_metadata
+    manager.analyse_all()
+    content, skipped = manager.export_images_zip("raw", scale_bar="bottom left")
+    names = zipfile.ZipFile(io.BytesIO(content)).namelist()
+    assert names == ["VP1_01_raw.png", "not_included.txt"]
+    assert len(skipped) == 1 and "VP1_02.tif" in skipped[0]
+
+
+def test_analysis_panel_offers_the_pixel_size_box_and_review_downloads(no_metadata, monkeypatch):
+    monkeypatch.setattr(gui, "ipydisplay", lambda *_a, **_k: None)
+    panel = gui.AnalysisPanel(no_metadata)
+    panel.refresh()
+    assert panel._px_box.layout.display == ""
+    assert panel._px_names.value == ("VP1_02.tif",)
+    panel._px_value.value = 5.0
+    panel._set_pixel_size()
+    assert panel._px_box.layout.display == "none"
+    assert no_metadata.entries["VP1_02.tif"].analysed
+
+    sent = []
+    monkeypatch.setattr(gui, "start_download", lambda *a, **k: sent.append((a, k)))
+    review = gui.ReviewPanel(no_metadata, on_changed=lambda: None)
+    review.refresh()
+    review._image.value = "VP1_01.tif"
+    review._dl_style.value = "grains"
+    review._dl_scale.value = "bottom left"
+    review._dl_banner.value = True
+    review._download_images(all_images=False)
+    (output, content, filename, mime), _ = sent[-1]
+    assert output is review._dl_out and filename == "VP1_01_grains.png"
+    assert mime == "image/png" and content[:4] == b"\x89PNG"
+    review._download_images(all_images=True)
+    (_out, content, filename, mime), _ = sent[-1]
+    assert filename.startswith("sem_images_grains_") and content[:2] == b"PK"
+
+
+def test_the_review_lists_an_image_analysed_after_its_pixel_size_was_entered(
+    no_metadata, monkeypatch
+):
+    """Reported 2026-11-18: after 'Set pixel size and analyse' the image was analysed but not
+    offered in Review and correct, which was only refreshed after loading."""
+    monkeypatch.setattr(gui, "ipydisplay", lambda *_a, **_k: None)
+    analysis = gui.AnalysisPanel(no_metadata)
+    review = gui.ReviewPanel(no_metadata, on_changed=analysis.refresh)
+    analysis.on_analysed = review.refresh
+    analysis.analyse(only_new=True)
+    assert "VP1_02.tif" not in review._image.options
+    analysis.refresh()
+    analysis._px_value.value = 5.0
+    analysis._set_pixel_size()
+    assert "VP1_02.tif" in review._image.options
+
+
+def test_the_app_wires_the_review_to_every_analysis_run():
+    application = app_module.SEMApp()
+    assert application._analysis.on_analysed == application._review.refresh
+
+
+def test_the_scale_bar_has_end_ticks():
+    """|-----|: a white line with an upright tick at each end (asked for 2026-11-19)."""
+    rgb = np.full((300, 600, 3), 128, np.uint8)
+    out = pm.draw_scale_bar(rgb, nm_per_px=5.0, corner="bottom left")
+    white = (out == 255).all(axis=2)
+    cols = np.flatnonzero(white.sum(axis=0) > 0)
+    rows_per_col = white.sum(axis=0)
+    # 600 px * 5 nm / 5 = 600 nm -> 500 nm = 100 px from the outer edge of one tick to the other
+    bar_cols = cols[(rows_per_col[cols] >= 2)]
+    ends = rows_per_col[[bar_cols.min(), bar_cols.max()]]
+    middle = rows_per_col[(bar_cols.min() + bar_cols.max()) // 2]
+    assert ends.min() > 2 * middle  # the ticks stand higher than the line is thick
+
+
+def test_bigger_exports_enlarge_pixels_and_keep_the_scale(no_metadata):
+    manager = no_metadata
+    one = manager.export_image("VP1_01.tif", "raw", with_banner=True, size=1)
+    two = manager.export_image("VP1_01.tif", "raw", with_banner=True, size=2)
+    assert two.shape == (2 * one.shape[0], 2 * one.shape[1], 3)
+    assert (two[::2, ::2] == one).all()  # every pixel a 2x2 block, nothing smoothed
+    with pytest.raises(ValueError, match="scale"):
+        manager.export_image("VP1_01.tif", "raw", size=3)
+    # the 500 nm bar of a 400 px image at 5 nm/px is 100 px; at 2x it is 200 px
+    bar1 = manager.export_image("VP1_01.tif", "raw", scale_bar="bottom left", size=1)
+    bar2 = manager.export_image("VP1_01.tif", "raw", scale_bar="bottom left", size=2)
+    widest1 = (bar1 == 255).all(axis=2).sum(axis=1).max()
+    widest2 = (bar2 == 255).all(axis=2).sum(axis=1).max()
+    assert (widest1, widest2) == (100, 200)

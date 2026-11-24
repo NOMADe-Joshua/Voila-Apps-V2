@@ -111,6 +111,7 @@ class SemImage:
     name: str
     banner_rows: int = 0
     meta: dict = field(default_factory=dict)
+    banner: np.ndarray | None = None  # the cut-off info banner / data bar, for image exports
 
 
 def load_sem_tiff(source: str | Path | bytes, name: str | None = None) -> SemImage:
@@ -149,7 +150,8 @@ def load_sem_tiff(source: str | Path | bytes, name: str | None = None) -> SemIma
     if cut == image.shape[0] and rows and 0 < int(rows.group(1)) < image.shape[0]:
         cut = int(rows.group(1))
     banner_rows = image.shape[0] - cut
-    return SemImage(image[:cut].copy(), pixel_size_nm, name, banner_rows, meta)
+    banner = image[cut:].copy() if banner_rows else None
+    return SemImage(image[:cut].copy(), pixel_size_nm, name, banner_rows, meta, banner)
 
 
 def _banner_start(image: np.ndarray) -> int:

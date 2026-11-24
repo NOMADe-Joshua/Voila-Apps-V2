@@ -350,29 +350,26 @@ PROCESSES = {
             },
             "Tool/GB name": {"test": "Evaporator 1", "path": ["location"]},
             "Organic": {"test": True},
-            "Base pressure [bar]": {
+            "Base pressure [mbar]": {
                 "test": 1e-6,
                 "paths": [
                     ["organic_evaporation", 0, "pressure"],
                     ["inorganic_evaporation", 0, "pressure"],
                 ],
-                "unit_verified": False,
             },
-            "Pressure start [bar]": {
+            "Pressure start [mbar]": {
                 "test": 5e-6,
                 "paths": [
                     ["organic_evaporation", 0, "pressure_start"],
                     ["inorganic_evaporation", 0, "pressure_start"],
                 ],
-                "unit_verified": False,
             },
-            "Pressure end [bar]": {
+            "Pressure end [mbar]": {
                 "test": 3e-6,
                 "paths": [
                     ["organic_evaporation", 0, "pressure_end"],
                     ["inorganic_evaporation", 0, "pressure_end"],
                 ],
-                "unit_verified": False,
             },
             "Source temperature start[°C]": {
                 "test": 150,
@@ -448,22 +445,19 @@ PROCESSES = {
                     "config_key": "materials",
                 },
                 {
-                    "excel_key": "Base pressure {n} [bar]",
+                    "excel_key": "Base pressure {n} [mbar]",
                     "test": lambda n: 1e-6,
                     "path": ["perovskite_evaporation", "{i}", "pressure"],
-                    "unit_verified": False,
                 },
                 {
-                    "excel_key": "Pressure start {n} [bar]",
+                    "excel_key": "Pressure start {n} [mbar]",
                     "test": lambda n: 5e-6,
                     "path": ["perovskite_evaporation", "{i}", "pressure_start"],
-                    "unit_verified": False,
                 },
                 {
-                    "excel_key": "Pressure end {n} [bar]",
+                    "excel_key": "Pressure end {n} [mbar]",
                     "test": lambda n: 3e-6,
                     "path": ["perovskite_evaporation", "{i}", "pressure_end"],
-                    "unit_verified": False,
                 },
                 {
                     "excel_key": "Source temperature start {n}[°C]",
@@ -524,9 +518,9 @@ PROCESSES = {
         "indexed": {
             "materials": [
                 {"excel_key": "Material name {n}", "test": lambda n: "PbI2"},
-                {"excel_key": "Base pressure {n} [bar]", "test": lambda n: 1e-6},
-                {"excel_key": "Pressure start {n} [bar]", "test": lambda n: 5e-6},
-                {"excel_key": "Pressure end {n} [bar]", "test": lambda n: 3e-6},
+                {"excel_key": "Base pressure {n} [mbar]", "test": lambda n: 1e-6},
+                {"excel_key": "Pressure start {n} [mbar]", "test": lambda n: 5e-6},
+                {"excel_key": "Pressure end {n} [mbar]", "test": lambda n: 3e-6},
                 {"excel_key": "Source temperature start {n}[°C]", "test": lambda n: 110 + n},
                 {"excel_key": "Source temperature end {n}[°C]", "test": lambda n: 120 + n},
                 {"excel_key": "Substrate temperature {n} [°C]", "test": lambda n: 25},

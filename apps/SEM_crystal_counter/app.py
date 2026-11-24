@@ -55,6 +55,7 @@ class SEMApp:
         self._cross = gui.CrossSectionPanel(self._dm)
         self._analysis = gui.AnalysisPanel(self._dm, on_refresh=self._cross.refresh)
         self._review = gui.ReviewPanel(self._dm, on_changed=self._analysis.refresh)
+        self._analysis.on_analysed = self._review.refresh
         self._main = widgets.Tab(
             children=[self._analysis.widget, self._cross.widget, self._review.widget]
         )
@@ -128,8 +129,7 @@ class SEMApp:
                 f"Added {added} {what}; analysing them now.", output_widget=self._load_out
             )
         self._main.selected_index = 0
-        self._analysis.analyse(only_new=True)
-        self._review.refresh()
+        self._analysis.analyse(only_new=True)  # refreshes the review list too
 
     def _on_clear(self, _b) -> None:
         self._dm.clear()

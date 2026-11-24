@@ -18,7 +18,8 @@ corrected image as training data. The app only reads from NOMAD; it writes nothi
 - **Top-view or cross-section SEM images as Zeiss or Thermo Fisher (FEI) TIFFs.** The pixel size
   is read from the TIFF metadata (Zeiss: `Image Pixel Size`; Thermo Fisher: `PixelWidth`), so
   there is no scale bar to measure. The info banner or data bar below the image is removed
-  automatically. An image without a pixel size cannot be analysed.
+  automatically. An image without a pixel size (usually a cropped or re-saved copy: image
+  editors drop the metadata) waits until you enter its pixel size by hand (see step 2).
 - **From NOMAD:** the SEM entries of the samples in the selected batches. NOMAD creates one
   for every TIFF uploaded with a name like `<sample>.sem.tif` or `<sample>.<notes>.sem.tif`.
   Every image file listed in an entry is downloaded.
@@ -66,6 +67,13 @@ separately.
      (every parameter used, for reproducibility). All are ticked by default.
    - *Preset* and *Re-analyse all with this preset*: force smooth or striped for every image.
      Normally leave it on automatic.
+   - **Images without a pixel size:** a yellow box above the tables lists them. Select the
+     images, enter the *Pixel size (nm per pixel)* and press *Set pixel size and analyse*.
+     The value comes from the original file of the microscope, or from a scale bar in the
+     image: its length in nm divided by its length in pixels (measured e.g. in ImageJ). The
+     *Images* table shows where each pixel size comes from (*metadata* or *manual*), and
+     everything in nm uses it: grain sizes, thicknesses and the scale bar of downloaded
+     images. Entering a new value for an analysed image analyses it again.
 3. **Cross-sections tab.**
    - *Cross-sections*: one row per image: the film thickness (median over the image columns,
      and the 10th and 90th percentiles: 80% of the film width lies between them), the RMS
@@ -130,6 +138,22 @@ separately.
      - *Merge threshold*: higher merges more (removes false borders such as stripes inside
        grains).
      - *Boundary threshold*: lower gives fewer grains, higher gives more.
+   - **Download images** (fold-out below the detection settings): PNG files of the current
+     image (*Download this image*) or of all images in one ZIP (*Download all images*).
+     - *Image*: *Raw image* (the SEM image as loaded) or *With grain outlines* (the outlines
+       as shown, green and orange, holes tinted red, film top and bottom of cross-sections).
+     - *Scale bar*: none, bottom left or bottom right. A classic bar |—| (white line with
+       an upright tick at each end) on a black box, about a fifth of the image width long
+       from tick to tick and rounded to 1, 2 or 5 x 10ⁿ nm, with its length written above
+       it. It is computed from the image's pixel size, from the metadata or entered by
+       hand; an image without one gets no scale bar.
+     - *Size*: original pixels, 2x (the default) or 4x. Every SEM pixel becomes a 2 x 2 or
+       4 x 4 block, so nothing is smoothed or invented; the scale bar and its text are drawn
+       at the larger size and stay sharp when the image is shown big.
+     - *Put the info bar of the SEM software back below the image*: the bar is cut off for
+       the analysis and added back unchanged (images that had none stay as they are).
+     The ZIP leaves out what is not possible (outlines of images not analysed, a scale bar
+     without pixel size) and lists it in `not_included.txt`.
    - *Save as reviewed* stores the image's final grain map, your clicks or edits, and the
      settings in the training log (see below). Please also save images that needed no
      correction: confirmed results are useful too.
@@ -208,7 +232,8 @@ image matters, check it in the review tab and correct it, or use click mode.
 
 - In the Excel file, text from NOMAD that starts with `=` is stored as text, so Excel shows it
   instead of running it as a formula.
-- The pixel size must be in the TIFF metadata (Zeiss SmartSEM or Thermo Fisher/FEI format).
+- The pixel size is read from Zeiss SmartSEM or Thermo Fisher/FEI metadata; for any other
+  file it has to be entered by hand.
   The detection was tuned on Zeiss images; results on Thermo Fisher images are not checked yet.
 - Loading many images keeps them all in memory (about 10 MB per image). Remove images you no
   longer need with *Remove all images*.

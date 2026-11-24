@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import io
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -186,3 +187,129 @@ def scalebar_script(container_class: str, nm_per_px: float) -> str:
   install(40);
 }})();
 """
+
+
+# ---------------------------------------------------------------------------
+# Image exports (PNG files): no plotly, plain pixels
+# ---------------------------------------------------------------------------
+SCALE_BAR_CORNERS = ("bottom left", "bottom right")
+TOP_COLOR, BOTTOM_COLOR = (255, 60, 60), (40, 210, 255)  # film top/bottom, as cross_section.overlay
+
+
+def draw_rows(rgb: np.ndarray, rows: np.ndarray, color) -> None:
+    """A line given as one row per column, 2 px thick (as in cross_section.overlay)."""
+    xs = np.arange(rgb.shape[1])
+    for dy in (0, 1):
+        rgb[np.clip(rows + dy, 0, rgb.shape[0] - 1), xs] = color
+
+
+def nice_length_nm(target_nm: float) -> float:
+    """target rounded to 1, 2 or 5 x 10^n nm (the same rule as the scale bar on screen)."""
+    power = 10 ** np.floor(np.log10(target_nm))
+    m = target_nm / power
+    return float((1 if m < 1.5 else 2 if m < 3.5 else 5 if m < 7.5 else 10) * power)
+
+
+def length_label(nm: float, micro: str = "µ") -> str:
+    """'500 nm', '1 µm', '20 µm' (micro: the sign to use, 'u' when the font has no µ)."""
+    if nm >= 1000:
+        return f"{nm / 1000:g} {micro}m"
+    return f"{nm:g} nm"
+
+
+def _font(size: int):
+    """(font, micro sign). DejaVu Sans from matplotlib has the µ; Pillow's own font does not,
+    so without matplotlib the label says 'um'."""
+    from PIL import ImageFont
+
+    try:
+        import matplotlib
+
+        path = Path(matplotlib.get_data_path()) / "fonts" / "ttf" / "DejaVuSans.ttf"
+        return ImageFont.truetype(str(path), size), "µ"
+    except (ImportError, OSError):
+        pass
+    try:
+        return ImageFont.load_default(size=size), "u"
+    except TypeError:  # Pillow < 10.1: one small bitmap font only
+        return ImageFont.load_default(), "u"
+
+
+def draw_scale_bar(rgb: np.ndarray, nm_per_px: float, corner: str = "bottom left") -> np.ndarray:
+    """A copy of rgb with a classic scale bar |-----| in one bottom corner: a white line with an
+    upright tick at each end, about a fifth of the image width long (outer edge of one tick to
+    outer edge of the other), rounded to 1, 2 or 5 x 10^n nm, its length written above it, on a
+    black box so it reads on bright and dark films. nm_per_px is the pixel size of rgb (from the
+    TIFF metadata or entered by hand, divided by any upscaling)."""
+    from PIL import ImageDraw
+
+    if corner not in SCALE_BAR_CORNERS:
+        raise ValueError(f"corner must be one of {SCALE_BAR_CORNERS}")
+    height, width = rgb.shape[:2]
+    nm = nice_length_nm(width * nm_per_px / 5)
+    bar_px = max(int(round(nm / nm_per_px)), 3)
+    font, micro = _font(max(12, height // 28))
+    label = length_label(nm, micro)
+    image = Image.fromarray(rgb.astype(np.uint8))
+    draw = ImageDraw.Draw(image)
+    left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
+    text_w, text_h = right - left, bottom - top
+    pad = max(4, height // 100)
+    line = max(2, round(height / 300))  # line and tick width
+    tick = max(6, 5 * line)  # tick height
+    box_w = max(bar_px, text_w) + 2 * pad
+    box_h = text_h + tick + 3 * pad
+    x0 = pad if corner == "bottom left" else width - pad - box_w
+    y0 = height - pad - box_h
+    draw.rectangle([x0, y0, x0 + box_w, y0 + box_h], fill=(0, 0, 0))
+    draw.text((x0 + (box_w - text_w) // 2 - left, y0 + pad - top), label, font=font, fill="white")
+    bar_x0 = x0 + (box_w - bar_px) // 2
+    bar_x1 = bar_x0 + bar_px - 1
+    tick_y0 = y0 + 2 * pad + text_h
+    tick_y1 = tick_y0 + tick - 1
+    mid = (tick_y0 + tick_y1) // 2
+    white = (255, 255, 255)
+    draw.rectangle([bar_x0, mid - line // 2, bar_x1, mid - line // 2 + line - 1], fill=white)
+    draw.rectangle([bar_x0, tick_y0, bar_x0 + line - 1, tick_y1], fill=white)
+    draw.rectangle([bar_x1 - line + 1, tick_y0, bar_x1, tick_y1], fill=white)
+    return np.asarray(image).copy()
+
+
+EXPORT_SCALES = (1, 2, 4)
+"""Export sizes: each SEM pixel becomes an n x n block (no smoothing, so no detail is invented
+or blurred); the scale bar and its text are drawn afterwards at the larger size, so they are
+sharp."""
+
+
+def upscale(array: np.ndarray, factor: int) -> np.ndarray:
+    if factor == 1:
+        return array
+    return np.repeat(np.repeat(array, factor, axis=0), factor, axis=1)
+
+
+def png_bytes(rgb: np.ndarray) -> bytes:
+    buffer = io.BytesIO()
+    Image.fromarray(rgb.astype(np.uint8)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def compose_export(
+    image_rgb: np.ndarray,
+    nm_per_px: float | None,
+    banner: np.ndarray | None = None,
+    scale_bar: str | None = None,
+    scale: int = 1,
+) -> np.ndarray:
+    """The image as it is exported: enlarged by scale (see EXPORT_SCALES), an optional scale
+    bar in a bottom corner of the image itself, then the SEM software's info banner put back
+    below it (enlarged the same way)."""
+    if scale not in EXPORT_SCALES:
+        raise ValueError(f"scale must be one of {EXPORT_SCALES}")
+    rgb = upscale(image_rgb, scale)
+    if scale_bar and nm_per_px:
+        rgb = draw_scale_bar(rgb, nm_per_px / scale, scale_bar)
+    if banner is not None and banner.size:
+        strip = banner if banner.ndim == 3 else np.repeat(banner[..., None], 3, axis=2)
+        strip = upscale(strip[:, : image_rgb.shape[1]].astype(np.uint8), scale)
+        rgb = np.vstack([rgb, strip])
+    return rgb

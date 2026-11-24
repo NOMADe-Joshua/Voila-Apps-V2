@@ -1,7 +1,7 @@
 # Deploying the app suite to a NOMAD Oasis
 
 By default the apps talk to the peroTF Oasis at KIT
-(`http://elnserver.lti.kit.edu`, set in `shared/perotf_utils/config.py`). That
+(`https://elnserver.lti.kit.edu`, set in `shared/perotf_utils/config.py`). That
 file is the only place the server address and the NOMAD entry type names
 appear. A different deployment changes none of the code: everything it needs
 lives in one gitignored file, `oasis_local_config.py`, read by `bootstrap.py`
@@ -192,7 +192,7 @@ The same variables apply. Export them in your shell instead of using
 `oasis_local_config.py`:
 
 ```bash
-export PEROTF_URL_BASE=http://elnserver.lti.kit.edu
+export PEROTF_URL_BASE=https://elnserver.lti.kit.edu
 export NOMAD_CLIENT_ACCESS_TOKEN=<your token>
 ```
 

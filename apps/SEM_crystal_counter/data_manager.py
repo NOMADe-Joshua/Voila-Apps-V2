@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import re
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ import cross_section as cs
 import grain_core as gc
 import numpy as np
 import pandas as pd
+import plot_manager as pm
 import training_log
 
 from perotf_utils.access_token import usage_log_dir
@@ -53,6 +55,9 @@ PRESET_CHOICES = ("auto", *gc.PRESETS)
 TOP, CROSS = "top", "cross"  # image kinds
 KIND_NAMES = {TOP: "top view", CROSS: "cross-section"}
 OVERLAY_NOTE = "measurements drawn in by the SEM software (ignored by default)"
+NO_PIXEL_SIZE = "no pixel size in the TIFF metadata: enter it under Analysis"
+PIXEL_SIZE_RANGE_NM = (0.01, 10000.0)  # nm per pixel a value entered by hand must lie in
+EXPORT_STYLES = {"raw": "raw", "grains": "grains"}  # image export: the image alone / with outlines
 CROSS_SUMMARY_KEYS = (
     "thickness_median_nm",
     "thickness_mean_nm",
@@ -221,7 +226,7 @@ class SemDataManager:
         if entry.sem is None:
             return entry
         if entry.sem.pixel_size_nm is None:
-            entry.error = "no pixel size in the TIFF metadata"
+            entry.error = NO_PIXEL_SIZE
             return entry
         if entry.kind == CROSS:
             return self._analyse_cross(entry, preset)
@@ -307,6 +312,111 @@ class SemDataManager:
             # corrections must never reach into the vacuum or the layers below
             result = cs.restrict_to_film(result, self.film(entry.name), entry.thickness)
         return result, warnings
+
+    # ------------------------------------------------------------------
+    # Pixel size entered by hand
+    # ------------------------------------------------------------------
+    def missing_pixel_size(self) -> list[str]:
+        """Loaded images without a pixel size (cropped or exported files lose the metadata)."""
+        return [
+            e.name for e in self.entries.values() if e.sem is not None and not e.sem.pixel_size_nm
+        ]
+
+    def set_pixel_size(self, name: str, nm_per_px: float) -> SemEntry:
+        """Give an image its pixel size by hand (nm per pixel). Everything in nm (sizes,
+        thickness, the scale bar of exported images) is computed from it. An image analysed
+        before is analysed again; its corrections are kept (they are pixel positions)."""
+        entry = self.entries[name]
+        if entry.sem is None:
+            raise ValueError(f"{name} has no image")
+        low, high = PIXEL_SIZE_RANGE_NM
+        if not low <= float(nm_per_px) <= high:
+            raise ValueError(f"the pixel size must lie between {low} and {high} nm")
+        entry.sem.pixel_size_nm = float(nm_per_px)
+        entry.sem.meta["pixel_size_raw"] = f"entered by hand: {float(nm_per_px):g} nm"
+        entry.sem.meta["pixel_size_source"] = "manual"
+        if entry.error == NO_PIXEL_SIZE:
+            entry.error = None
+        if entry.analysed:
+            self.analyse(name, entry.preset)
+        else:
+            # the type check (top view or cross-section) may have needed the pixel size
+            entry.kind = CROSS if cs.is_cross_section(entry.sem) else TOP
+        return entry
+
+    # ------------------------------------------------------------------
+    # Image exports
+    # ------------------------------------------------------------------
+    def export_image(
+        self,
+        name: str,
+        style: str = "raw",
+        with_banner: bool = False,
+        scale_bar: str | None = None,
+        size: int = 2,
+    ) -> np.ndarray:
+        """The image as an RGB array for a PNG download, enlarged size times (each pixel an
+        n x n block, see plot_manager.EXPORT_SCALES; the scale bar is drawn at that size).
+
+        style "raw" is the image as loaded (banner cut off), "grains" adds the grain outlines as
+        shown in the review (green inside, orange at the border, holes tinted red, the film top
+        and bottom of cross-sections). with_banner puts the SEM software's info banner back
+        below the image; scale_bar ("bottom left"/"bottom right") draws a scale bar into that
+        corner of the image, from the image's pixel size (metadata or entered by hand)."""
+        entry = self.entries[name]
+        if entry.sem is None:
+            raise ValueError(f"{name} has no image")
+        if style not in EXPORT_STYLES:
+            raise ValueError(f"style must be one of {tuple(EXPORT_STYLES)}")
+        if style == "grains":
+            if not entry.analysed:
+                raise ValueError(f"{name} is not analysed yet: no grain outlines")
+            result, _ = self.final_result(name)
+            rgb = gc.overlay(result, show_outlines=True, region=self.film(name))
+            if entry.thickness is not None:
+                pm.draw_rows(rgb, entry.thickness.top, pm.TOP_COLOR)
+                pm.draw_rows(rgb, entry.thickness.bottom, pm.BOTTOM_COLOR)
+        else:
+            rgb = np.repeat(entry.sem.image[..., None], 3, axis=2)
+        if scale_bar and not entry.sem.pixel_size_nm:
+            raise ValueError(f"{name} has no pixel size: no scale bar possible")
+        return pm.compose_export(
+            rgb,
+            entry.sem.pixel_size_nm,
+            entry.sem.banner if with_banner else None,
+            scale_bar,
+            size,
+        )
+
+    def export_file_name(self, name: str, style: str) -> str:
+        stem = name
+        for suffix in (".tiff", ".tif", ".sem"):
+            stem = stem.removesuffix(suffix).removesuffix(suffix.upper())
+        return f"{stem}_{EXPORT_STYLES[style]}.png"
+
+    def export_images_zip(
+        self,
+        style: str = "raw",
+        with_banner: bool = False,
+        scale_bar: str | None = None,
+        size: int = 2,
+    ) -> tuple[bytes, list[str]]:
+        """Every image that can be exported this way, as PNGs in one ZIP, and a note per image
+        left out (not analysed for outlines, no pixel size for a scale bar)."""
+        skipped, buffer = [], io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for entry in self.entries.values():
+                if entry.sem is None:
+                    continue
+                try:
+                    rgb = self.export_image(entry.name, style, with_banner, scale_bar, size)
+                except ValueError as exc:
+                    skipped.append(str(exc))
+                    continue
+                archive.writestr(self.export_file_name(entry.name, style), pm.png_bytes(rgb))
+            if skipped:
+                archive.writestr("not_included.txt", "\n".join(skipped) + "\n")
+        return buffer.getvalue(), skipped
 
     def film(self, name: str) -> np.ndarray | None:
         """Film mask of a cross-section (None for top views)."""
@@ -453,6 +563,11 @@ class SemDataManager:
                 "source": entry.source,
                 "kind": KIND_NAMES[entry.kind],
                 "pixel_size_nm": entry.sem.pixel_size_nm if entry.sem else None,
+                "pixel_size_source": (
+                    entry.sem.meta.get("pixel_size_source", "metadata")
+                    if entry.sem and entry.sem.pixel_size_nm
+                    else ""
+                ),
                 "status": "ignored"
                 if entry.ignored
                 else entry.error or ("analysed" if entry.analysed else "not analysed"),

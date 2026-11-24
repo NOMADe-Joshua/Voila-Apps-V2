@@ -16,7 +16,15 @@ import ipywidgets as widgets
 import numpy as np
 import plot_manager as pm
 import plotly.graph_objects as go
-from data_manager import CROSS, HOLE, MEASUREMENT_TYPE, SHEETS, TOP, SemDataManager
+from data_manager import (
+    CROSS,
+    HOLE,
+    MEASUREMENT_TYPE,
+    PIXEL_SIZE_RANGE_NM,
+    SHEETS,
+    TOP,
+    SemDataManager,
+)
 from IPython.display import HTML
 from IPython.display import display as ipydisplay
 
@@ -70,7 +78,9 @@ class UploadPanel:
         self.widget = widgets.VBox(
             [
                 widgets.HTML(
-                    "<p>SEM TIFFs (Zeiss or Thermo Fisher) with the pixel size in their metadata. The sample is "
+                    "<p>SEM TIFFs (Zeiss or Thermo Fisher). The pixel size is read from their metadata; "
+                    "for a file without it (a cropped copy) you enter it under Results. The "
+                    "sample is "
                     "taken from the file name. A file named for NOMAD belongs to the part "
                     "before the first dot, as in NOMAD: "
                     "<code>KIT_P1_20260101_1_0_3.top.sem.tif</code> belongs to "
@@ -97,6 +107,9 @@ class AnalysisPanel:
     def __init__(self, dm: SemDataManager, on_refresh=None) -> None:
         self.dm = dm
         self._on_refresh = on_refresh  # other panels showing results (the cross-sections)
+        # called after every analysis run (the review lists only analysed images); not on
+        # refresh, which follows every correction and would reset the review's zoom
+        self.on_analysed = None
         self._preset = widgets.Dropdown(
             options=PRESET_OPTIONS,
             value="auto",
@@ -120,6 +133,32 @@ class AnalysisPanel:
             "Download results (Excel)", icon="download", min_width=False
         )
         self._download_btn.on_click(lambda _b: self._download_results())
+        # images without a pixel size in their metadata: enter it by hand
+        self._px_help = widgets.HTML()
+        self._px_names = widgets.SelectMultiple(rows=4, layout={"width": "460px"})
+        self._px_value = widgets.BoundedFloatText(
+            value=1.0,
+            min=PIXEL_SIZE_RANGE_NM[0],
+            max=PIXEL_SIZE_RANGE_NM[1],
+            step=0.001,
+            description="Pixel size (nm per pixel)",
+            style={"description_width": "initial"},
+            layout={"width": "300px"},
+        )
+        self._px_btn = WidgetFactory.create_button(
+            "Set pixel size and analyse", "primary", min_width=False
+        )
+        self._px_btn.on_click(lambda _b: self._set_pixel_size())
+        self._px_status = widgets.Output()
+        self._px_box = widgets.VBox(
+            [
+                self._px_help,
+                self._px_names,
+                widgets.HBox([self._px_value, self._px_btn]),
+                self._px_status,
+            ],
+            layout={"display": "none", "border": "1px solid #e0a800", "padding": "6px"},
+        )
         self._sheet_boxes = {
             sheet: widgets.Checkbox(
                 value=True, description=sheet, indent=False, layout={"width": "auto"}
@@ -131,6 +170,7 @@ class AnalysisPanel:
                 widgets.HBox([self._preset, self._analyse_btn, self._reanalyse_btn]),
                 widgets.HBox([self._progress, self._progress_label]),
                 self._status,
+                self._px_box,
                 self._tables,
                 self._plots,
                 widgets.HTML(
@@ -156,13 +196,50 @@ class AnalysisPanel:
         finally:
             self._analyse_btn.disabled = self._reanalyse_btn.disabled = False
         self.refresh()
+        if self.on_analysed is not None:
+            self.on_analysed()
 
     def _on_progress(self, i: int, n: int, name: str) -> None:
         self._progress.max = max(n, 1)
         self._progress.value = i
         self._progress_label.value = f"Analysing {i + 1} of {n}: {name}"
 
+    def _show_pixel_size_box(self) -> None:
+        missing = self.dm.missing_pixel_size()
+        self._px_box.layout.display = "" if missing else "none"
+        if not missing:
+            return
+        self._px_help.value = (
+            f"<p style='margin:0 0 4px 0'><b>{len(missing)} image(s) have no pixel size</b> in "
+            "their TIFF metadata (usually a cropped or re-saved copy; the original file from the "
+            "microscope has it). Without it nothing can be measured in nm. Select them, enter "
+            "the pixel size and press the button. From a scale bar: its length in nm divided "
+            "by its length in pixels (measured e.g. in ImageJ). Sizes, thicknesses and the "
+            "scale bar of downloaded images then use this value.</p>"
+        )
+        keep = set(self._px_names.value) & set(missing)
+        self._px_names.options = missing
+        self._px_names.value = tuple(n for n in missing if n in keep) or tuple(missing)
+
+    def _set_pixel_size(self) -> None:
+        names = list(self._px_names.value)
+        with self._px_status:
+            self._px_status.clear_output()
+        if not names:
+            ErrorHandler.log_error("Select at least one image.", output_widget=self._px_status)
+            return
+        try:
+            for name in names:
+                self.dm.set_pixel_size(name, self._px_value.value)
+        except Exception as exc:
+            ErrorHandler.log_error(
+                "Could not set the pixel size", exc, output_widget=self._px_status
+            )
+            return
+        self.analyse(only_new=True)
+
     def refresh(self) -> None:
+        self._show_pixel_size_box()
         images = self.dm.image_table()
         samples = self.dm.sample_table()
         with _replace_contents(self._tables, self._shown):
@@ -371,6 +448,67 @@ class ReviewPanel:
         )  # open: users look for the sliders
         self._settings.set_title(0, "Detection settings for this image")
 
+        # image downloads
+        self._dl_style = widgets.ToggleButtons(
+            options=[("Raw image", "raw"), ("With grain outlines", "grains")],
+            description="Image",
+            tooltips=[
+                "The SEM image as loaded, without the info bar of the SEM software.",
+                "The image with the grain outlines as shown above (green, orange, red holes).",
+            ],
+            style={"button_width": "170px"},
+        )
+        self._dl_banner = widgets.Checkbox(
+            value=False,
+            description="Put the info bar of the SEM software back below the image",
+            indent=False,
+            layout={"width": "auto"},
+        )
+        self._dl_scale = widgets.Dropdown(
+            options=[
+                ("no scale bar", None),
+                ("bottom left", "bottom left"),
+                ("bottom right", "bottom right"),
+            ],
+            description="Scale bar",
+            layout={"width": "260px"},
+        )
+        self._dl_size = widgets.Dropdown(
+            options=[
+                ("original pixels (1x)", 1),
+                ("2x (sharp scale bar and text)", 2),
+                ("4x (for posters)", 4),
+            ],
+            value=2,
+            description="Size",
+            tooltip="Every SEM pixel becomes a 2x2 or 4x4 block (nothing is smoothed or "
+            "invented); the scale bar and its text are drawn at that size, so they are sharp.",
+            layout={"width": "330px"},
+        )
+        self._dl_one_btn = WidgetFactory.create_button(
+            "Download this image (PNG)", "primary", icon="download", min_width=False
+        )
+        self._dl_all_btn = WidgetFactory.create_button(
+            "Download all images (ZIP)", icon="download", min_width=False
+        )
+        self._dl_one_btn.on_click(lambda _b: self._download_images(all_images=False))
+        self._dl_all_btn.on_click(lambda _b: self._download_images(all_images=True))
+        self._dl_note = widgets.HTML()
+        self._dl_out = widgets.Output()
+        downloads = widgets.VBox(
+            [
+                widgets.HTML(DOWNLOAD_HELP),
+                self._dl_style,
+                widgets.HBox([self._dl_scale, self._dl_size]),
+                self._dl_banner,
+                widgets.HBox([self._dl_one_btn, self._dl_all_btn]),
+                self._dl_note,
+                self._dl_out,
+            ]
+        )
+        self._downloads = widgets.Accordion(children=[downloads], selected_index=None)
+        self._downloads.set_title(0, "Download images")
+
         # review
         self._note = widgets.Text(placeholder="Note (optional)", layout={"width": "320px"})
         self._save_btn = WidgetFactory.create_button("Save as reviewed", "success")
@@ -408,6 +546,7 @@ class ReviewPanel:
                 self._ruler_info,
                 widgets.HTML(LEGEND_HTML),
                 self._settings,
+                self._downloads,
                 widgets.HBox([self._note, self._save_btn]),
                 widgets.HTML(TRAINING_NOTE),
                 self._messages,
@@ -443,8 +582,8 @@ class ReviewPanel:
             region=self.dm.film(name),
         )
         if entry.thickness is not None:
-            _draw_rows(rgb, entry.thickness.top, TOP_COLOR)
-            _draw_rows(rgb, entry.thickness.bottom, BOTTOM_COLOR)
+            pm.draw_rows(rgb, entry.thickness.top, TOP_COLOR)
+            pm.draw_rows(rgb, entry.thickness.bottom, BOTTOM_COLOR)
         if self._bottom_draft:
             points = sorted(self._bottom_draft, key=lambda p: p[1])
             for p0, p1 in zip(points, points[1:]):
@@ -517,6 +656,7 @@ class ReviewPanel:
             self._settings_status.value = (
                 "<i>This image uses its own settings.</i>" if entry.overrides else ""
             )
+            self._dl_note.value = _download_note(entry)
         self._set_actions()
         self.redraw(reset_view=True)
 
@@ -681,6 +821,32 @@ class ReviewPanel:
         self._settings_status.value = "Back to the preset settings."
         self._on_changed()
 
+    # -- image downloads ---------------------------------------------------------
+    def _download_images(self, all_images: bool) -> None:
+        style, banner, scale = self._dl_style.value, self._dl_banner.value, self._dl_scale.value
+        size = self._dl_size.value
+        stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        try:
+            if all_images:
+                content, skipped = self.dm.export_images_zip(style, banner, scale, size)
+                filename, mime = f"sem_images_{style}_{stamp}.zip", "application/zip"
+                note = (
+                    f"<p style='color:#a60'>{len(skipped)} image(s) left out, see "
+                    "<code>not_included.txt</code> in the ZIP.</p>"
+                    if skipped
+                    else ""
+                )
+            else:
+                name = self._image.value
+                if not name:
+                    raise ValueError("no image selected")
+                content = pm.png_bytes(self.dm.export_image(name, style, banner, scale, size))
+                filename, mime, note = self.dm.export_file_name(name, style), "image/png", ""
+        except Exception as exc:
+            ErrorHandler.log_error("Could not export the image", exc, output_widget=self._dl_out)
+            return
+        start_download(self._dl_out, content, filename, mime, note=note)
+
     # -- review ------------------------------------------------------------------
     def _save(self, _b) -> None:
         name = self._image.value
@@ -698,7 +864,7 @@ AUTO_ACTIONS = ["does nothing", "merges two grains", "cuts along a line"]
 CLICK_ACTIONS = ["adds a grain", "adds a hole", "removes a dot"]
 RULER = "measures a distance"
 BOTTOM = "draws the film bottom"
-TOP_COLOR, BOTTOM_COLOR = (255, 60, 60), (40, 210, 255)  # as cross_section.overlay
+TOP_COLOR, BOTTOM_COLOR = pm.TOP_COLOR, pm.BOTTOM_COLOR
 DRAFT_COLOR = (170, 90, 255)
 RULER_COLOR = (255, 235, 0)
 ACTION_HELP = {
@@ -740,6 +906,31 @@ LEGEND_HTML = (
     "double-click also counts as a click: <b>Undo</b> removes it. To move a zoomed image, pick "
     "the pan tool (crossed arrows, top right of the image).</p>"
 )
+DOWNLOAD_HELP = (
+    "<p style='margin:0 0 4px 0'>PNG files of the image shown above (or of all images): the "
+    "raw image or the image with the grain outlines. The scale bar is drawn into a bottom "
+    "corner of the image, about a fifth of its width long (rounded to 1, 2 or 5), from the "
+    "image's pixel size (TIFF metadata, or entered by hand under Analysis). The info bar the "
+    "SEM software adds below the image is cut off for the analysis; tick the box to put it "
+    "back unchanged.</p>"
+)
+
+
+def _download_note(entry) -> str:
+    """What the export options can do for this image."""
+    notes = []
+    px = entry.sem.pixel_size_nm
+    if not px:
+        notes.append("no pixel size, so no scale bar")
+    elif entry.sem.meta.get("pixel_size_source") == "manual":
+        notes.append(f"scale bar from the pixel size entered by hand ({px:g} nm)")
+    if entry.sem.banner is None:
+        notes.append("this image has no info bar to put back")
+    if not notes:
+        return ""
+    return f"<p style='font-size:90%;color:#555'>{'; '.join(notes)}.</p>"
+
+
 SETTINGS_HELP = (
     "<p>Change these only if the automatic grains are systematically wrong on this image; "
     "<b>Apply</b> re-analyses it (a few seconds per image).<br>"
@@ -825,13 +1016,6 @@ CROSS_HELP = (
     "<i>Review and correct</i> with <b>draws the film bottom</b>. <b>Grain width</b> is the "
     "horizontal, <b>height</b> the vertical extent of a grain.</p>"
 )
-
-
-def _draw_rows(rgb, rows, color) -> None:
-    """A line given as one row per column, 2 px thick (as in cross_section.overlay)."""
-    xs = np.arange(rgb.shape[1])
-    for dy in (0, 1):
-        rgb[np.clip(rows + dy, 0, rgb.shape[0] - 1), xs] = color
 
 
 def _ruler_html(points, nm_per_px: float) -> str:

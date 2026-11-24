@@ -17,7 +17,7 @@ then automatically queries the peroTF schema classes on this Oasis.
 import os
 
 # Server root, without a trailing slash.
-URL_BASE = os.environ.get("PEROTF_URL_BASE", "http://elnserver.lti.kit.edu")
+URL_BASE = os.environ.get("PEROTF_URL_BASE", "https://elnserver.lti.kit.edu")
 
 # REST API, appended to URL_BASE.
 API_ENDPOINT = os.environ.get("PEROTF_API_ENDPOINT", "/nomad-oasis/api/v1")

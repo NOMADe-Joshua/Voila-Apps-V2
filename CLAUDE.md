@@ -218,7 +218,10 @@ Verified against the backend sources listed below:
   and stores the magnitude (nomad-FAIR `metainfo/data_type.py`, `normalize`).
   Evaporation sources, for example, hold `thickness` in nm, `pressure`,
   `pressure_start` and `pressure_end` in mbar, `temparature` in °C and the
-  rates in angstrom/s, while the Excel columns say `[bar]`; the parser converts.
+  rates in angstrom/s. Excel_creator writes the evaporation pressure columns in
+  `[mbar]` since 1.3.0 (2026-11-19); older experiment Excels say `[bar]`. Both
+  parsers (nomad-baseclasses and nomad_perotf's `perotf_mapping`) read either
+  label with its own unit and convert.
 - **Unset quantities are left out of the JSON**, so the variations of one step
   often differ in which keys and how many list entries (e.g. evaporation
   sources) they have. `perotf_utils.process_handling.merge_step_data` therefore
