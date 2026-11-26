@@ -81,6 +81,10 @@ def _column(ws, header):
     return next(c.column for c in ws[2] if c.value == header)
 
 
+def header_labels_of(ws):
+    return [ws.cell(row=2, column=col).value for col in range(1, ws.max_column + 1)]
+
+
 def header_labels(mods, processes):
     wb = Workbook()
     mods["sheet_experiment"].add_experiment_sheet(
@@ -233,6 +237,63 @@ def test_the_catalog_lists_the_columns_the_sheet_writes(mods, process):
                 only_in_sheet,
                 only_in_catalog,
             )
+
+
+def _chemical_id_sheet(mods):
+    sequence = [
+        {"process": "Experiment Info"},
+        {"process": "Cleaning UV-Ozone", "config": {"solvents": 2}},
+        {"process": "Spin Coating", "config": {"solvents": 2, "solutes": 2, "antisolvent": True}},
+        {"process": "Dip Coating", "config": {"solvents": 1, "solutes": 1}},
+        {"process": "Evaporation"},
+        {"process": "Co-Evaporation", "config": {"materials": 2}},
+        {"process": "Close Space Sublimation", "config": {"materials": 2}},
+        {"process": "Sputtering"},
+        {"process": "ALD"},
+    ]
+    wb = Workbook()
+    mods["sheet_experiment"].add_experiment_sheet(wb, sequence, is_testing=False)
+    return wb
+
+
+def test_every_substance_is_followed_by_its_inventory_id_column(mods):
+    """nomad_perotf stores a '... chemical ID' column with the substance named in the column
+    right before it, under exactly these names."""
+    labels = header_labels_of(_chemical_id_sheet(mods).active)
+    pairs = [(labels[i - 1], label) for i, label in enumerate(labels) if "chemical ID" in label]
+    assert pairs == [
+        ("Solvent 1", "Solvent 1 chemical ID"),
+        ("Solvent 2", "Solvent 2 chemical ID"),
+        ("Solvent 1 name", "Solvent 1 chemical ID"),
+        ("Solvent 2 name", "Solvent 2 chemical ID"),
+        ("Solute 1 type", "Solute 1 chemical ID"),
+        ("Solute 2 type", "Solute 2 chemical ID"),
+        ("Anti solvent name", "Anti solvent chemical ID"),
+        ("Solvent 1 name", "Solvent 1 chemical ID"),
+        ("Solute 1 type", "Solute 1 chemical ID"),
+        ("Material name", "Material chemical ID"),
+        ("Material name 1", "Material chemical ID 1"),
+        ("Material name 2", "Material chemical ID 2"),
+        ("Source material name 1", "Source material chemical ID 1"),
+        ("Source material name 2", "Source material chemical ID 2"),
+        ("Material name", "Material chemical ID"),
+        ("Precursor 1", "Precursor 1 chemical ID"),
+        ("Precursor 2 (Oxidizer/Reducer)", "Precursor 2 chemical ID"),
+    ]
+
+
+def test_inventory_id_cells_are_text(mods):
+    """Excel would turn an ID such as 000123 typed into a General cell into the number 123."""
+    buffer = io.BytesIO()
+    _chemical_id_sheet(mods).save(buffer)
+    ws = load_workbook(buffer).active
+    last_row = mods["sheet_experiment"].NOMAD_ID_LAST_ROW
+    labels = header_labels_of(ws)
+    id_column = labels.index("Solvent 1 chemical ID") + 1
+    volume_column = labels.index("Solvent 1 volume [uL]") + 1
+    for row in (3, last_row):
+        assert ws.cell(row=row, column=id_column).number_format == "@"
+        assert ws.cell(row=row, column=volume_column).number_format == "General"
 
 
 def test_the_nomad_id_formula_is_written_to_every_data_row(mods):

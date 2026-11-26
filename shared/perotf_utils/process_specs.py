@@ -22,6 +22,9 @@ Two sources define what belongs in here, and the catalog must match both:
 2. The archive paths nomad_perotf's experiment parser (perotf_batch_parser.py) stores
    through the nomad-baseclasses map_<type> functions (helper/solar_cell_batch_mapping.py).
    Only add a path after reading the map_<type> function that writes it; never guess.
+   The "... chemical ID" columns (the inventory ID of a substance) are the exception
+   outside of solutions: nomad_perotf's perotf_mapping.py stores them (add_chemical_id),
+   in the chemical_id of the substance; for solvents and solutes map_solutions() does.
 
 Types the parser never turns into an archive step (Multijunction Info) or turns into a step
 of another type (Seq-Evaporation becomes a plain Evaporation) are listed too, so they can be
@@ -88,15 +91,20 @@ _COATING_SUFFIX_FIELDS = {
     "Notes": {"test": "Process notes"},
 }
 
-# map_solutions(): solvent names land in chemical_2.name. SolutionChemical.chemical_volume
-# is declared in ml while the column says uL, so the volume stays unit_verified False until
-# checked in the NOMAD GUI.
+# map_solutions(): solvent names land in chemical_2.name, the inventory ID in chemical_id of
+# the SolutionChemical. SolutionChemical.chemical_volume is declared in ml while the column
+# says uL, so the volume stays unit_verified False until checked in the NOMAD GUI.
 _COATING_SOLVENT_INDEXED = [
     {
         "excel_key": "Solvent {n} name",
         "test": lambda n: "DMF",
         "path": ["solution", 0, "solution_details", "solvent", "{i}", "chemical_2", "name"],
         "config_key": "solvents",
+    },
+    {
+        "excel_key": "Solvent {n} chemical ID",
+        "test": lambda n: "",
+        "path": ["solution", 0, "solution_details", "solvent", "{i}", "chemical_id"],
     },
     {
         "excel_key": "Solvent {n} volume [uL]",
@@ -117,6 +125,11 @@ _COATING_SOLUTE_INDEXED = [
             ["solution", 0, "solution_details", "solute", "{i}", "name"],
         ],
         "config_key": "solutes",
+    },
+    {
+        "excel_key": "Solute {n} chemical ID",
+        "test": lambda n: "",
+        "path": ["solution", 0, "solution_details", "solute", "{i}", "chemical_id"],
     },
     {
         "excel_key": "Solute {n} Concentration [mM]",
@@ -312,6 +325,10 @@ PROCESSES = {
                     "test": "Toluene",
                     "path": ["quenching", "anti_solvent_2", "name"],
                 },
+                "Anti solvent chemical ID": {
+                    "test": "",
+                    "path": ["quenching", "anti_solvent_2", "chemical_id"],
+                },
                 "Anti solvent volume [ml]": {
                     "test": 0.3,
                     "path": ["quenching", "anti_solvent_volume"],
@@ -344,6 +361,13 @@ PROCESSES = {
         # own.
         "fields": {
             "Material name": {"test": "PCBM", "path": ["layer", 0, "layer_material_name"]},
+            "Material chemical ID": {
+                "test": "",
+                "paths": [
+                    ["organic_evaporation", 0, "chemical_2", "chemical_id"],
+                    ["inorganic_evaporation", 0, "chemical_2", "chemical_id"],
+                ],
+            },
             "Layer type": {
                 "test": "Electron Transport Layer",
                 "path": ["layer", 0, "layer_type"],
@@ -445,6 +469,11 @@ PROCESSES = {
                     "config_key": "materials",
                 },
                 {
+                    "excel_key": "Material chemical ID {n}",
+                    "test": lambda n: "",
+                    "path": ["perovskite_evaporation", "{i}", "chemical_2", "chemical_id"],
+                },
+                {
                     "excel_key": "Base pressure {n} [mbar]",
                     "test": lambda n: 1e-6,
                     "path": ["perovskite_evaporation", "{i}", "pressure"],
@@ -518,6 +547,7 @@ PROCESSES = {
         "indexed": {
             "materials": [
                 {"excel_key": "Material name {n}", "test": lambda n: "PbI2"},
+                {"excel_key": "Material chemical ID {n}", "test": lambda n: ""},
                 {"excel_key": "Base pressure {n} [mbar]", "test": lambda n: 1e-6},
                 {"excel_key": "Pressure start {n} [mbar]", "test": lambda n: 5e-6},
                 {"excel_key": "Pressure end {n} [mbar]", "test": lambda n: 3e-6},
@@ -535,6 +565,10 @@ PROCESSES = {
         # map_sputtering()
         "fields": {
             "Material name": {"test": "ITO", "path": ["layer", 0, "layer_material_name"]},
+            "Material chemical ID": {
+                "test": "",
+                "path": ["processes", 0, "target_2", "chemical_id"],
+            },
             "Layer type": {"test": "Electrode", "path": ["layer", 0, "layer_type"]},
             "Tool/GB name": {"test": "Sputter tool", "path": ["location"]},
             "Gas": {"test": "Argon", "path": ["processes", 0, "gas_2", "name"]},
@@ -602,6 +636,10 @@ PROCESSES = {
             "Time [s]": {"test": 1800, "path": ["properties", "time"], "unit_verified": False},
             "Number of cycles": {"test": 250, "path": ["properties", "number_of_cycles"]},
             "Precursor 1": {"test": "TMA", "path": ["properties", "material", "material", "name"]},
+            "Precursor 1 chemical ID": {
+                "test": "",
+                "path": ["properties", "material", "material", "chemical_id"],
+            },
             "Pulse duration 1 [s]": {
                 "test": 0.2,
                 "path": ["properties", "material", "pulse_duration"],
@@ -620,6 +658,10 @@ PROCESSES = {
             "Precursor 2 (Oxidizer/Reducer)": {
                 "test": "H2O",
                 "path": ["properties", "oxidizer_reducer", "material", "name"],
+            },
+            "Precursor 2 chemical ID": {
+                "test": "",
+                "path": ["properties", "oxidizer_reducer", "material", "chemical_id"],
             },
             "Pulse duration 2 [s]": {
                 "test": 0.1,
@@ -664,6 +706,11 @@ PROCESSES = {
                     "config_key": "solvents",
                 },
                 {
+                    "excel_key": "Solvent {n} chemical ID",
+                    "test": lambda n: "",
+                    "path": ["cleaning", "{i}", "solvent_2", "chemical_id"],
+                },
+                {
                     "excel_key": "Time {n} [s]",
                     "test": lambda n: 900,
                     "path": ["cleaning", "{i}", "time"],
@@ -695,6 +742,11 @@ PROCESSES = {
                     "test": lambda n: "Hellmanex",
                     "path": ["cleaning", "{i}", "name"],
                     "config_key": "solvents",
+                },
+                {
+                    "excel_key": "Solvent {n} chemical ID",
+                    "test": lambda n: "",
+                    "path": ["cleaning", "{i}", "solvent_2", "chemical_id"],
                 },
                 {
                     "excel_key": "Time {n} [s]",
@@ -953,6 +1005,17 @@ PROCESSES = {
                         "name",
                     ],
                     "config_key": "materials",
+                },
+                {
+                    "excel_key": "Source material chemical ID {n}",
+                    "test": lambda n: "",
+                    "path": [
+                        "process",
+                        "source_material_mixture",
+                        "{i}",
+                        "source_material",
+                        "chemical_id",
+                    ],
                 },
                 {
                     "excel_key": "Source material ratio {n}",

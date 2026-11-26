@@ -55,6 +55,28 @@ Three sheets:
 
 Do not add, rename or move columns: the upload only reads the columns the app created.
 
+## Inventory IDs of the substances
+
+Every column that names a substance is followed by a column for the ID the substance has in
+the inventory system:
+
+| Column with the substance | Column with its ID |
+|---|---|
+| *Solvent n name*, *Solute n type* (coatings) | *Solvent n chemical ID*, *Solute n chemical ID* |
+| *Anti solvent name* (spin coating) | *Anti solvent chemical ID* |
+| *Solvent n* (cleaning) | *Solvent n chemical ID* |
+| *Material name* (evaporation, sputtering) | *Material chemical ID* |
+| *Material name n* (co- and sequential evaporation) | *Material chemical ID n* |
+| *Source material name n* (close space sublimation) | *Source material chemical ID n* |
+| *Precursor 1*, *Precursor 2 (Oxidizer/Reducer)* (ALD) | *Precursor 1 chemical ID*, *Precursor 2 chemical ID* |
+
+The ID is optional: leave the cell empty when the substance has none. NOMAD stores it with the
+substance in the process step (field `chemical_id`), where it can be read over the NOMAD API.
+The ID columns are formatted as text, so an ID such as `000123` keeps its leading zeros. When
+you paste IDs from another file, paste them as values only, otherwise Excel takes over the
+format of the source cells. Gases (sputter, quenching, plasma and carrier gas) and the
+substrate have no ID column.
+
 ## Prefill from NOMAD (optional)
 
 If the samples of the batch already exist in NOMAD (for example from an earlier Excel of the

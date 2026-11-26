@@ -12,6 +12,10 @@ LAB_ID_PREFIX = "KIT_"
 # Last row that gets the Nomad ID formula (rows 3 and up are the data rows).
 NOMAD_ID_LAST_ROW = 500
 
+# Every substance column ("Solvent 1 name", "Material name 2", "Precursor 1", ...) is followed
+# by one for its ID in the inventory system; nomad_perotf stores that ID with the substance.
+CHEMICAL_ID = "chemical ID"
+
 TABLEAU_COLORS = {
     "tab:blue": "1F77B4",
     "tab:orange": "FF7F0E",
@@ -114,6 +118,7 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False, samples=N
                 steps.extend(
                     [
                         make_label(f"Solvent {i}", ""),
+                        make_label(f"Solvent {i} chemical ID", ""),
                         make_label(f"Time {i} [s]", 900),
                         make_label(f"Temperature {i} [°C]", 40),
                     ]
@@ -143,6 +148,7 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False, samples=N
                 steps.extend(
                     [
                         make_label(f"Solvent {i} name", ""),
+                        make_label(f"Solvent {i} chemical ID", ""),
                         make_label(f"Solvent {i} volume [uL]", ""),
                     ]
                 )
@@ -152,6 +158,7 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False, samples=N
                 steps.extend(
                     [
                         make_label(f"Solute {i} type", ""),
+                        make_label(f"Solute {i} chemical ID", ""),
                         make_label(f"Solute {i} Concentration [mM]", ""),
                     ]
                 )
@@ -184,6 +191,7 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False, samples=N
                     steps.extend(
                         [
                             make_label("Anti solvent name", ""),
+                            make_label("Anti solvent chemical ID", ""),
                             make_label("Anti solvent volume [ml]", ""),
                             make_label("Anti solvent dropping time [s]", ""),
                             make_label("Anti solvent dropping speed [uL/s]", ""),
@@ -328,6 +336,7 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False, samples=N
         if process_name == "Evaporation":
             steps = [
                 make_label("Material name", ""),
+                make_label("Material chemical ID", ""),
                 make_label("Layer type", ""),
                 make_label("Tool/GB name", ""),
                 make_label("Organic", ""),
@@ -354,6 +363,7 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False, samples=N
                 steps.extend(
                     [
                         make_label(f"Material name {i}", ""),
+                        make_label(f"Material chemical ID {i}", ""),
                         make_label(f"Base pressure {i} [mbar]", ""),
                         make_label(f"Pressure start {i} [mbar]", ""),
                         make_label(f"Pressure end {i} [mbar]", ""),
@@ -377,7 +387,12 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False, samples=N
             ]
 
             for i in range(1, config.get("materials", 1) + 1):
-                steps.append(make_label(f"Source material name {i}", ""))
+                steps.extend(
+                    [
+                        make_label(f"Source material name {i}", ""),
+                        make_label(f"Source material chemical ID {i}", ""),
+                    ]
+                )
 
             if config.get("materials", 1) > 1:
                 for i in range(1, config.get("materials", 1) + 1):
@@ -437,6 +452,7 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False, samples=N
         if process_name == "Sputtering":
             steps = [
                 make_label("Material name", ""),
+                make_label("Material chemical ID", ""),
                 make_label("Layer type", ""),
                 make_label("Tool/GB name", ""),
                 make_label("Gas", ""),
@@ -464,10 +480,12 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False, samples=N
                 make_label("Time [s]", ""),
                 make_label("Number of cycles", ""),
                 make_label("Precursor 1", ""),
+                make_label("Precursor 1 chemical ID", ""),
                 make_label("Pulse duration 1 [s]", ""),
                 make_label("Manifold temperature 1 [°C]", ""),
                 make_label("Bottle temperature 1 [°C]", ""),
                 make_label("Precursor 2 (Oxidizer/Reducer)", ""),
+                make_label("Precursor 2 chemical ID", ""),
                 make_label("Pulse duration 2 [s]", ""),
                 make_label("Manifold temperature 2 [°C]", ""),
             ]
@@ -531,6 +549,10 @@ def add_experiment_sheet(workbook, process_sequence, is_testing=False, samples=N
             cell.fill = PatternFill(start_color=row2_color, end_color=row2_color, fill_type="solid")
             if process_name == "Experiment Info":
                 info_columns.setdefault(step_label, col_index)
+            if CHEMICAL_ID in step_label:
+                # Text, so Excel keeps an ID such as 000123 instead of turning it into 123
+                for row in range(3, NOMAD_ID_LAST_ROW + 1):
+                    ws.cell(row=row, column=col_index).number_format = "@"
             if is_testing:
                 ws.cell(row=3, column=col_index, value=test_val)
         start_col = end_col + 1
